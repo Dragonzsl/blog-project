@@ -21,7 +21,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回和 30 天回收站。阶段一仍在继续实现搜索、SEO 与完整备份恢复。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站，以及中英文搜索、SEO、RSS、Sitemap、robots 和永久重定向。阶段一目前只剩完整备份恢复与恢复演练。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -37,6 +37,8 @@ curl --insecure https://localhost/readyz
 ```bash
 docker compose down
 ```
+
+`BLOG_SITE_ADDRESS` 同时作为 canonical、Open Graph、RSS、Sitemap 和 robots 的公开基址，正式部署前必须设置为访问者实际使用的地址。内容编辑器可单独覆盖 SEO 标题和描述；留空时自动回退到内容标题、摘要与站点名。
 
 开发机已安装 Go 1.26 和 C 编译器时，可运行：
 
