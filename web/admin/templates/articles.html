@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>文章 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=3">
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <a class="wordmark" href="/admin/"><span aria-hidden="true">✦</span> {{.SiteName}}</a>
+    <nav aria-label="内容管理"><a class="nav-link active" href="/admin/articles">文章</a><a class="button-link small" href="/admin/articles/new">新建文章</a></nav>
+  </header>
+  <main class="content-shell">
+    <div class="page-heading"><div><p class="eyebrow">内容</p><h1>文章</h1><p class="muted">从想法到公开链接，每次正式保存都会留下版本。</p></div><a class="button-link" href="/admin/articles/new">写新文章 <span aria-hidden="true">→</span></a></div>
+    {{if .Articles}}
+    <section class="article-table" aria-label="文章列表">
+      {{range .Articles}}
+      <article class="article-row">
+        <div><span class="status-label {{if .Published}}published{{end}}">{{.Status}}</span><h2><a href="/admin/articles/{{.ID}}/edit">{{.Title}}</a></h2><p>/posts/{{.Slug}}</p></div>
+        <div class="row-meta"><time>{{.UpdatedAt}}</time><a href="/admin/articles/{{.ID}}/preview">预览</a><a href="/admin/articles/{{.ID}}/edit">编辑</a></div>
+      </article>
+      {{end}}
+    </section>
+    {{else}}
+    <section class="empty-state"><span aria-hidden="true">✎</span><h2>纸面还是空的。</h2><p>从一篇草稿开始，不满意时随时修改。</p><a class="button-link" href="/admin/articles/new">创建第一篇文章 <span aria-hidden="true">→</span></a></section>
+    {{end}}
+  </main>
+</body>
+</html>

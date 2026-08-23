@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{{.Article.Title}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=3">
+</head>
+<body class="reading-page">
+  <header class="public-header"><a class="wordmark" href="/"><span aria-hidden="true">✦</span> Personal Press</a></header>
+  <main class="reading-shell">
+    <header><p class="eyebrow">Article</p><h1>{{.Article.Title}}</h1>{{if .Article.Excerpt}}<p class="article-deck">{{.Article.Excerpt}}</p>{{end}}{{if .Article.PublishedAt}}<time class="article-time">{{.Article.PublishedAt}}</time>{{end}}</header>
+    <pre class="markdown-source">{{.Article.BodyMarkdown}}</pre>
+  </main>
+</body>
+</html>

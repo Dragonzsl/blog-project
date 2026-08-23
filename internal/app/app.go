@@ -17,6 +17,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
+	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
 type App struct {
@@ -46,6 +47,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	publishingService := publishing.NewService(publishing.NewRepository(db))
+	publishingHTTP, err := publishing.NewHTTPHandler(publishingService, identityHTTP, identityService, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -55,7 +62,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	health := operations.NewHealthHandler(db, time.Now(), buildinfo.Version)
 	router.Get("/livez", health.Live)
 	router.Get("/readyz", health.Ready)
-	router.Mount("/admin", identityHTTP.Routes())
+	publishingHTTP.RegisterPublic(router)
+	router.Route("/admin", func(admin chi.Router) {
+		admin.Use(identityHTTP.SecurityHeaders)
+		identityHTTP.RegisterPublic(admin)
+		admin.Group(func(protected chi.Router) {
+			protected.Use(identityHTTP.RequireSession)
+			identityHTTP.RegisterProtected(protected)
+			publishingHTTP.RegisterAdmin(protected)
+		})
+	})
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddress,

@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>预览 · {{.Article.Title}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=3">
+</head>
+<body class="reading-page">
+  <div class="preview-bar"><span>私密预览 · 当前编辑版本</span><a href="{{.BackURL}}">返回编辑</a></div>
+  <main class="reading-shell">
+    <header><p class="eyebrow">Preview</p><h1>{{.Article.Title}}</h1>{{if .Article.Excerpt}}<p class="article-deck">{{.Article.Excerpt}}</p>{{end}}</header>
+    <pre class="markdown-source">{{.Article.BodyMarkdown}}</pre>
+  </main>
+</body>
+</html>

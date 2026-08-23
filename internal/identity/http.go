@@ -55,21 +55,55 @@ func NewHTTPHandler(service *Service, security config.Security, logger *slog.Log
 	}, nil
 }
 
-func (h *HTTPHandler) Routes() http.Handler {
-	router := chi.NewRouter()
-	router.Use(h.securityHeaders)
+func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Get("/assets/admin.css", h.stylesheet)
 	router.Get("/setup", h.setupPage)
 	router.Post("/setup/start", h.setupStart)
 	router.Post("/setup/complete", h.setupComplete)
 	router.Get("/login", h.loginPage)
 	router.Post("/login", h.login)
-	router.Group(func(protected chi.Router) {
-		protected.Use(h.requireSession)
-		protected.Get("/", h.dashboard)
-		protected.Post("/logout", h.logout)
-	})
-	return router
+}
+
+func (h *HTTPHandler) RegisterProtected(router chi.Router) {
+	router.Get("/", h.dashboard)
+	router.Post("/logout", h.logout)
+}
+
+func (h *HTTPHandler) SecurityHeaders(next http.Handler) http.Handler {
+	return h.securityHeaders(next)
+}
+
+func (h *HTTPHandler) RequireSession(next http.Handler) http.Handler {
+	return h.requireSession(next)
+}
+
+func (h *HTTPHandler) VerifyCSRF(w http.ResponseWriter, r *http.Request) bool {
+	if !h.parseForm(w, r) {
+		return false
+	}
+	return h.VerifyParsedCSRF(w, r)
+}
+
+func (h *HTTPHandler) VerifyParsedCSRF(w http.ResponseWriter, r *http.Request) bool {
+	if !h.originAllowed(r) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return false
+	}
+	session := sessionFromContext(r.Context())
+	if session.Token == "" || !h.service.VerifySessionCSRF(session.Token, r.FormValue("csrf_token")) {
+		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
+func (h *HTTPHandler) CSRFToken(r *http.Request) string {
+	return h.service.SessionCSRF(sessionFromContext(r.Context()).Token)
+}
+
+func SessionFromRequest(r *http.Request) (Session, bool) {
+	session := sessionFromContext(r.Context())
+	return session, session.Token != ""
 }
 
 func (h *HTTPHandler) stylesheet(w http.ResponseWriter, r *http.Request) {

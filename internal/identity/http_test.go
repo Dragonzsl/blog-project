@@ -32,7 +32,7 @@ func TestHTTPSetupAndLogoutFlow(t *testing.T) {
 		t.Fatalf("NewHTTPHandler() error = %v", err)
 	}
 	router := chi.NewRouter()
-	router.Mount("/admin", handler.Routes())
+	registerTestRoutes(router, handler)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	jar, err := cookiejar.New(nil)
@@ -90,7 +90,7 @@ func TestHTTPRejectsCrossSiteSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	router := chi.NewRouter()
-	router.Mount("/admin", handler.Routes())
+	registerTestRoutes(router, handler)
 	server := httptest.NewServer(router)
 	defer server.Close()
 	jar, _ := cookiejar.New(nil)
@@ -163,4 +163,15 @@ func extract(t *testing.T, pattern *regexp.Regexp, body string) string {
 		t.Fatalf("pattern %s not found in body", pattern)
 	}
 	return matches[1]
+}
+
+func registerTestRoutes(router chi.Router, handler *HTTPHandler) {
+	router.Route("/admin", func(admin chi.Router) {
+		admin.Use(handler.SecurityHeaders)
+		handler.RegisterPublic(admin)
+		admin.Group(func(protected chi.Router) {
+			protected.Use(handler.RequireSession)
+			handler.RegisterProtected(protected)
+		})
+	})
 }
