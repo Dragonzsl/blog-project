@@ -1,0 +1,16 @@
+[server]
+listen_address = ":8080"
+shutdown_timeout = "10s"
+
+[storage]
+data_dir = "./data"
+
+[database]
+path = "db/blog.sqlite"
+busy_timeout = "5s"
+cache_size_kib = 16384
+read_connections = 2
+
+[logging]
+level = "info"
+format = "text"
