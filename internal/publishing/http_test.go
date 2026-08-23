@@ -60,6 +60,27 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 		t.Fatalf("publish status=%d location=%q body=%s", publish.Code, publish.Header().Get("Location"), publish.Body.String())
 	}
 
+	pageCreate := httptest.NewRecorder()
+	router.ServeHTTP(pageCreate, formRequest(http.MethodPost, "/admin/pages", url.Values{"csrf_token": {"test-csrf"}, "title": {"关于"}, "slug": {"about"}, "body_markdown": {"关于页面"}}))
+	if pageCreate.Code != http.StatusSeeOther || pageCreate.Header().Get("Location") != "/admin/pages/2/edit" {
+		t.Fatalf("page create status=%d location=%q", pageCreate.Code, pageCreate.Header().Get("Location"))
+	}
+	pagePublish := httptest.NewRecorder()
+	router.ServeHTTP(pagePublish, formRequest(http.MethodPost, "/admin/pages/2/publish", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"1"}}))
+	if pagePublish.Code != http.StatusSeeOther || pagePublish.Header().Get("Location") != "/about" {
+		t.Fatalf("page publish status=%d location=%q", pagePublish.Code, pagePublish.Header().Get("Location"))
+	}
+	articleEditor := httptest.NewRecorder()
+	router.ServeHTTP(articleEditor, httptest.NewRequest(http.MethodGet, "/admin/articles/new", nil))
+	if !strings.Contains(articleEditor.Body.String(), "分类") || !strings.Contains(articleEditor.Body.String(), "标签") {
+		t.Fatalf("article editor missing taxonomy: %s", articleEditor.Body.String())
+	}
+	pageEditor := httptest.NewRecorder()
+	router.ServeHTTP(pageEditor, httptest.NewRequest(http.MethodGet, "/admin/pages/new", nil))
+	if strings.Contains(pageEditor.Body.String(), "tag_ids") {
+		t.Fatal("page editor exposed article tags")
+	}
+
 }
 
 func formRequest(method, target string, values url.Values) *http.Request {

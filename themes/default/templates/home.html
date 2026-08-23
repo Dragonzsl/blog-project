@@ -12,7 +12,7 @@
 <body>
   <header class="site-header home-header">
     <a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a>
-    <nav aria-label="主导航"><a aria-current="page" href="/">文章</a></nav>
+    <nav aria-label="主导航"><a aria-current="page" href="/">文章</a>{{template "primary_navigation" .Navigation.Primary}}</nav>
   </header>
   <main>
     <section class="hero">
@@ -38,6 +38,6 @@
     <section class="empty"><p class="kicker">Soon</p><h2>第一篇文章正在路上。</h2><p>稍后回来看看，新的文字会出现在这里。</p></section>
     {{end}}
   </main>
-  <footer class="site-footer"><span>{{.SiteName}}</span><span>用心写作，安静发布。</span></footer>
+  <footer class="site-footer"><span>{{.SiteName}}</span><nav aria-label="页脚导航">{{template "footer_navigation" .Navigation.Footer}}</nav></footer>
 </body>
 </html>

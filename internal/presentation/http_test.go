@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/publishing"
@@ -137,5 +138,78 @@ func TestPublicThemeCacheETagAndPreviewIsolation(t *testing.T) {
 	router.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, theme.AssetURL(), nil))
 	if asset.Code != http.StatusOK || !strings.Contains(asset.Header().Get("Cache-Control"), "immutable") {
 		t.Fatalf("asset response status=%d cache=%q", asset.Code, asset.Header().Get("Cache-Control"))
+	}
+}
+
+func TestPagesTaxonomyAndNavigationRenderPublishedRevisions(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, config.Database{Path: filepath.Join(t.TempDir(), "blog.sqlite"), BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	organizationService := organization.NewService(db)
+	category, err := organizationService.CreateCategory(ctx, organization.TermInput{Name: "技术", Slug: "tech", Description: "技术写作"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := organizationService.CreateTag(ctx, organization.TermInput{Name: "Go", Slug: "go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := publishing.NewService(publishing.NewRepository(db))
+	article, err := publisher.CreateDraft(ctx, publishing.DraftInput{Title: "公开标题", Slug: "organized", BodyMarkdown: "公开正文", CategoryID: category.ID, TagIDs: []int64{tag.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	article, err = publisher.Publish(ctx, article.ID, article.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := publisher.CreatePageDraft(ctx, publishing.DraftInput{Title: "关于", Slug: "about", BodyMarkdown: "关于页面"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err = publisher.PublishPage(ctx, page.ID, page.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := organizationService.CreateNavigationItem(ctx, organization.NavigationInput{Location: "primary", Label: "关于", TargetKind: "content", TargetID: page.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := organizationService.CreateNavigationItem(ctx, organization.NavigationInput{Location: "primary", ParentID: parent.ID, Label: "项目", TargetKind: "external", ExternalURL: "https://example.com/projects"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := publisher.UpdateDraft(ctx, article.ID, article.LockVersion, publishing.DraftInput{Title: "未发布标题", Slug: "organized", BodyMarkdown: "未发布正文", CategoryID: category.ID, TagIDs: []int64{tag.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = updated
+	theme, err := NewDefaultTheme(NewMarkdown())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache, err := NewPageCache(filepath.Join(t.TempDir(), "cache"), 8, 512<<10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHTTPHandler(publisher, presentationSiteNamer{}, NewStateRepository(db), theme, cache, slog.New(slog.NewTextHandler(io.Discard, nil)), organizationService)
+	router := chi.NewRouter()
+	handler.RegisterPublic(router)
+	for target, checks := range map[string][]string{"/about": {"关于页面", "关于", "项目"}, "/categories/tech": {"公开标题", "技术写作", "项目"}, "/tags/go": {"公开标题", "# Go", "项目"}, "/": {"关于", "项目"}} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, target, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", target, response.Code, response.Body.String())
+		}
+		for _, check := range checks {
+			if !strings.Contains(response.Body.String(), check) {
+				t.Fatalf("%s missing %q: %s", target, check, response.Body.String())
+			}
+		}
+		if strings.Contains(response.Body.String(), "未发布标题") || strings.Contains(response.Body.String(), "未发布正文") {
+			t.Fatalf("%s leaked current draft", target)
+		}
 	}
 }

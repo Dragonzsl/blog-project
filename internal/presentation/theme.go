@@ -12,12 +12,23 @@ import (
 )
 
 type ArticleData struct {
+	Kind         string
 	Title        string
 	Slug         string
 	Excerpt      string
 	BodyMarkdown string
 	PublishedAt  *time.Time
+	Category     *TermData
+	Tags         []TermData
 }
+
+type TermData struct{ Name, URL string }
+type NavigationLink struct {
+	Label, URL string
+	External   bool
+	Children   []NavigationLink
+}
+type Navigation struct{ Primary, Footer []NavigationLink }
 
 type ArticleCard struct {
 	Title        string
@@ -63,34 +74,41 @@ func (t *Theme) AssetURL() string  { return t.assetURL }
 func (t *Theme) AssetHash() string { return t.assetHash }
 func (t *Theme) CSS() []byte       { return t.css }
 
-func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool, backURL string) ([]byte, error) {
+func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool, backURL string, navigation ...Navigation) ([]byte, error) {
 	body, err := t.markdown.Render(article.BodyMarkdown)
 	if err != nil {
 		return nil, err
 	}
 	view := struct {
+		Kind         string
 		Title        string
 		Slug         string
 		Excerpt      string
 		BodyHTML     template.HTML
 		PublishedAt  string
 		PublishedISO string
+		Category     *TermData
+		Tags         []TermData
 	}{
+		Kind:     article.Kind,
 		Title:    article.Title,
 		Slug:     article.Slug,
 		Excerpt:  article.Excerpt,
 		BodyHTML: body,
+		Category: article.Category,
+		Tags:     article.Tags,
 	}
 	if article.PublishedAt != nil {
 		view.PublishedAt = article.PublishedAt.UTC().Format("2006年01月02日")
 		view.PublishedISO = article.PublishedAt.UTC().Format(time.RFC3339)
 	}
 	data := map[string]any{
-		"SiteName": siteName,
-		"AssetURL": t.assetURL,
-		"Preview":  preview,
-		"BackURL":  backURL,
-		"Article":  view,
+		"SiteName":   siteName,
+		"AssetURL":   t.assetURL,
+		"Preview":    preview,
+		"BackURL":    backURL,
+		"Article":    view,
+		"Navigation": firstNavigation(navigation),
 	}
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "article.html", data); err != nil {
@@ -99,7 +117,7 @@ func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool
 	return output.Bytes(), nil
 }
 
-func (t *Theme) RenderHome(siteName string, articles []ArticleData) ([]byte, error) {
+func (t *Theme) RenderHome(siteName string, articles []ArticleData, navigation ...Navigation) ([]byte, error) {
 	cards := make([]ArticleCard, 0, len(articles))
 	for _, article := range articles {
 		card := ArticleCard{Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt}
@@ -111,11 +129,39 @@ func (t *Theme) RenderHome(siteName string, articles []ArticleData) ([]byte, err
 	}
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "home.html", map[string]any{
-		"SiteName": siteName,
-		"AssetURL": t.assetURL,
-		"Articles": cards,
+		"SiteName":   siteName,
+		"AssetURL":   t.assetURL,
+		"Articles":   cards,
+		"Navigation": firstNavigation(navigation),
 	}); err != nil {
 		return nil, fmt.Errorf("render default home theme: %w", err)
 	}
 	return output.Bytes(), nil
+}
+
+func (t *Theme) RenderListing(siteName, title, description string, articles []ArticleData, navigation Navigation) ([]byte, error) {
+	cards := make([]ArticleCard, 0, len(articles))
+	for _, article := range articles {
+		card := ArticleCard{Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt}
+		if article.PublishedAt != nil {
+			card.PublishedAt = article.PublishedAt.UTC().Format("2006年01月02日")
+			card.PublishedISO = article.PublishedAt.UTC().Format(time.RFC3339)
+		}
+		cards = append(cards, card)
+	}
+	var output bytes.Buffer
+	if err := t.templates.ExecuteTemplate(&output, "listing.html", map[string]any{
+		"SiteName": siteName, "AssetURL": t.assetURL, "Title": title,
+		"Description": description, "Articles": cards, "Navigation": navigation,
+	}); err != nil {
+		return nil, fmt.Errorf("render default listing theme: %w", err)
+	}
+	return output.Bytes(), nil
+}
+
+func firstNavigation(values []Navigation) Navigation {
+	if len(values) == 0 {
+		return Navigation{}
+	}
+	return values[0]
 }

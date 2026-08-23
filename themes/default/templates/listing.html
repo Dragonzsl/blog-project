@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ef">
+  <title>{{.Title}} · {{.SiteName}}</title>
+  {{if .Description}}<meta name="description" content="{{.Description}}">{{end}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+</head>
+<body>
+  <header class="site-header"><a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a><nav aria-label="主导航"><a href="/">文章</a>{{template "primary_navigation" .Navigation.Primary}}</nav></header>
+  <main>
+    <header class="listing-hero"><p class="kicker">Collection</p><h1>{{.Title}}</h1>{{if .Description}}<p>{{.Description}}</p>{{end}}</header>
+    <section class="listing-items" aria-label="文章列表">{{range .Articles}}<article class="article-card"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time><h2><a href="/posts/{{.Slug}}">{{.Title}}</a></h2>{{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}<a class="read-more" href="/posts/{{.Slug}}">阅读全文 →</a></article>{{else}}<div class="empty"><h2>这里还没有已发布文章。</h2></div>{{end}}</section>
+  </main>
+  <footer class="site-footer"><span>{{.SiteName}}</span><nav aria-label="页脚导航">{{template "footer_navigation" .Navigation.Footer}}</nav></footer>
+</body>
+</html>

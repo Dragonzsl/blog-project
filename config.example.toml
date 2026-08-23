@@ -11,6 +11,13 @@ busy_timeout = "5s"
 cache_size_kib = 16384
 read_connections = 2
 
+[media]
+# 原文件始终按原始字节保存；下列设置只影响上传限制和派生预览图。
+max_upload_bytes = 12582912
+max_image_pixels = 16000000
+variant_widths = [640, 1280]
+jpeg_quality = 92
+
 [logging]
 level = "info"
 format = "text"

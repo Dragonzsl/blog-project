@@ -29,6 +29,7 @@ type Config struct {
 	Server   Server   `toml:"server"`
 	Storage  Storage  `toml:"storage"`
 	Database Database `toml:"database"`
+	Media    Media    `toml:"media"`
 	Logging  Logging  `toml:"logging"`
 	Security Security `toml:"security"`
 }
@@ -47,6 +48,13 @@ type Database struct {
 	BusyTimeout     Duration `toml:"busy_timeout"`
 	CacheSizeKiB    int      `toml:"cache_size_kib"`
 	ReadConnections int      `toml:"read_connections"`
+}
+
+type Media struct {
+	MaxUploadBytes int   `toml:"max_upload_bytes"`
+	MaxImagePixels int   `toml:"max_image_pixels"`
+	VariantWidths  []int `toml:"variant_widths"`
+	JPEGQuality    int   `toml:"jpeg_quality"`
 }
 
 type Logging struct {
@@ -73,6 +81,12 @@ func Defaults() Config {
 			BusyTimeout:     Duration{Duration: 5 * time.Second},
 			CacheSizeKiB:    16 * 1024,
 			ReadConnections: 2,
+		},
+		Media: Media{
+			MaxUploadBytes: 12 << 20,
+			MaxImagePixels: 16_000_000,
+			VariantWidths:  []int{640, 1280},
+			JPEGQuality:    92,
 		},
 		Logging: Logging{Level: "info", Format: "text"},
 		Security: Security{
@@ -177,6 +191,20 @@ func applyEnvironment(cfg *Config) error {
 	}{
 		{"BLOG_DATABASE_CACHE_SIZE_KIB", &cfg.Database.CacheSizeKiB},
 		{"BLOG_DATABASE_READ_CONNECTIONS", &cfg.Database.ReadConnections},
+		{"BLOG_MEDIA_MAX_UPLOAD_BYTES", &cfg.Media.MaxUploadBytes},
+		{"BLOG_MEDIA_MAX_IMAGE_PIXELS", &cfg.Media.MaxImagePixels},
+		{"BLOG_MEDIA_JPEG_QUALITY", &cfg.Media.JPEGQuality},
+	}
+	if value, ok := os.LookupEnv("BLOG_MEDIA_VARIANT_WIDTHS"); ok && strings.TrimSpace(value) != "" {
+		var widths []int
+		for _, part := range strings.Split(value, ",") {
+			parsed, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil {
+				return fmt.Errorf("parse BLOG_MEDIA_VARIANT_WIDTHS: %w", err)
+			}
+			widths = append(widths, parsed)
+		}
+		cfg.Media.VariantWidths = widths
 	}
 	for _, override := range integerOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -219,6 +247,27 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Database.ReadConnections < 1 || cfg.Database.ReadConnections > 8 {
 		problems = append(problems, errors.New("database.read_connections must be between 1 and 8"))
+	}
+	if cfg.Media.MaxUploadBytes < 1<<20 || cfg.Media.MaxUploadBytes > 100<<20 {
+		problems = append(problems, errors.New("media.max_upload_bytes must be between 1048576 and 104857600"))
+	}
+	if cfg.Media.MaxImagePixels < 1_000_000 || cfg.Media.MaxImagePixels > 40_000_000 {
+		problems = append(problems, errors.New("media.max_image_pixels must be between 1000000 and 40000000"))
+	}
+	if len(cfg.Media.VariantWidths) < 1 || len(cfg.Media.VariantWidths) > 4 {
+		problems = append(problems, errors.New("media.variant_widths must contain between 1 and 4 widths"))
+	} else {
+		previous := 0
+		for _, width := range cfg.Media.VariantWidths {
+			if width < 160 || width > 3840 || width <= previous {
+				problems = append(problems, errors.New("media.variant_widths must be strictly increasing values between 160 and 3840"))
+				break
+			}
+			previous = width
+		}
+	}
+	if cfg.Media.JPEGQuality < 85 || cfg.Media.JPEGQuality > 100 {
+		problems = append(problems, errors.New("media.jpeg_quality must be between 85 and 100"))
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))

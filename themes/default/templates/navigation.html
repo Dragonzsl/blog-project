@@ -1,0 +1,14 @@
+{{define "primary_navigation"}}
+  {{range .}}
+  <span class="nav-group">
+    <a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>
+    {{if .Children}}<span class="subnav">{{range .Children}}<a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{end}}</span>{{end}}
+  </span>
+  {{end}}
+{{end}}
+
+{{define "footer_navigation"}}
+  {{range .}}
+  <span class="footer-group"><a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{range .Children}}<a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{end}}</span>
+  {{else}}<span>用心写作，安静发布。</span>{{end}}
+{{end}}

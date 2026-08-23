@@ -13,7 +13,9 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
 	"github.com/zhushilin/blog-project/internal/identity"
+	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/operations"
+	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
@@ -55,6 +57,27 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	organizationService := organization.NewService(db)
+	organizationHTTP, err := organization.NewHTTPHandler(organizationService, publishingService, identityHTTP, identityService, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	mediaService, err := media.NewService(db, filepath.Join(cfg.Storage.DataDir, "media"), logger, media.Options{
+		MaxUploadBytes: int64(cfg.Media.MaxUploadBytes),
+		MaxImagePixels: cfg.Media.MaxImagePixels,
+		VariantWidths:  cfg.Media.VariantWidths,
+		JPEGQuality:    cfg.Media.JPEGQuality,
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	mediaHTTP, err := media.NewHTTPHandler(mediaService, identityHTTP, identityService, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	defaultTheme, err := presentation.NewDefaultTheme(presentation.NewMarkdown())
 	if err != nil {
 		db.Close()
@@ -72,6 +95,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		defaultTheme,
 		pageCache,
 		logger,
+		organizationService,
 	)
 
 	router := chi.NewRouter()
@@ -82,6 +106,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	health := operations.NewHealthHandler(db, time.Now(), buildinfo.Version)
 	router.Get("/livez", health.Live)
 	router.Get("/readyz", health.Ready)
+	mediaHTTP.RegisterPublic(router)
 	presentationHTTP.RegisterPublic(router)
 	router.Route("/admin", func(admin chi.Router) {
 		admin.Use(identityHTTP.SecurityHeaders)
@@ -90,6 +115,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			protected.Use(identityHTTP.RequireSession)
 			identityHTTP.RegisterProtected(protected)
 			publishingHTTP.RegisterAdmin(protected)
+			organizationHTTP.RegisterAdmin(protected)
+			mediaHTTP.RegisterAdmin(protected)
 			presentationHTTP.RegisterAdmin(protected)
 		})
 	})

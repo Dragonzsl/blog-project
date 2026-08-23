@@ -22,6 +22,12 @@ busy_timeout = "3s"
 cache_size_kib = 8192
 read_connections = 1
 
+[media]
+max_upload_bytes = 16777216
+max_image_pixels = 12000000
+variant_widths = [720, 1440]
+jpeg_quality = 94
+
 [logging]
 level = "warn"
 format = "json"
@@ -31,6 +37,7 @@ format = "json"
 	}
 	t.Setenv("BLOG_LISTEN_ADDRESS", ":7777")
 	t.Setenv("BLOG_DATABASE_READ_CONNECTIONS", "3")
+	t.Setenv("BLOG_MEDIA_VARIANT_WIDTHS", "800, 1600")
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -44,6 +51,12 @@ format = "json"
 	}
 	if cfg.Database.ReadConnections != 3 {
 		t.Fatalf("read connections = %d", cfg.Database.ReadConnections)
+	}
+	if cfg.Media.MaxUploadBytes != 16<<20 || cfg.Media.MaxImagePixels != 12_000_000 || cfg.Media.JPEGQuality != 94 {
+		t.Fatalf("media configuration = %+v", cfg.Media)
+	}
+	if len(cfg.Media.VariantWidths) != 2 || cfg.Media.VariantWidths[0] != 800 || cfg.Media.VariantWidths[1] != 1600 {
+		t.Fatalf("media variant widths = %v", cfg.Media.VariantWidths)
 	}
 	wantDataDir := filepath.Join(filepath.Dir(configPath), "var")
 	if cfg.Storage.DataDir != wantDataDir {
@@ -63,5 +76,13 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 	t.Setenv("BLOG_DATABASE_READ_CONNECTIONS", "unbounded")
 	if _, err := Load(""); err == nil {
 		t.Fatal("Load() error = nil, want invalid integer error")
+	}
+}
+
+func TestValidateRejectsUnsafeMediaConfiguration(t *testing.T) {
+	cfg := Defaults()
+	cfg.Media.VariantWidths = []int{1280, 640}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want invalid media widths")
 	}
 }

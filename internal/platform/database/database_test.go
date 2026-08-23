@@ -33,8 +33,8 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrationVersion() error = %v", err)
 	}
-	if version != 3 {
-		t.Fatalf("migration version = %d, want 3", version)
+	if version != 4 {
+		t.Fatalf("migration version = %d, want 4", version)
 	}
 	if got := db.Writer.Stats().MaxOpenConnections; got != 1 {
 		t.Fatalf("writer connections = %d, want 1", got)

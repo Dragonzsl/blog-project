@@ -3,6 +3,8 @@ package publishing
 import (
 	"errors"
 	"time"
+
+	"github.com/zhushilin/blog-project/internal/organization"
 )
 
 var (
@@ -13,20 +15,25 @@ var (
 )
 
 type Article struct {
-	ID                  int64
-	PublicID            []byte
-	Status              string
-	Slug                string
-	Title               string
-	Excerpt             string
-	BodyMarkdown        string
-	CurrentRevisionID   int64
-	PublishedRevisionID int64
-	PublishedAt         *time.Time
-	PublishedRevisionAt *time.Time
-	LockVersion         int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                        int64
+	PublicID                  []byte
+	Kind                      string
+	Status                    string
+	Slug                      string
+	Title                     string
+	Excerpt                   string
+	BodyMarkdown              string
+	CurrentRevisionID         int64
+	PublishedRevisionID       int64
+	PublishedAt               *time.Time
+	PublishedRevisionAt       *time.Time
+	LockVersion               int64
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
+	Category                  *organization.Category
+	Tags                      []organization.Tag
+	publishedCategoryPublicID []byte
+	publishedTagPublicIDsJSON string
 }
 
 type DraftInput struct {
@@ -34,6 +41,9 @@ type DraftInput struct {
 	Slug         string
 	Excerpt      string
 	BodyMarkdown string
+	CategoryID   int64
+	TagIDs       []int64
+	slugKey      string
 }
 
 type ValidationError struct {
@@ -43,10 +53,13 @@ type ValidationError struct {
 func (err ValidationError) Error() string { return err.Message }
 
 type revisionInput struct {
-	PublicID     []byte
-	Title        string
-	Slug         string
-	Excerpt      string
-	BodyMarkdown string
-	Reason       string
+	PublicID         []byte
+	Title            string
+	Slug             string
+	SlugKey          string
+	Excerpt          string
+	BodyMarkdown     string
+	CategoryPublicID []byte
+	TagPublicIDsJSON string
+	Reason           string
 }

@@ -35,7 +35,15 @@
   .site-header nav { display: flex; gap: 24px; color: var(--muted); font-size: .84rem; font-weight: 720; }
   .site-header nav a { text-decoration: none; }
   .site-header nav a:hover, .site-header nav [aria-current] { color: var(--ink); }
+  .nav-group { position: relative; display: inline-flex; }
+  .subnav { position: absolute; top: calc(100% + 12px); left: -14px; z-index: 2; display: grid; min-width: 160px; gap: 4px; padding: 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: 0 16px 40px rgb(24 35 29 / 10%); opacity: 0; visibility: hidden; transform: translateY(-4px); transition: opacity .16s ease, transform .16s ease, visibility .16s; }
+  .subnav::before { position: absolute; inset: -13px 0 auto; height: 13px; content: ""; }
+  .subnav a { padding: 8px 10px; border-radius: 7px; white-space: nowrap; }
+  .subnav a:hover, .subnav a:focus-visible { color: var(--ink); background: var(--accent-soft); }
+  .nav-group:hover .subnav, .nav-group:focus-within .subnav { opacity: 1; visibility: visible; transform: translateY(0); }
   .site-footer { display: flex; justify-content: space-between; gap: 24px; margin-top: clamp(70px, 12vw, 150px); padding-block: 30px 44px; border-top: 1px solid var(--line); color: var(--muted); font-size: .76rem; }
+  .site-footer nav { display: flex; flex-wrap: wrap; gap: 16px; }
+  .footer-group { display: inline-flex; flex-wrap: wrap; gap: 10px; }
   .preview-ribbon { position: sticky; top: 0; z-index: 3; display: flex; justify-content: space-between; gap: 24px; padding: 11px clamp(20px, 5vw, 70px); color: white; background: var(--accent); font-size: .78rem; font-weight: 730; }
 }
 
@@ -63,6 +71,8 @@
   .article-header h1 { margin-top: 22px; font-family: var(--serif); font-size: clamp(3.5rem, 9vw, 7.3rem); font-weight: 500; letter-spacing: -.055em; line-height: .98; }
   .deck { margin-top: 30px; color: var(--muted); font-family: var(--serif); font-size: clamp(1.2rem, 2.5vw, 1.55rem); line-height: 1.58; }
   .article-header time { display: block; margin-top: 22px; color: var(--muted); font-size: .74rem; }
+  .taxonomy { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 24px; }
+  .taxonomy a { padding: 6px 10px; border-radius: 999px; color: var(--accent); background: var(--accent-soft); font-size: .72rem; font-weight: 700; text-decoration: none; }
   .prose { padding-top: clamp(46px, 7vw, 80px); font-family: var(--serif); font-size: clamp(1.08rem, 2vw, 1.24rem); line-height: 1.9; }
   .prose > * + * { margin-top: 1.5em; }
   .prose h2, .prose h3, .prose h4 { margin-top: 2.2em; font-weight: 600; letter-spacing: -.025em; line-height: 1.25; }
@@ -80,6 +90,13 @@
   .prose th { background: #eeeee8; }
   .prose hr { border: 0; border-top: 1px solid var(--line); }
   .prose img { margin-inline: auto; border-radius: 12px; }
+  .listing-hero, .listing-items { width: min(900px, calc(100% - 40px)); margin-inline: auto; }
+  .listing-hero { padding: clamp(70px, 10vw, 130px) 0 clamp(44px, 7vw, 80px); border-bottom: 1px solid var(--line); }
+  .listing-hero h1 { margin-top: 18px; font-family: var(--serif); font-size: clamp(3.2rem, 8vw, 6.5rem); font-weight: 500; letter-spacing: -.05em; }
+  .listing-hero > p:last-child { max-width: 620px; margin-top: 20px; color: var(--muted); line-height: 1.7; }
+  .listing-items .article-card { grid-template-columns: 120px minmax(0, 1fr) auto; border-bottom: 1px solid var(--line); }
+  .listing-items .article-card h2 { font-family: var(--serif); font-size: clamp(1.65rem, 3vw, 2.5rem); font-weight: 500; }
+  .listing-items .article-card p { grid-column: 2; color: var(--muted); line-height: 1.65; }
 
   @media (max-width: 760px) {
     .hero { margin-top: 54px; }
@@ -90,7 +107,13 @@
     .article-card p { grid-column: 1; }
     .read-more { margin-top: 8px; }
     .site-footer { flex-direction: column; }
+    .site-header { align-items: flex-start; padding-block: 24px; }
+    .site-header nav { flex-wrap: wrap; justify-content: flex-end; gap: 14px; }
+    .subnav { position: static; display: flex; margin-left: 8px; padding: 0; border: 0; box-shadow: none; opacity: 1; visibility: visible; transform: none; }
+    .subnav a { padding: 0; }
     .article-header h1 { font-size: clamp(3.1rem, 15vw, 5.2rem); }
+    .listing-items .article-card { grid-template-columns: 1fr; }
+    .listing-items .article-card p { grid-column: 1; }
   }
 
   @media (prefers-reduced-motion: reduce) {

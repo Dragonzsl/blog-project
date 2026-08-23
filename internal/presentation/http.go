@@ -12,14 +12,24 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
 type ContentQueries interface {
 	Article(context.Context, int64) (publishing.Article, error)
+	Page(context.Context, int64) (publishing.Article, error)
 	PublicArticle(context.Context, string) (publishing.Article, error)
 	PublishedArticles(context.Context, int) ([]publishing.Article, error)
+	PublicArticleByID(context.Context, int64) (publishing.Article, error)
+	PublicPage(context.Context, string) (publishing.Article, error)
+}
+
+type OrganizationQueries interface {
+	PublicNavigation(context.Context, string) ([]organization.NavigationItem, error)
+	PublicCategory(context.Context, string, int) (organization.Category, []int64, error)
+	PublicTag(context.Context, string, int) (organization.Tag, []int64, error)
 }
 
 type SiteNamer interface {
@@ -43,16 +53,21 @@ func (r *StateRepository) RenderEpoch(ctx context.Context) (int64, error) {
 }
 
 type HTTPHandler struct {
-	content   ContentQueries
-	siteNamer SiteNamer
-	state     *StateRepository
-	theme     *Theme
-	cache     *PageCache
-	logger    *slog.Logger
+	content      ContentQueries
+	siteNamer    SiteNamer
+	state        *StateRepository
+	theme        *Theme
+	cache        *PageCache
+	logger       *slog.Logger
+	organization OrganizationQueries
 }
 
-func NewHTTPHandler(content ContentQueries, siteNamer SiteNamer, state *StateRepository, theme *Theme, cache *PageCache, logger *slog.Logger) *HTTPHandler {
-	return &HTTPHandler{content: content, siteNamer: siteNamer, state: state, theme: theme, cache: cache, logger: logger}
+func NewHTTPHandler(content ContentQueries, siteNamer SiteNamer, state *StateRepository, theme *Theme, cache *PageCache, logger *slog.Logger, organizations ...OrganizationQueries) *HTTPHandler {
+	handler := &HTTPHandler{content: content, siteNamer: siteNamer, state: state, theme: theme, cache: cache, logger: logger}
+	if len(organizations) > 0 {
+		handler.organization = organizations[0]
+	}
+	return handler
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
@@ -60,12 +75,19 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Head("/", h.home)
 	router.Get("/posts/{slug}", h.article)
 	router.Head("/posts/{slug}", h.article)
+	router.Get("/categories/{slug}", h.category)
+	router.Head("/categories/{slug}", h.category)
+	router.Get("/tags/{slug}", h.tag)
+	router.Head("/tags/{slug}", h.tag)
 	router.Get("/assets/theme/default/{fingerprint}/theme.css", h.asset)
 	router.Head("/assets/theme/default/{fingerprint}/theme.css", h.asset)
+	router.Get("/{slug}", h.page)
+	router.Head("/{slug}", h.page)
 }
 
 func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/articles/{articleID}/preview", h.preview)
+	router.Get("/pages/{pageID}/preview", h.preview)
 }
 
 func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +100,11 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		body, err := h.theme.RenderHome(siteName, articleDataList(articles))
+		navigation, err := h.navigation(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		body, err := h.theme.RenderHome(siteName, articleDataList(articles), navigation)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
 			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -98,7 +124,11 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		body, err := h.theme.RenderArticle(siteName, articleData(article), false, "")
+		navigation, err := h.navigation(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		body, err := h.theme.RenderArticle(siteName, articleData(article), false, "", navigation)
 		lastModified := ""
 		if article.PublishedRevisionAt != nil {
 			lastModified = article.PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -107,13 +137,92 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
+	slug := chi.URLParam(r, "slug")
+	h.serveCached(w, r, "page:"+slug, func(ctx context.Context) ([]byte, string, error) {
+		page, err := h.content.PublicPage(ctx, slug)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		body, err := h.theme.RenderArticle(siteName, articleData(page), false, "", navigation)
+		lastModified := ""
+		if page.PublishedRevisionAt != nil {
+			lastModified = page.PublishedRevisionAt.UTC().Format(http.TimeFormat)
+		}
+		return body, lastModified, err
+	})
+}
+
+func (h *HTTPHandler) category(w http.ResponseWriter, r *http.Request) {
+	h.taxonomyListing(w, r, "category")
+}
+func (h *HTTPHandler) tag(w http.ResponseWriter, r *http.Request) { h.taxonomyListing(w, r, "tag") }
+
+func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, kind string) {
+	if h.organization == nil {
+		http.NotFound(w, r)
+		return
+	}
+	slug := chi.URLParam(r, "slug")
+	h.serveCached(w, r, kind+":"+slug, func(ctx context.Context) ([]byte, string, error) {
+		var title, description string
+		var ids []int64
+		var err error
+		if kind == "category" {
+			var term organization.Category
+			term, ids, err = h.organization.PublicCategory(ctx, slug, 50)
+			title, description = term.Name, term.Description
+		} else {
+			var term organization.Tag
+			term, ids, err = h.organization.PublicTag(ctx, slug, 50)
+			title, description = "# "+term.Name, term.Description
+		}
+		if err != nil {
+			return nil, "", err
+		}
+		articles := make([]publishing.Article, 0, len(ids))
+		for _, id := range ids {
+			article, err := h.content.PublicArticleByID(ctx, id)
+			if err != nil {
+				return nil, "", err
+			}
+			articles = append(articles, article)
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		body, err := h.theme.RenderListing(siteName, title, description, articleDataList(articles), navigation)
+		lastModified := ""
+		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
+			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
+		}
+		return body, lastModified, err
+	})
+}
+
 func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
-	id, err := publishingArticleID(r)
+	id, kind, err := publishingContentID(r)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
 	article, err := h.content.Article(r.Context(), id)
+	if kind == "page" {
+		article, err = h.content.Page(r.Context(), id)
+	}
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -123,7 +232,16 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	body, err := h.theme.RenderArticle(siteName, articleData(article), true, fmt.Sprintf("/admin/articles/%d/edit", article.ID))
+	navigation, err := h.navigation(r.Context())
+	if err != nil {
+		h.handleRenderError(w, r, err)
+		return
+	}
+	backURL := fmt.Sprintf("/admin/articles/%d/edit", article.ID)
+	if kind == "page" {
+		backURL = fmt.Sprintf("/admin/pages/%d/edit", article.ID)
+	}
+	body, err := h.theme.RenderArticle(siteName, articleData(article), true, backURL, navigation)
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -215,6 +333,10 @@ func (h *HTTPHandler) handleRenderError(w http.ResponseWriter, r *http.Request, 
 		http.NotFound(w, r)
 		return
 	}
+	if errors.Is(err, organization.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
 	h.logger.ErrorContext(r.Context(), "render public page", "error", err)
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
@@ -237,13 +359,21 @@ func matchesETag(header, etag string) bool {
 }
 
 func articleData(article publishing.Article) ArticleData {
-	return ArticleData{
+	data := ArticleData{
+		Kind:         article.Kind,
 		Title:        article.Title,
 		Slug:         article.Slug,
 		Excerpt:      article.Excerpt,
 		BodyMarkdown: article.BodyMarkdown,
 		PublishedAt:  article.PublishedAt,
 	}
+	if article.Category != nil {
+		data.Category = &TermData{Name: article.Category.Name, URL: "/categories/" + article.Category.Slug}
+	}
+	for _, tag := range article.Tags {
+		data.Tags = append(data.Tags, TermData{Name: tag.Name, URL: "/tags/" + tag.Slug})
+	}
+	return data
 }
 
 func articleDataList(articles []publishing.Article) []ArticleData {
@@ -254,11 +384,50 @@ func articleDataList(articles []publishing.Article) []ArticleData {
 	return result
 }
 
-func publishingArticleID(r *http.Request) (int64, error) {
+func publishingContentID(r *http.Request) (int64, string, error) {
+	kind := "article"
 	value := chi.URLParam(r, "articleID")
+	if value == "" {
+		kind = "page"
+		value = chi.URLParam(r, "pageID")
+	}
 	id, err := strconv.ParseInt(value, 10, 64)
 	if err != nil || id < 1 {
-		return 0, publishing.ErrNotFound
+		return 0, "", publishing.ErrNotFound
 	}
-	return id, nil
+	return id, kind, nil
+}
+
+func (h *HTTPHandler) navigation(ctx context.Context) (Navigation, error) {
+	if h.organization == nil {
+		return Navigation{}, nil
+	}
+	primary, err := h.organization.PublicNavigation(ctx, "primary")
+	if err != nil {
+		return Navigation{}, err
+	}
+	footer, err := h.organization.PublicNavigation(ctx, "footer")
+	if err != nil {
+		return Navigation{}, err
+	}
+	return Navigation{Primary: navigationLinks(primary), Footer: navigationLinks(footer)}, nil
+}
+
+func navigationLinks(items []organization.NavigationItem) []NavigationLink {
+	links := make(map[int64]*NavigationLink, len(items))
+	roots := make([]*NavigationLink, 0, len(items))
+	for _, item := range items {
+		link := &NavigationLink{Label: item.Label, URL: item.URL, External: item.TargetKind == "external"}
+		links[item.ID] = link
+		if item.ParentID == 0 {
+			roots = append(roots, link)
+		} else if parent := links[item.ParentID]; parent != nil {
+			parent.Children = append(parent.Children, *link)
+		}
+	}
+	result := make([]NavigationLink, 0, len(roots))
+	for _, link := range roots {
+		result = append(result, *link)
+	}
+	return result
 }

@@ -25,3 +25,24 @@ func TestNewPublicIDContainsOrderedTimestampAndRandomness(t *testing.T) {
 		t.Fatal("random suffixes are equal")
 	}
 }
+
+func TestPublicIDTextRoundTrip(t *testing.T) {
+	identifier, err := NewPublicID(time.UnixMilli(1000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := EncodePublicID(identifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodePublicID(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, identifier) {
+		t.Fatalf("decoded public ID = %x, want %x", decoded, identifier)
+	}
+	if _, err := DecodePublicID("not-an-identifier"); err == nil {
+		t.Fatal("invalid public ID was accepted")
+	}
+}

@@ -114,6 +114,32 @@ func TestArticleSlugIsUniqueAndReserved(t *testing.T) {
 	}
 }
 
+func TestPageUsesRootPermalinkAndSystemPathsStayReserved(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+	page, err := service.CreatePageDraft(ctx, DraftInput{Title: "关于", Slug: "关于-me", BodyMarkdown: "## 你好"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Kind != "page" {
+		t.Fatalf("kind=%q", page.Kind)
+	}
+	if _, err := service.PublicPage(ctx, "关于-me"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("draft public error=%v", err)
+	}
+	published, err := service.PublishPage(ctx, page.ID, page.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public, err := service.PublicPage(ctx, "关于-me")
+	if err != nil || public.Title != "关于" || published.PublishedRevisionID == 0 {
+		t.Fatalf("public=%+v err=%v", public, err)
+	}
+	if _, err := service.CreatePageDraft(ctx, DraftInput{Title: "后台", Slug: "admin", BodyMarkdown: "reserved"}); !errors.Is(err, ErrSlugUnavailable) {
+		t.Fatalf("reserved page slug error=%v", err)
+	}
+}
+
 func newPublishingTestService(t *testing.T) (*Service, *database.DB) {
 	t.Helper()
 	db, err := database.Open(context.Background(), config.Database{
