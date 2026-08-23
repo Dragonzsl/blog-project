@@ -43,6 +43,11 @@ max_results = 40
 feed_limit = 30
 sitemap_limit = 20000
 
+[operations]
+backup_interval = "36h"
+backup_daily_retention = 9
+backup_weekly_retention = 6
+
 [logging]
 level = "warn"
 format = "json"
@@ -80,6 +85,9 @@ format = "json"
 	}
 	if cfg.Discovery.BaseURL != "https://example.test/blog" || cfg.Discovery.SyncBatchSize != 18 || cfg.Discovery.MaxResults != 35 || cfg.Discovery.FeedLimit != 30 || cfg.Discovery.SitemapLimit != 20000 {
 		t.Fatalf("discovery configuration = %+v", cfg.Discovery)
+	}
+	if cfg.Operations.BackupInterval.Duration != 36*time.Hour || cfg.Operations.BackupDailyRetention != 9 || cfg.Operations.BackupWeeklyRetention != 6 {
+		t.Fatalf("operations configuration = %+v", cfg.Operations)
 	}
 	wantDataDir := filepath.Join(filepath.Dir(configPath), "var")
 	if cfg.Storage.DataDir != wantDataDir {

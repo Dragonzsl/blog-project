@@ -32,11 +32,24 @@ type App struct {
 	server               *http.Server
 	publishing           *publishing.Service
 	discovery            *discovery.Service
+	backups              *operations.BackupService
+	dataLock             *operations.DataLock
 	lifecycleInterval    time.Duration
 	trashCleanupInterval time.Duration
+	backupInterval       time.Duration
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
+	dataLock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	keepLock := false
+	defer func() {
+		if !keepLock {
+			_ = dataLock.Close()
+		}
+	}()
 	db, err := database.Open(ctx, cfg.Database)
 	if err != nil {
 		return nil, err
@@ -74,6 +87,16 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MaxResults:    cfg.Discovery.MaxResults,
 		FeedLimit:     cfg.Discovery.FeedLimit,
 		SitemapLimit:  cfg.Discovery.SitemapLimit,
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	backupService, err := operations.NewBackupService(db, operations.BackupOptions{
+		DataDir: cfg.Storage.DataDir, DatabasePath: cfg.Database.Path,
+		ApplicationVersion: buildinfo.Version, ApplicationCommit: buildinfo.Commit,
+		Interval: cfg.Operations.BackupInterval.Duration, DailyRetention: cfg.Operations.BackupDailyRetention,
+		WeeklyRetention: cfg.Operations.BackupWeeklyRetention,
 	})
 	if err != nil {
 		db.Close()
@@ -150,7 +173,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration}, nil
+	keepLock = true
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
@@ -213,6 +237,16 @@ func (app *App) runLifecycle(ctx context.Context) {
 			app.logger.InfoContext(ctx, "expired trash purged", "purged", purged)
 		}
 	}
+	backupIfDue := func() {
+		result, err := app.backups.CreateScheduledIfDue(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "create scheduled backup", "error", err)
+			return
+		}
+		if result != nil {
+			app.logger.InfoContext(ctx, "scheduled backup created", "path", result.Path, "size_bytes", result.SizeBytes)
+		}
+	}
 	if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		app.logger.ErrorContext(ctx, "initialize search documents", "error", err)
 	} else if indexed > 0 {
@@ -220,10 +254,13 @@ func (app *App) runLifecycle(ctx context.Context) {
 	}
 	processScheduled()
 	cleanupTrash()
+	backupIfDue()
 	schedulerTicker := time.NewTicker(app.lifecycleInterval)
 	defer schedulerTicker.Stop()
 	cleanupTicker := time.NewTicker(app.trashCleanupInterval)
 	defer cleanupTicker.Stop()
+	backupTicker := time.NewTicker(app.backupInterval)
+	defer backupTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -232,10 +269,22 @@ func (app *App) runLifecycle(ctx context.Context) {
 			processScheduled()
 		case <-cleanupTicker.C:
 			cleanupTrash()
+		case <-backupTicker.C:
+			backupIfDue()
 		}
 	}
 }
 
 func (app *App) Close() error {
-	return app.database.Close()
+	var databaseErr, lockErr error
+	if app.database != nil {
+		databaseErr = app.database.Close()
+	}
+	if app.dataLock != nil {
+		lockErr = app.dataLock.Close()
+	}
+	if databaseErr != nil {
+		return databaseErr
+	}
+	return lockErr
 }

@@ -12,6 +12,7 @@ require (
 	github.com/yuin/goldmark v1.8.5
 	golang.org/x/crypto v0.55.0
 	golang.org/x/image v0.45.0
+	golang.org/x/sys v0.47.0
 	golang.org/x/text v0.41.0
 )
 
@@ -24,5 +25,4 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 )

@@ -34,6 +34,11 @@ max_results = 50
 feed_limit = 50
 sitemap_limit = 50000
 
+[operations]
+backup_interval = "24h"
+backup_daily_retention = 7
+backup_weekly_retention = 4
+
 [logging]
 level = "info"
 format = "text"

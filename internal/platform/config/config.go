@@ -33,6 +33,7 @@ type Config struct {
 	Media      Media      `toml:"media"`
 	Publishing Publishing `toml:"publishing"`
 	Discovery  Discovery  `toml:"discovery"`
+	Operations Operations `toml:"operations"`
 	Logging    Logging    `toml:"logging"`
 	Security   Security   `toml:"security"`
 }
@@ -75,6 +76,12 @@ type Discovery struct {
 	MaxResults    int    `toml:"max_results"`
 	FeedLimit     int    `toml:"feed_limit"`
 	SitemapLimit  int    `toml:"sitemap_limit"`
+}
+
+type Operations struct {
+	BackupInterval        Duration `toml:"backup_interval"`
+	BackupDailyRetention  int      `toml:"backup_daily_retention"`
+	BackupWeeklyRetention int      `toml:"backup_weekly_retention"`
 }
 
 type Logging struct {
@@ -122,6 +129,11 @@ func Defaults() Config {
 			MaxResults:    50,
 			FeedLimit:     50,
 			SitemapLimit:  50_000,
+		},
+		Operations: Operations{
+			BackupInterval:        Duration{Duration: 24 * time.Hour},
+			BackupDailyRetention:  7,
+			BackupWeeklyRetention: 4,
 		},
 		Logging: Logging{Level: "info", Format: "text"},
 		Security: Security{
@@ -215,6 +227,7 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_PUBLISHING_SCHEDULER_INTERVAL", &cfg.Publishing.SchedulerInterval},
 		{"BLOG_PUBLISHING_SNAPSHOT_INTERVAL", &cfg.Publishing.EditingSnapshotInterval},
 		{"BLOG_PUBLISHING_TRASH_CLEANUP_INTERVAL", &cfg.Publishing.TrashCleanupInterval},
+		{"BLOG_BACKUP_INTERVAL", &cfg.Operations.BackupInterval},
 	}
 	for _, override := range durationOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -240,6 +253,8 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_SEARCH_MAX_RESULTS", &cfg.Discovery.MaxResults},
 		{"BLOG_RSS_LIMIT", &cfg.Discovery.FeedLimit},
 		{"BLOG_SITEMAP_LIMIT", &cfg.Discovery.SitemapLimit},
+		{"BLOG_BACKUP_DAILY_RETENTION", &cfg.Operations.BackupDailyRetention},
+		{"BLOG_BACKUP_WEEKLY_RETENTION", &cfg.Operations.BackupWeeklyRetention},
 	}
 	if value, ok := os.LookupEnv("BLOG_MEDIA_VARIANT_WIDTHS"); ok && strings.TrimSpace(value) != "" {
 		var widths []int
@@ -348,6 +363,15 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Discovery.SitemapLimit < 100 || cfg.Discovery.SitemapLimit > 50_000 {
 		problems = append(problems, errors.New("discovery.sitemap_limit must be between 100 and 50000"))
+	}
+	if cfg.Operations.BackupInterval.Duration < time.Hour || cfg.Operations.BackupInterval.Duration > 7*24*time.Hour {
+		problems = append(problems, errors.New("operations.backup_interval must be between 1h and 168h"))
+	}
+	if cfg.Operations.BackupDailyRetention < 1 || cfg.Operations.BackupDailyRetention > 31 {
+		problems = append(problems, errors.New("operations.backup_daily_retention must be between 1 and 31"))
+	}
+	if cfg.Operations.BackupWeeklyRetention < 0 || cfg.Operations.BackupWeeklyRetention > 52 {
+		problems = append(problems, errors.New("operations.backup_weekly_retention must be between 0 and 52"))
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))
