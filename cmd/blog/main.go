@@ -437,6 +437,10 @@ func openBackupService(configPath string) (*operations.BackupService, *database.
 		db.Close()
 		return nil, nil, err
 	}
+	if err := service.ReconcileStoredPaths(context.Background()); err != nil {
+		db.Close()
+		return nil, nil, err
+	}
 	return service, db, nil
 }
 

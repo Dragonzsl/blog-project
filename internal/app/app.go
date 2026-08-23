@@ -102,6 +102,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	if err := backupService.ReconcileStoredPaths(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
 	organizationHTTP, err := organization.NewHTTPHandler(organizationService, publishingService, identityHTTP, identityService, logger)
 	if err != nil {
 		db.Close()

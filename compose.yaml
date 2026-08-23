@@ -6,7 +6,19 @@ services:
     user: "0:0"
     mem_limit: 32m
     pids_limit: 32
-    command: ["sh", "-c", "mkdir -p /data/db /data/media /data/cache /data/backups && chown -R 65532:65532 /data"]
+    command:
+      - "sh"
+      - "-ec"
+      - >-
+        mkdir -p /data/site;
+        for item in db media cache backups secrets themes plugins; do
+          if [ -e "/data/$$item" ]; then
+            if [ -e "/data/site/$$item" ]; then echo "conflicting legacy data path: $$item" >&2; exit 1; fi;
+            mv "/data/$$item" "/data/site/$$item";
+          fi;
+        done;
+        mkdir -p /data/site/db /data/site/media /data/site/cache /data/site/backups /data/site/secrets /data/site/themes /data/site/plugins;
+        chown -R 65532:65532 /data
     volumes:
       - blog_data:/data
     restart: "no"
@@ -30,7 +42,7 @@ services:
         condition: service_completed_successfully
     environment:
       BLOG_LISTEN_ADDRESS: ":8080"
-      BLOG_DATA_DIR: ${BLOG_DATA_DIR:-/data}
+      BLOG_DATA_DIR: ${BLOG_DATA_DIR:-/data/site}
       BLOG_LOG_LEVEL: ${BLOG_LOG_LEVEL:-info}
       BLOG_LOG_FORMAT: ${BLOG_LOG_FORMAT:-json}
       BLOG_AUTH_SECRET: ${BLOG_AUTH_SECRET:-}

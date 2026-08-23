@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -71,6 +72,54 @@ func NewBackupService(db *database.DB, options BackupOptions) (*BackupService, e
 		options.WeeklyRetention = 4
 	}
 	return &BackupService{database: db, options: options, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// ReconcileStoredPaths repairs backup records after the configured data directory
+// moves. A path is only changed when a same-named archive exists in the current
+// backup directory, verifies successfully, and carries the recorded public ID.
+func (s *BackupService) ReconcileStoredPaths(ctx context.Context) error {
+	rows, err := s.database.Reader.QueryContext(ctx, "SELECT id,public_id,manifest_path FROM backups WHERE checksum_status='valid'")
+	if err != nil {
+		return fmt.Errorf("list backup paths for reconciliation: %w", err)
+	}
+	type record struct {
+		id       int64
+		publicID []byte
+		path     string
+	}
+	var records []record
+	for rows.Next() {
+		var value record
+		if err := rows.Scan(&value.id, &value.publicID, &value.path); err != nil {
+			rows.Close()
+			return err
+		}
+		records = append(records, value)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, value := range records {
+		if info, err := os.Stat(value.path); err == nil && info.Mode().IsRegular() {
+			continue
+		}
+		candidate := filepath.Join(s.options.BackupDir, filepath.Base(value.path))
+		if candidate == value.path {
+			continue
+		}
+		verified, err := VerifyBackup(ctx, candidate)
+		if err != nil {
+			continue
+		}
+		candidateID, err := platformid.DecodePublicID(verified.Manifest.PublicID)
+		if err != nil || !bytes.Equal(candidateID, value.publicID) {
+			continue
+		}
+		if _, err := s.database.Writer.ExecContext(ctx, "UPDATE backups SET manifest_path=? WHERE id=?", candidate, value.id); err != nil {
+			return fmt.Errorf("reconcile backup path: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *BackupService) Create(ctx context.Context, reason, output string) (BackupResult, error) {

@@ -217,6 +217,32 @@ func TestScheduledBackupDueCheckAndRetention(t *testing.T) {
 	}
 }
 
+func TestReconcileStoredPathsAfterDataDirectoryMove(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "db", "blog.sqlite")
+	db := openOperationsDatabase(t, dbPath)
+	service, err := NewBackupService(db, BackupOptions{DataDir: dataDir, DatabasePath: dbPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Create(ctx, "manual", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePath := filepath.Join(filepath.Dir(dataDir), "legacy", "backups", filepath.Base(created.Path))
+	if _, err := db.Writer.ExecContext(ctx, "UPDATE backups SET manifest_path=?", stalePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ReconcileStoredPaths(ctx); err != nil {
+		t.Fatal(err)
+	}
+	backups, err := ListBackups(ctx, db, 20)
+	if err != nil || len(backups) != 1 || backups[0].Path != created.Path {
+		t.Fatalf("reconciled backups=%+v err=%v", backups, err)
+	}
+}
+
 func openOperationsDatabase(t *testing.T, path string) *database.DB {
 	t.Helper()
 	db, err := database.Open(context.Background(), config.Database{Path: path, BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})
