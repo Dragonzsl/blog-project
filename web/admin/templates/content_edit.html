@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{{if .IsNew}}新{{.Descriptor.Singular}}{{else}}编辑 · {{.Content.Title}}{{end}} · {{.SiteName}}</title>
-  <link rel="stylesheet" href="/admin/assets/admin.css?v=5">
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
 </head>
 <body class="admin-page editor-page">
   <header class="admin-header">
@@ -21,8 +21,9 @@
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         {{if not .IsNew}}<input type="hidden" name="lock_version" value="{{.Content.LockVersion}}">{{end}}
         <label>标题<input class="title-input" name="title" value="{{.Content.Title}}" maxlength="200" placeholder="{{.Descriptor.Singular}}标题" required autofocus></label>
-        <label>固定链接<div class="slug-input"><span>{{.Descriptor.PermalinkPrefix}}</span><input name="slug" value="{{.Content.Slug}}" maxlength="120" placeholder="about-or-随笔" required {{if .Published}}readonly{{end}}></div></label>
+        <label>固定链接<div class="slug-input"><span>{{.Descriptor.PermalinkPrefix}}</span><input name="slug" value="{{.Content.Slug}}" maxlength="120" placeholder="about-or-随笔" required></div>{{if .Published}}<small>修改会先作为草稿保存；再次发布时切换地址，并自动将旧地址永久重定向到新地址。</small>{{end}}</label>
         <label>摘要<textarea name="excerpt" rows="3" maxlength="500" placeholder="用一两句话说明这项内容。">{{.Content.Excerpt}}</textarea></label>
+        <details class="seo-panel" {{if or .Content.SEOTitle .Content.SEODescription}}open{{end}}><summary>搜索与分享元数据</summary><div><label>SEO 标题<input name="seo_title" value="{{.Content.SEOTitle}}" maxlength="200" placeholder="留空则使用内容标题与站点名"></label><label>SEO 描述<textarea name="seo_description" rows="3" maxlength="500" placeholder="留空则使用摘要；建议准确概括页面。">{{.Content.SEODescription}}</textarea></label></div></details>
         {{if eq .Descriptor.Kind "article"}}
         <div class="taxonomy-grid">
           <label>分类<select name="category_id"><option value="">不分类</option>{{range .Categories}}<option value="{{.ID}}" {{if and $.Content.Category (eq $.Content.Category.ID .ID)}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>

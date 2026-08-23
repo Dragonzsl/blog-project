@@ -52,12 +52,12 @@ func TestRevisionSnapshotScheduleUnpublishAndTrashLifecycle(t *testing.T) {
 		t.Fatal("published checkpoint was pruned")
 	}
 
-	snapshot := EditingSnapshot{ContentID: content.ID, BaseLockVersion: content.LockVersion, BrowserVersion: 100, Input: DraftInput{Title: "未完成标题", Slug: "lifecycle", BodyMarkdown: "突然断线前的正文"}}
+	snapshot := EditingSnapshot{ContentID: content.ID, BaseLockVersion: content.LockVersion, BrowserVersion: 100, Input: DraftInput{Title: "未完成标题", Slug: "lifecycle", SEOTitle: "未完成 SEO 标题", SEODescription: "未完成 SEO 摘要", BodyMarkdown: "突然断线前的正文"}}
 	if err := service.SaveEditingSnapshot(ctx, "article", snapshot); err != nil {
 		t.Fatal(err)
 	}
 	loadedSnapshot, err := service.EditingSnapshot(ctx, "article", content.ID)
-	if err != nil || loadedSnapshot.Input.BodyMarkdown != "突然断线前的正文" {
+	if err != nil || loadedSnapshot.Input.BodyMarkdown != "突然断线前的正文" || loadedSnapshot.Input.SEOTitle != "未完成 SEO 标题" || loadedSnapshot.Input.SEODescription != "未完成 SEO 摘要" {
 		t.Fatalf("snapshot=%+v err=%v", loadedSnapshot, err)
 	}
 	afterSnapshotRevisions, err := service.Revisions(ctx, "article", content.ID)

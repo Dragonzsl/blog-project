@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -31,6 +32,7 @@ type Config struct {
 	Database   Database   `toml:"database"`
 	Media      Media      `toml:"media"`
 	Publishing Publishing `toml:"publishing"`
+	Discovery  Discovery  `toml:"discovery"`
 	Logging    Logging    `toml:"logging"`
 	Security   Security   `toml:"security"`
 }
@@ -65,6 +67,14 @@ type Publishing struct {
 	RevisionLimit           int      `toml:"revision_limit"`
 	TrashRetentionDays      int      `toml:"trash_retention_days"`
 	TrashCleanupInterval    Duration `toml:"trash_cleanup_interval"`
+}
+
+type Discovery struct {
+	BaseURL       string `toml:"base_url"`
+	SyncBatchSize int    `toml:"sync_batch_size"`
+	MaxResults    int    `toml:"max_results"`
+	FeedLimit     int    `toml:"feed_limit"`
+	SitemapLimit  int    `toml:"sitemap_limit"`
 }
 
 type Logging struct {
@@ -105,6 +115,13 @@ func Defaults() Config {
 			RevisionLimit:           50,
 			TrashRetentionDays:      30,
 			TrashCleanupInterval:    Duration{Duration: 6 * time.Hour},
+		},
+		Discovery: Discovery{
+			BaseURL:       "http://localhost:8080",
+			SyncBatchSize: 20,
+			MaxResults:    50,
+			FeedLimit:     50,
+			SitemapLimit:  50_000,
 		},
 		Logging: Logging{Level: "info", Format: "text"},
 		Security: Security{
@@ -180,6 +197,7 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_LOG_FORMAT", &cfg.Logging.Format},
 		{"BLOG_AUTH_SECRET", &cfg.Security.AuthSecret},
 		{"BLOG_AUTH_SECRET_FILE", &cfg.Security.AuthSecretFile},
+		{"BLOG_BASE_URL", &cfg.Discovery.BaseURL},
 	}
 	for _, override := range stringOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -218,6 +236,10 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_PUBLISHING_SCHEDULER_BATCH_SIZE", &cfg.Publishing.SchedulerBatchSize},
 		{"BLOG_PUBLISHING_REVISION_LIMIT", &cfg.Publishing.RevisionLimit},
 		{"BLOG_PUBLISHING_TRASH_RETENTION_DAYS", &cfg.Publishing.TrashRetentionDays},
+		{"BLOG_DISCOVERY_SYNC_BATCH_SIZE", &cfg.Discovery.SyncBatchSize},
+		{"BLOG_SEARCH_MAX_RESULTS", &cfg.Discovery.MaxResults},
+		{"BLOG_RSS_LIMIT", &cfg.Discovery.FeedLimit},
+		{"BLOG_SITEMAP_LIMIT", &cfg.Discovery.SitemapLimit},
 	}
 	if value, ok := os.LookupEnv("BLOG_MEDIA_VARIANT_WIDTHS"); ok && strings.TrimSpace(value) != "" {
 		var widths []int
@@ -310,6 +332,22 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Publishing.TrashCleanupInterval.Duration < time.Minute || cfg.Publishing.TrashCleanupInterval.Duration > 24*time.Hour {
 		problems = append(problems, errors.New("publishing.trash_cleanup_interval must be between 1m and 24h"))
+	}
+	baseURL, err := url.Parse(strings.TrimSpace(cfg.Discovery.BaseURL))
+	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		problems = append(problems, errors.New("discovery.base_url must be an absolute HTTP or HTTPS URL without credentials, query, or fragment"))
+	}
+	if cfg.Discovery.SyncBatchSize < 1 || cfg.Discovery.SyncBatchSize > 100 {
+		problems = append(problems, errors.New("discovery.sync_batch_size must be between 1 and 100"))
+	}
+	if cfg.Discovery.MaxResults < 10 || cfg.Discovery.MaxResults > 100 {
+		problems = append(problems, errors.New("discovery.max_results must be between 10 and 100"))
+	}
+	if cfg.Discovery.FeedLimit < 1 || cfg.Discovery.FeedLimit > 200 {
+		problems = append(problems, errors.New("discovery.feed_limit must be between 1 and 200"))
+	}
+	if cfg.Discovery.SitemapLimit < 100 || cfg.Discovery.SitemapLimit > 50_000 {
+		problems = append(problems, errors.New("discovery.sitemap_limit must be between 100 and 50000"))
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))

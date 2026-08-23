@@ -72,13 +72,15 @@ func (s *Service) createDraft(ctx context.Context, kind string, input DraftInput
 		return Article{}, err
 	}
 	return s.repository.CreateDraft(ctx, kind, contentPublicID, revisionInput{
-		PublicID:     revisionPublicID,
-		Title:        input.Title,
-		Slug:         input.Slug,
-		SlugKey:      input.slugKey,
-		Excerpt:      input.Excerpt,
-		BodyMarkdown: input.BodyMarkdown,
-		Reason:       "create",
+		PublicID:       revisionPublicID,
+		Title:          input.Title,
+		Slug:           input.Slug,
+		SlugKey:        input.slugKey,
+		Excerpt:        input.Excerpt,
+		SEOTitle:       input.SEOTitle,
+		SEODescription: input.SEODescription,
+		BodyMarkdown:   input.BodyMarkdown,
+		Reason:         "create",
 	}, input.CategoryID, input.TagIDs, now)
 }
 
@@ -104,13 +106,15 @@ func (s *Service) updateDraft(ctx context.Context, kind string, id, expectedVers
 		return Article{}, err
 	}
 	return s.repository.UpdateDraft(ctx, kind, id, expectedVersion, revisionInput{
-		PublicID:     revisionPublicID,
-		Title:        input.Title,
-		Slug:         input.Slug,
-		SlugKey:      input.slugKey,
-		Excerpt:      input.Excerpt,
-		BodyMarkdown: input.BodyMarkdown,
-		Reason:       "save",
+		PublicID:       revisionPublicID,
+		Title:          input.Title,
+		Slug:           input.Slug,
+		SlugKey:        input.slugKey,
+		Excerpt:        input.Excerpt,
+		SEOTitle:       input.SEOTitle,
+		SEODescription: input.SEODescription,
+		BodyMarkdown:   input.BodyMarkdown,
+		Reason:         "save",
 	}, input.CategoryID, input.TagIDs, now, s.options.RevisionLimit)
 }
 
@@ -207,7 +211,7 @@ func (s *Service) RestoreRevision(ctx context.Context, kind string, contentID, r
 	if err != nil {
 		return Article{}, err
 	}
-	input := DraftInput{Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, BodyMarkdown: revision.BodyMarkdown}
+	input := DraftInput{Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, SEOTitle: revision.SEOTitle, SEODescription: revision.SEODescription, BodyMarkdown: revision.BodyMarkdown}
 	if current.PublishedRevisionID > 0 {
 		input.Slug = current.Slug
 	}
@@ -226,7 +230,7 @@ func (s *Service) RestoreRevision(ctx context.Context, kind string, contentID, r
 	if err != nil {
 		return Article{}, err
 	}
-	return s.repository.UpdateDraft(ctx, kind, contentID, expectedVersion, revisionInput{PublicID: publicID, Title: input.Title, Slug: input.Slug, SlugKey: input.slugKey, Excerpt: input.Excerpt, BodyMarkdown: input.BodyMarkdown, Reason: "restore"}, input.CategoryID, input.TagIDs, now, s.options.RevisionLimit)
+	return s.repository.UpdateDraft(ctx, kind, contentID, expectedVersion, revisionInput{PublicID: publicID, Title: input.Title, Slug: input.Slug, SlugKey: input.slugKey, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, Reason: "restore"}, input.CategoryID, input.TagIDs, now, s.options.RevisionLimit)
 }
 
 func (s *Service) SaveEditingSnapshot(ctx context.Context, kind string, snapshot EditingSnapshot) error {
@@ -318,6 +322,12 @@ func validateSnapshotInput(kind string, input DraftInput) error {
 	if !utf8.ValidString(input.Excerpt) || utf8.RuneCountInString(input.Excerpt) > 500 {
 		return ValidationError{Message: "编辑快照摘要不能超过 500 个字符"}
 	}
+	if !utf8.ValidString(input.SEOTitle) || utf8.RuneCountInString(input.SEOTitle) > 200 {
+		return ValidationError{Message: "编辑快照 SEO 标题不能超过 200 个字符"}
+	}
+	if !utf8.ValidString(input.SEODescription) || utf8.RuneCountInString(input.SEODescription) > 500 {
+		return ValidationError{Message: "编辑快照 SEO 描述不能超过 500 个字符"}
+	}
 	if !utf8.ValidString(input.BodyMarkdown) || len(input.BodyMarkdown) > 2<<20 {
 		return ValidationError{Message: "编辑快照正文不能超过 2 MiB"}
 	}
@@ -377,6 +387,8 @@ func (s *Service) NavigationContentOptions(ctx context.Context) ([]organization.
 func validateInput(kind string, input DraftInput) (DraftInput, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Excerpt = strings.TrimSpace(input.Excerpt)
+	input.SEOTitle = strings.TrimSpace(input.SEOTitle)
+	input.SEODescription = strings.TrimSpace(input.SEODescription)
 	if !utf8.ValidString(input.Title) || utf8.RuneCountInString(input.Title) < 1 || utf8.RuneCountInString(input.Title) > 200 {
 		return DraftInput{}, ValidationError{Message: "标题需要 1–200 个字符"}
 	}
@@ -388,6 +400,12 @@ func validateInput(kind string, input DraftInput) (DraftInput, error) {
 	input.slugKey = slugKey
 	if !utf8.ValidString(input.Excerpt) || utf8.RuneCountInString(input.Excerpt) > 500 {
 		return DraftInput{}, ValidationError{Message: "摘要不能超过 500 个字符"}
+	}
+	if !utf8.ValidString(input.SEOTitle) || utf8.RuneCountInString(input.SEOTitle) > 200 {
+		return DraftInput{}, ValidationError{Message: "SEO 标题不能超过 200 个字符"}
+	}
+	if !utf8.ValidString(input.SEODescription) || utf8.RuneCountInString(input.SEODescription) > 500 {
+		return DraftInput{}, ValidationError{Message: "SEO 描述不能超过 500 个字符"}
 	}
 	if !utf8.ValidString(input.BodyMarkdown) || len(input.BodyMarkdown) > 2<<20 {
 		return DraftInput{}, ValidationError{Message: "Markdown 正文不能超过 2 MiB"}

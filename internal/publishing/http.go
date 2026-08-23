@@ -142,6 +142,7 @@ func (h *HTTPHandler) contentEdit(w http.ResponseWriter, r *http.Request, kind s
 			loaded := postedContent(kind, content.ID, content.LockVersion, snapshot.Input)
 			loaded.Status = content.Status
 			loaded.PublishedRevisionID = content.PublishedRevisionID
+			loaded.PublishedSlug = content.PublishedSlug
 			loaded.PublishedAt = content.PublishedAt
 			loaded.ScheduledAt = content.ScheduledAt
 			content = loaded
@@ -483,7 +484,11 @@ func (h *HTTPHandler) parseContentForm(w http.ResponseWriter, r *http.Request, k
 	if !h.security.VerifyParsedCSRF(w, r) {
 		return DraftInput{}, false
 	}
-	input := DraftInput{Title: r.FormValue("title"), Slug: r.FormValue("slug"), Excerpt: r.FormValue("excerpt"), BodyMarkdown: r.FormValue("body_markdown")}
+	input := DraftInput{
+		Title: r.FormValue("title"), Slug: r.FormValue("slug"), Excerpt: r.FormValue("excerpt"),
+		SEOTitle: r.FormValue("seo_title"), SEODescription: r.FormValue("seo_description"),
+		BodyMarkdown: r.FormValue("body_markdown"),
+	}
 	if kind == "article" {
 		if value := r.FormValue("category_id"); value != "" {
 			categoryID, err := strconv.ParseInt(value, 10, 64)
@@ -597,7 +602,7 @@ func contentTagIDs(content Article) []int64 {
 }
 
 func postedContent(kind string, id, version int64, input DraftInput) Article {
-	content := Article{ID: id, Kind: kind, Title: input.Title, Slug: input.Slug, Excerpt: input.Excerpt, BodyMarkdown: input.BodyMarkdown, LockVersion: version}
+	content := Article{ID: id, Kind: kind, Title: input.Title, Slug: input.Slug, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, LockVersion: version}
 	if input.CategoryID > 0 {
 		content.Category = &organization.Category{ID: input.CategoryID}
 	}
@@ -642,10 +647,14 @@ func (h *HTTPHandler) redirectToEditor(w http.ResponseWriter, r *http.Request, k
 	http.Redirect(w, r, fmt.Sprintf("%s/%d/edit", describeContent(kind).ListURL, id), http.StatusSeeOther)
 }
 func publicURL(content Article) string {
-	if content.Kind == "page" {
-		return "/" + content.Slug
+	slug := content.PublishedSlug
+	if slug == "" {
+		slug = content.Slug
 	}
-	return "/posts/" + content.Slug
+	if content.Kind == "page" {
+		return "/" + slug
+	}
+	return "/posts/" + slug
 }
 
 func (h *HTTPHandler) renderAdmin(w http.ResponseWriter, r *http.Request, name string, data map[string]any) {
@@ -699,8 +708,6 @@ func userMessage(err error) string {
 		return "内容已在其他页面被修改，请刷新后合并更改。"
 	case errors.Is(err, ErrSlugUnavailable):
 		return "这个固定链接已经被使用或保留。"
-	case errors.Is(err, ErrPublishedSlugImmutable):
-		return "已发布内容的固定链接不可直接修改。"
 	case errors.Is(err, ErrInvalidTransition):
 		return "当前状态不支持这项操作，请刷新后重试。"
 	default:
@@ -709,7 +716,7 @@ func userMessage(err error) string {
 }
 func isUserFacingError(err error) bool {
 	var validation ValidationError
-	return errors.As(err, &validation) || errors.Is(err, ErrConflict) || errors.Is(err, ErrSlugUnavailable) || errors.Is(err, ErrPublishedSlugImmutable) || errors.Is(err, ErrInvalidTransition)
+	return errors.As(err, &validation) || errors.Is(err, ErrConflict) || errors.Is(err, ErrSlugUnavailable) || errors.Is(err, ErrInvalidTransition)
 }
 
 func revisionReasonLabel(reason string) string {

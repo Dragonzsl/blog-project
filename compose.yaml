@@ -35,6 +35,7 @@ services:
       BLOG_LOG_FORMAT: ${BLOG_LOG_FORMAT:-json}
       BLOG_AUTH_SECRET: ${BLOG_AUTH_SECRET:-}
       BLOG_COOKIE_SECURE: "true"
+      BLOG_BASE_URL: ${BLOG_SITE_ADDRESS:-https://localhost}
       GOMEMLIMIT: ${BLOG_MEMORY_LIMIT:-192MiB}
     volumes:
       - blog_data:/data

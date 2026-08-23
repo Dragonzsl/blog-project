@@ -30,12 +30,26 @@ type NavigationLink struct {
 }
 type Navigation struct{ Primary, Footer []NavigationLink }
 
+type PageMetadata struct {
+	Title, Description, CanonicalURL, OpenGraphType, RSSURL string
+	NoIndex                                                 bool
+	JSONLD                                                  template.JS
+}
+
 type ArticleCard struct {
+	Kind         string
+	Path         string
 	Title        string
 	Slug         string
 	Excerpt      string
 	PublishedAt  string
 	PublishedISO string
+}
+
+type SearchPageData struct {
+	Query, Kind, Category, Tag, Sort string
+	Searched, Invalid                bool
+	Results                          []ArticleCard
 }
 
 type Theme struct {
@@ -75,6 +89,10 @@ func (t *Theme) AssetHash() string { return t.assetHash }
 func (t *Theme) CSS() []byte       { return t.css }
 
 func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool, backURL string, navigation ...Navigation) ([]byte, error) {
+	return t.RenderArticlePage(siteName, article, preview, backURL, firstNavigation(navigation), PageMetadata{})
+}
+
+func (t *Theme) RenderArticlePage(siteName string, article ArticleData, preview bool, backURL string, navigation Navigation, metadata PageMetadata) ([]byte, error) {
 	body, err := t.markdown.Render(article.BodyMarkdown)
 	if err != nil {
 		return nil, err
@@ -108,7 +126,8 @@ func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool
 		"Preview":    preview,
 		"BackURL":    backURL,
 		"Article":    view,
-		"Navigation": firstNavigation(navigation),
+		"Navigation": navigation,
+		"Meta":       metadata,
 	}
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "article.html", data); err != nil {
@@ -118,6 +137,10 @@ func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool
 }
 
 func (t *Theme) RenderHome(siteName string, articles []ArticleData, navigation ...Navigation) ([]byte, error) {
+	return t.RenderHomePage(siteName, articles, firstNavigation(navigation), PageMetadata{})
+}
+
+func (t *Theme) RenderHomePage(siteName string, articles []ArticleData, navigation Navigation, metadata PageMetadata) ([]byte, error) {
 	cards := make([]ArticleCard, 0, len(articles))
 	for _, article := range articles {
 		card := ArticleCard{Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt}
@@ -132,7 +155,8 @@ func (t *Theme) RenderHome(siteName string, articles []ArticleData, navigation .
 		"SiteName":   siteName,
 		"AssetURL":   t.assetURL,
 		"Articles":   cards,
-		"Navigation": firstNavigation(navigation),
+		"Navigation": navigation,
+		"Meta":       metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default home theme: %w", err)
 	}
@@ -140,6 +164,10 @@ func (t *Theme) RenderHome(siteName string, articles []ArticleData, navigation .
 }
 
 func (t *Theme) RenderListing(siteName, title, description string, articles []ArticleData, navigation Navigation) ([]byte, error) {
+	return t.RenderListingPage(siteName, title, description, articles, navigation, PageMetadata{})
+}
+
+func (t *Theme) RenderListingPage(siteName, title, description string, articles []ArticleData, navigation Navigation, metadata PageMetadata) ([]byte, error) {
 	cards := make([]ArticleCard, 0, len(articles))
 	for _, article := range articles {
 		card := ArticleCard{Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt}
@@ -152,9 +180,20 @@ func (t *Theme) RenderListing(siteName, title, description string, articles []Ar
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "listing.html", map[string]any{
 		"SiteName": siteName, "AssetURL": t.assetURL, "Title": title,
-		"Description": description, "Articles": cards, "Navigation": navigation,
+		"Description": description, "Articles": cards, "Navigation": navigation, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default listing theme: %w", err)
+	}
+	return output.Bytes(), nil
+}
+
+func (t *Theme) RenderSearch(siteName string, search SearchPageData, navigation Navigation, metadata PageMetadata) ([]byte, error) {
+	var output bytes.Buffer
+	if err := t.templates.ExecuteTemplate(&output, "search.html", map[string]any{
+		"SiteName": siteName, "AssetURL": t.assetURL, "Search": search,
+		"Navigation": navigation, "Meta": metadata,
+	}); err != nil {
+		return nil, fmt.Errorf("render default search theme: %w", err)
 	}
 	return output.Bytes(), nil
 }

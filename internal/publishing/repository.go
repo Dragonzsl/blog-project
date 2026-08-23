@@ -31,11 +31,11 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO contents (
-			public_id, kind, status, slug, slug_key, title, excerpt, body_markdown,
+			public_id, kind, status, slug, slug_key, title, excerpt, seo_title, seo_description, body_markdown,
 			lock_version, created_at, updated_at
-		) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, 1, ?, ?)
+		) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 	`, publicID, kind, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt,
-		revision.BodyMarkdown, millis(now), millis(now))
+		revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, millis(now), millis(now))
 	if err != nil {
 		return Article{}, mapWriteError(err)
 	}
@@ -80,14 +80,13 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	}
 	defer tx.Rollback()
 	var currentSlugKey string
-	var publishedRevision sql.NullInt64
 	var currentVersion, nextRevision int64
 	var publicID []byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT slug_key, published_revision_id, lock_version, public_id,
+		SELECT slug_key, lock_version, public_id,
 		       (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM content_revisions WHERE content_id = contents.id)
 		FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL
-	`, id, kind).Scan(&currentSlugKey, &publishedRevision, &currentVersion, &publicID, &nextRevision)
+	`, id, kind).Scan(&currentSlugKey, &currentVersion, &publicID, &nextRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrNotFound
 	}
@@ -96,9 +95,6 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	}
 	if currentVersion != expectedVersion {
 		return Article{}, ErrConflict
-	}
-	if revision.SlugKey != currentSlugKey && publishedRevision.Valid {
-		return Article{}, ErrPublishedSlugImmutable
 	}
 	if revision.SlugKey != currentSlugKey {
 		if err := reservePath(ctx, tx, id, kind, revision.Slug, revision.SlugKey, "draft", now); err != nil {
@@ -122,11 +118,11 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE contents
-		SET slug = ?, slug_key = ?, title = ?, excerpt = ?, body_markdown = ?,
+		SET slug = ?, slug_key = ?, title = ?, excerpt = ?, seo_title = ?, seo_description = ?, body_markdown = ?,
 		    current_revision_id = ?, lock_version = lock_version + 1, updated_at = ?
 		WHERE id = ? AND kind = ? AND lock_version = ?
-	`, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt,
-		revision.BodyMarkdown, revisionID, millis(now), id, kind, expectedVersion)
+	`, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt, revision.SEOTitle,
+		revision.SEODescription, revision.BodyMarkdown, revisionID, millis(now), id, kind, expectedVersion)
 	if err != nil {
 		return Article{}, mapWriteError(err)
 	}
@@ -163,8 +159,9 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	defer tx.Rollback()
 	var currentRevision, currentVersion int64
 	var publicID []byte
-	var slugKey, bodyMarkdown string
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug_key, body_markdown FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slugKey, &bodyMarkdown)
+	var slug, slugKey, bodyMarkdown string
+	var publishedSlug, publishedSlugKey sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug, slug_key, published_slug, published_slug_key, body_markdown FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &bodyMarkdown)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrNotFound
 	}
@@ -180,6 +177,7 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	result, err := tx.ExecContext(ctx, `
 		UPDATE contents
 		SET status = 'published', published_revision_id = current_revision_id,
+		    published_slug = slug, published_slug_key = slug_key,
 		    published_at = COALESCE(published_at, ?), scheduled_at = NULL,
 		    withdrawn_at = NULL,
 		    lock_version = lock_version + 1, updated_at = ?
@@ -196,6 +194,14 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	}
 	if err := rebaseEditingSnapshot(ctx, tx, id, expectedVersion); err != nil {
 		return Article{}, err
+	}
+	if publishedSlugKey.Valid && publishedSlugKey.String != slugKey {
+		if err := saveRedirect(ctx, tx, publicPath(kind, publishedSlug.String), publicPath(kind, publishedSlugKey.String), publicPath(kind, slug), publicPath(kind, slugKey), "content_slug", now); err != nil {
+			return Article{}, err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason='historical' WHERE content_id=? AND path_key=?", id, publicPath(kind, publishedSlugKey.String)); err != nil {
+			return Article{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason = 'published' WHERE content_id = ? AND path_key = ?", id, publicPath(kind, slugKey)); err != nil {
 		return Article{}, fmt.Errorf("publish reserved path: %w", err)
@@ -224,7 +230,7 @@ func (r *Repository) Content(ctx context.Context, kind string, id int64) (Articl
 }
 
 func (r *Repository) PublicContent(ctx context.Context, kind, slugKey string) (Article, error) {
-	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, publicContentSelect+` WHERE c.slug_key = ? AND c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL`, slugKey, kind))
+	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, publicContentSelect+` WHERE c.published_slug_key = ? AND c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL`, slugKey, kind))
 	if err != nil {
 		return Article{}, err
 	}
@@ -304,7 +310,7 @@ func (r *Repository) enrichTaxonomy(ctx context.Context, content Article) (Artic
 }
 
 const contentSelect = `
-	SELECT c.id, c.public_id, c.kind, c.status, c.slug, c.title, c.excerpt, c.body_markdown,
+	SELECT c.id, c.public_id, c.kind, c.status, c.slug, COALESCE(c.published_slug,''), c.title, c.excerpt, c.seo_title, c.seo_description, c.body_markdown,
 	       NULL, NULL,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
@@ -313,8 +319,8 @@ const contentSelect = `
 	FROM contents c`
 
 const publicContentSelect = `
-	SELECT c.id, c.public_id, c.kind, c.status, c.slug,
-	       r.title, r.excerpt, r.body_markdown,
+	SELECT c.id, c.public_id, c.kind, c.status, c.published_slug, c.published_slug,
+	       r.title, r.excerpt, r.seo_title, r.seo_description, r.body_markdown,
 	       r.category_public_id, r.tag_public_ids_json,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       r.created_at, c.scheduled_at, c.withdrawn_at, c.trashed_at,
@@ -333,7 +339,8 @@ func scanContent(row scanner) (Article, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&content.ID, &content.PublicID, &content.Kind, &content.Status, &content.Slug,
-		&content.Title, &content.Excerpt, &content.BodyMarkdown,
+		&content.PublishedSlug,
+		&content.Title, &content.Excerpt, &content.SEOTitle, &content.SEODescription, &content.BodyMarkdown,
 		&publishedCategoryPublicID, &publishedTagPublicIDsJSON,
 		&currentRevision, &publishedRevision, &publishedAt, &publishedRevisionAt,
 		&scheduledAt, &withdrawnAt, &trashedAt,
@@ -390,11 +397,11 @@ func (r *Repository) enrichPublishedTaxonomy(ctx context.Context, content Articl
 func insertRevision(ctx context.Context, tx *sql.Tx, contentID, revisionNumber int64, revision revisionInput, now time.Time) (int64, error) {
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO content_revisions (
-			public_id, content_id, revision_number, title, slug, excerpt,
+			public_id, content_id, revision_number, title, slug, excerpt, seo_title, seo_description,
 			body_markdown, reason, category_public_id, tag_public_ids_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, revision.PublicID, contentID, revisionNumber, revision.Title, revision.Slug,
-		revision.Excerpt, revision.BodyMarkdown, revision.Reason, nullableBytes(revision.CategoryPublicID),
+		revision.Excerpt, revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, revision.Reason, nullableBytes(revision.CategoryPublicID),
 		revision.TagPublicIDsJSON, millis(now))
 	if err != nil {
 		return 0, fmt.Errorf("save content revision: %w", err)
@@ -424,14 +431,7 @@ func reservePath(ctx context.Context, tx *sql.Tx, contentID int64, kind, display
 	if inserted == 1 {
 		return nil
 	}
-	var existingContentID sql.NullInt64
-	if err := tx.QueryRowContext(ctx, "SELECT content_id FROM reserved_paths WHERE path_key = ?", pathKey).Scan(&existingContentID); err != nil {
-		return fmt.Errorf("read reserved path owner: %w", err)
-	}
-	if !existingContentID.Valid || existingContentID.Int64 != contentID {
-		return ErrSlugUnavailable
-	}
-	return nil
+	return ErrSlugUnavailable
 }
 
 func publicPath(kind, slug string) string {
@@ -439,6 +439,26 @@ func publicPath(kind, slug string) string {
 		return "/" + slug
 	}
 	return "/posts/" + slug
+}
+
+func saveRedirect(ctx context.Context, tx *sql.Tx, sourcePath, sourceKey, targetPath, targetKey, reason string, now time.Time) error {
+	if sourceKey == targetKey {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE redirects SET target_path=?,target_path_key=?,updated_at=? WHERE target_path_key=?
+	`, targetPath, targetKey, millis(now), sourceKey); err != nil {
+		return fmt.Errorf("flatten redirect chain: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO redirects(source_path,source_path_key,target_path,target_path_key,status_code,reason,created_at,updated_at)
+		VALUES(?,?,?,?,301,?,?,?)
+		ON CONFLICT(source_path_key) DO UPDATE SET
+			target_path=excluded.target_path,target_path_key=excluded.target_path_key,status_code=301,reason=excluded.reason,updated_at=excluded.updated_at
+	`, sourcePath, sourceKey, targetPath, targetKey, reason, millis(now), millis(now)); err != nil {
+		return fmt.Errorf("save redirect: %w", err)
+	}
+	return nil
 }
 
 func insertAudit(ctx context.Context, tx *sql.Tx, action, kind string, publicID []byte, now time.Time) error {

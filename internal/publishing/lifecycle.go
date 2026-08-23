@@ -12,7 +12,7 @@ import (
 func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64) ([]Revision, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
-		       revision.title, revision.slug, revision.excerpt, '',
+		       revision.title, revision.slug, revision.excerpt, '', '', '',
 		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
 		       revision.is_publication_checkpoint, revision.created_at
 		FROM content_revisions revision
@@ -43,7 +43,7 @@ func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64
 func (r *Repository) Revision(ctx context.Context, kind string, contentID, revisionID int64) (Revision, error) {
 	revision, err := scanRevision(r.database.Reader.QueryRowContext(ctx, `
 		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
-		       revision.title, revision.slug, revision.excerpt, revision.body_markdown,
+		       revision.title, revision.slug, revision.excerpt, revision.seo_title, revision.seo_description, revision.body_markdown,
 		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
 		       revision.is_publication_checkpoint, revision.created_at
 		FROM content_revisions revision
@@ -62,7 +62,7 @@ func scanRevision(row scanner) (Revision, error) {
 	var checkpoint bool
 	var createdAt int64
 	err := row.Scan(&revision.ID, &revision.PublicID, &revision.ContentID, &revision.Number,
-		&revision.Title, &revision.Slug, &revision.Excerpt, &revision.BodyMarkdown,
+		&revision.Title, &revision.Slug, &revision.Excerpt, &revision.SEOTitle, &revision.SEODescription, &revision.BodyMarkdown,
 		&categoryPublicID, &tagPublicIDs, &revision.Reason, &checkpoint, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Revision{}, ErrNotFound
@@ -85,22 +85,23 @@ func (r *Repository) SaveEditingSnapshot(ctx context.Context, kind string, snaps
 	result, err := r.database.Writer.ExecContext(ctx, `
 		INSERT INTO editing_snapshots (
 			content_id, base_lock_version, browser_version, title, slug, excerpt,
-			body_markdown, category_id, tag_ids_json, updated_at
+			seo_title, seo_description, body_markdown, category_id, tag_ids_json, updated_at
 		)
-		SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		FROM contents
 		WHERE id = ? AND kind = ? AND lock_version = ? AND trashed_at IS NULL
 		ON CONFLICT(content_id) DO UPDATE SET
 			base_lock_version=excluded.base_lock_version,
 			browser_version=excluded.browser_version,
 			title=excluded.title, slug=excluded.slug, excerpt=excluded.excerpt,
+			seo_title=excluded.seo_title, seo_description=excluded.seo_description,
 			body_markdown=excluded.body_markdown, category_id=excluded.category_id,
 			tag_ids_json=excluded.tag_ids_json, updated_at=excluded.updated_at
 		WHERE editing_snapshots.base_lock_version < excluded.base_lock_version
 		   OR (editing_snapshots.base_lock_version = excluded.base_lock_version
 		       AND editing_snapshots.browser_version < excluded.browser_version)`,
 		snapshot.BaseLockVersion, snapshot.BrowserVersion, snapshot.Input.Title, snapshot.Input.Slug,
-		snapshot.Input.Excerpt, snapshot.Input.BodyMarkdown, nullableInt64(snapshot.Input.CategoryID),
+		snapshot.Input.Excerpt, snapshot.Input.SEOTitle, snapshot.Input.SEODescription, snapshot.Input.BodyMarkdown, nullableInt64(snapshot.Input.CategoryID),
 		string(tagIDs), millis(now), snapshot.ContentID, kind, snapshot.BaseLockVersion)
 	if err != nil {
 		return fmt.Errorf("save editing snapshot: %w", err)
@@ -122,14 +123,14 @@ func (r *Repository) EditingSnapshot(ctx context.Context, kind string, contentID
 	var updatedAt int64
 	err := r.database.Reader.QueryRowContext(ctx, `
 		SELECT snapshot.content_id, snapshot.base_lock_version, snapshot.browser_version,
-		       snapshot.title, snapshot.slug, snapshot.excerpt, snapshot.body_markdown,
+		       snapshot.title, snapshot.slug, snapshot.excerpt, snapshot.seo_title, snapshot.seo_description, snapshot.body_markdown,
 		       snapshot.category_id, snapshot.tag_ids_json, snapshot.updated_at
 		FROM editing_snapshots snapshot
 		JOIN contents content ON content.id = snapshot.content_id
 		WHERE snapshot.content_id = ? AND content.kind = ? AND content.trashed_at IS NULL`, contentID, kind).Scan(
 		&snapshot.ContentID, &snapshot.BaseLockVersion, &snapshot.BrowserVersion,
 		&snapshot.Input.Title, &snapshot.Input.Slug, &snapshot.Input.Excerpt,
-		&snapshot.Input.BodyMarkdown, &categoryID, &tagIDsJSON, &updatedAt)
+		&snapshot.Input.SEOTitle, &snapshot.Input.SEODescription, &snapshot.Input.BodyMarkdown, &categoryID, &tagIDsJSON, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EditingSnapshot{}, ErrNotFound
 	}
@@ -368,9 +369,10 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	defer tx.Rollback()
 	var revisionID int64
 	var publicID []byte
-	var body string
+	var body, slug, slugKey string
+	var publishedSlug, publishedSlugKey sql.NullString
 	var scheduledAt, lockVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,scheduled_at,lock_version FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &scheduledAt, &lockVersion)
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,slug,slug_key,published_slug,published_slug_key,scheduled_at,lock_version FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &scheduledAt, &lockVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -380,7 +382,7 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	if _, err := tx.ExecContext(ctx, `UPDATE content_revisions SET is_publication_checkpoint=1 WHERE id=? AND content_id=?`, revisionID, id); err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE contents SET status='published',published_revision_id=current_revision_id,published_at=COALESCE(published_at,?),scheduled_at=NULL,withdrawn_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, scheduledAt, millis(now), id, kind, millis(now))
+	result, err := tx.ExecContext(ctx, `UPDATE contents SET status='published',published_revision_id=current_revision_id,published_slug=slug,published_slug_key=slug_key,published_at=COALESCE(published_at,?),scheduled_at=NULL,withdrawn_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, scheduledAt, millis(now), id, kind, millis(now))
 	if err != nil {
 		return false, err
 	}
@@ -390,7 +392,15 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	if err := rebaseEditingSnapshot(ctx, tx, id, lockVersion); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason='published' WHERE content_id=?", id); err != nil {
+	if publishedSlugKey.Valid && publishedSlugKey.String != slugKey {
+		if err := saveRedirect(ctx, tx, publicPath(kind, publishedSlug.String), publicPath(kind, publishedSlugKey.String), publicPath(kind, slug), publicPath(kind, slugKey), "content_slug", now); err != nil {
+			return false, err
+		}
+		if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason='historical' WHERE content_id=? AND path_key=?", id, publicPath(kind, publishedSlugKey.String)); err != nil {
+			return false, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason='published' WHERE content_id=? AND path_key=?", id, publicPath(kind, slugKey)); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {

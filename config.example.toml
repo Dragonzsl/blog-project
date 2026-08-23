@@ -26,6 +26,14 @@ revision_limit = 50
 trash_retention_days = 30
 trash_cleanup_interval = "6h"
 
+[discovery]
+# 用于 canonical、RSS、Sitemap 和 robots；生产环境请改为站点公开 HTTPS 地址。
+base_url = "http://localhost:8080"
+sync_batch_size = 20
+max_results = 50
+feed_limit = 50
+sitemap_limit = 50000
+
 [logging]
 level = "info"
 format = "text"

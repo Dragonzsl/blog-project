@@ -5,15 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#f7f5ef">
-  <title>{{.Article.Title}} · {{.SiteName}}</title>
-  {{if .Article.Excerpt}}<meta name="description" content="{{.Article.Excerpt}}">{{end}}
+  <title>{{if .Meta.Title}}{{.Meta.Title}}{{else}}{{.Article.Title}} · {{.SiteName}}{{end}}</title>
+  {{if .Meta.Description}}<meta name="description" content="{{.Meta.Description}}">{{else if .Article.Excerpt}}<meta name="description" content="{{.Article.Excerpt}}">{{end}}
+  {{template "page_metadata" .Meta}}
   <link rel="stylesheet" href="{{.AssetURL}}">
 </head>
 <body>
   {{if .Preview}}<div class="preview-ribbon"><span>私密预览 · 当前编辑版本</span><a href="{{.BackURL}}">返回编辑</a></div>{{end}}
   <header class="site-header">
     <a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a>
-    <nav aria-label="主导航"><a href="/">文章</a>{{template "primary_navigation" .Navigation.Primary}}</nav>
+    <nav aria-label="主导航"><a href="/">文章</a><a href="/search">搜索</a>{{template "primary_navigation" .Navigation.Primary}}</nav>
   </header>
   <main>
     <article class="article">

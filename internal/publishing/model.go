@@ -8,11 +8,10 @@ import (
 )
 
 var (
-	ErrNotFound               = errors.New("content not found")
-	ErrConflict               = errors.New("content was changed by another editor")
-	ErrSlugUnavailable        = errors.New("slug is already reserved")
-	ErrPublishedSlugImmutable = errors.New("published permalink cannot be changed")
-	ErrInvalidTransition      = errors.New("content lifecycle transition is not allowed")
+	ErrNotFound          = errors.New("content not found")
+	ErrConflict          = errors.New("content was changed by another editor")
+	ErrSlugUnavailable   = errors.New("slug is already reserved")
+	ErrInvalidTransition = errors.New("content lifecycle transition is not allowed")
 )
 
 type Article struct {
@@ -21,8 +20,11 @@ type Article struct {
 	Kind                      string
 	Status                    string
 	Slug                      string
+	PublishedSlug             string
 	Title                     string
 	Excerpt                   string
+	SEOTitle                  string
+	SEODescription            string
 	BodyMarkdown              string
 	CurrentRevisionID         int64
 	PublishedRevisionID       int64
@@ -48,6 +50,8 @@ type Revision struct {
 	Title                   string
 	Slug                    string
 	Excerpt                 string
+	SEOTitle                string
+	SEODescription          string
 	BodyMarkdown            string
 	CategoryPublicID        []byte
 	TagPublicIDsJSON        string
@@ -65,13 +69,15 @@ type EditingSnapshot struct {
 }
 
 type DraftInput struct {
-	Title        string
-	Slug         string
-	Excerpt      string
-	BodyMarkdown string
-	CategoryID   int64
-	TagIDs       []int64
-	slugKey      string
+	Title          string
+	Slug           string
+	Excerpt        string
+	SEOTitle       string
+	SEODescription string
+	BodyMarkdown   string
+	CategoryID     int64
+	TagIDs         []int64
+	slugKey        string
 }
 
 type ValidationError struct {
@@ -86,6 +92,8 @@ type revisionInput struct {
 	Slug             string
 	SlugKey          string
 	Excerpt          string
+	SEOTitle         string
+	SEODescription   string
 	BodyMarkdown     string
 	CategoryPublicID []byte
 	TagPublicIDsJSON string

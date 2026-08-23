@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
+	"github.com/zhushilin/blog-project/internal/discovery"
 	"github.com/zhushilin/blog-project/internal/identity"
 	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/operations"
@@ -30,6 +31,7 @@ type App struct {
 	database             *database.DB
 	server               *http.Server
 	publishing           *publishing.Service
+	discovery            *discovery.Service
 	lifecycleInterval    time.Duration
 	trashCleanupInterval time.Duration
 }
@@ -66,6 +68,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 	organizationService := organization.NewService(db)
+	discoveryService, err := discovery.NewService(discovery.NewRepository(db), discovery.Options{
+		BaseURL:       cfg.Discovery.BaseURL,
+		SyncBatchSize: cfg.Discovery.SyncBatchSize,
+		MaxResults:    cfg.Discovery.MaxResults,
+		FeedLimit:     cfg.Discovery.FeedLimit,
+		SitemapLimit:  cfg.Discovery.SitemapLimit,
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	organizationHTTP, err := organization.NewHTTPHandler(organizationService, publishingService, identityHTTP, identityService, logger)
 	if err != nil {
 		db.Close()
@@ -105,6 +118,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		logger,
 		organizationService,
 	)
+	presentationHTTP.SetDiscovery(discoveryService)
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -136,7 +150,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration}, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
@@ -182,6 +196,11 @@ func (app *App) runLifecycle(ctx context.Context) {
 		}
 		if published > 0 {
 			app.logger.InfoContext(ctx, "scheduled publishing processed", "published", published)
+			if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				app.logger.ErrorContext(ctx, "synchronize published search documents", "error", err)
+			} else if indexed > 0 {
+				app.logger.InfoContext(ctx, "search documents synchronized", "documents", indexed)
+			}
 		}
 	}
 	cleanupTrash := func() {
@@ -193,6 +212,11 @@ func (app *App) runLifecycle(ctx context.Context) {
 		if purged > 0 {
 			app.logger.InfoContext(ctx, "expired trash purged", "purged", purged)
 		}
+	}
+	if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		app.logger.ErrorContext(ctx, "initialize search documents", "error", err)
+	} else if indexed > 0 {
+		app.logger.InfoContext(ctx, "search documents initialized", "documents", indexed)
 	}
 	processScheduled()
 	cleanupTrash()

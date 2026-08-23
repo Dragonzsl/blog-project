@@ -60,6 +60,9 @@ func (r *Repository) Tags(ctx context.Context) ([]Tag, error) {
 
 func (r *Repository) CreateCategory(ctx context.Context, publicID []byte, input TermInput, slugKey string, now time.Time) (Category, error) {
 	result, err := r.write(ctx, "organization.category.created", "category", publicID, now, func(tx *sql.Tx) (sql.Result, error) {
+		if err := ensureTermPathAvailable(ctx, tx, "/categories/"+slugKey); err != nil {
+			return nil, err
+		}
 		return tx.ExecContext(ctx, `INSERT INTO categories(public_id,slug,slug_key,name,description,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, publicID, input.Slug, slugKey, input.Name, input.Description, input.SortOrder, millis(now), millis(now))
 	})
 	if err != nil {
@@ -71,7 +74,15 @@ func (r *Repository) CreateCategory(ctx context.Context, publicID []byte, input 
 
 func (r *Repository) UpdateCategory(ctx context.Context, id int64, input TermInput, slugKey string, now time.Time) (Category, error) {
 	result, err := r.write(ctx, "organization.category.updated", "category", nil, now, func(tx *sql.Tx) (sql.Result, error) {
-		return tx.ExecContext(ctx, `UPDATE categories SET slug=?,slug_key=?,name=?,description=?,sort_order=?,updated_at=? WHERE id=?`, input.Slug, slugKey, input.Name, input.Description, input.SortOrder, millis(now), id)
+		var oldSlug, oldKey string
+		if err := tx.QueryRowContext(ctx, "SELECT slug,slug_key FROM categories WHERE id=?", id).Scan(&oldSlug, &oldKey); err != nil {
+			return nil, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE categories SET slug=?,slug_key=?,name=?,description=?,sort_order=?,updated_at=? WHERE id=?`, input.Slug, slugKey, input.Name, input.Description, input.SortOrder, millis(now), id)
+		if err == nil && oldKey != slugKey {
+			err = saveTermRedirect(ctx, tx, "/categories/"+oldSlug, "/categories/"+oldKey, "/categories/"+input.Slug, "/categories/"+slugKey, "category_slug", now)
+		}
+		return result, err
 	})
 	if err != nil {
 		return Category{}, mapWriteError(err)
@@ -97,6 +108,9 @@ func (r *Repository) DeleteCategory(ctx context.Context, id int64, now time.Time
 
 func (r *Repository) CreateTag(ctx context.Context, publicID []byte, input TermInput, slugKey string, now time.Time) (Tag, error) {
 	result, err := r.write(ctx, "organization.tag.created", "tag", publicID, now, func(tx *sql.Tx) (sql.Result, error) {
+		if err := ensureTermPathAvailable(ctx, tx, "/tags/"+slugKey); err != nil {
+			return nil, err
+		}
 		return tx.ExecContext(ctx, `INSERT INTO tags(public_id,slug,slug_key,name,description,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, publicID, input.Slug, slugKey, input.Name, input.Description, millis(now), millis(now))
 	})
 	if err != nil {
@@ -107,7 +121,15 @@ func (r *Repository) CreateTag(ctx context.Context, publicID []byte, input TermI
 }
 func (r *Repository) UpdateTag(ctx context.Context, id int64, input TermInput, slugKey string, now time.Time) (Tag, error) {
 	result, err := r.write(ctx, "organization.tag.updated", "tag", nil, now, func(tx *sql.Tx) (sql.Result, error) {
-		return tx.ExecContext(ctx, `UPDATE tags SET slug=?,slug_key=?,name=?,description=?,updated_at=? WHERE id=?`, input.Slug, slugKey, input.Name, input.Description, millis(now), id)
+		var oldSlug, oldKey string
+		if err := tx.QueryRowContext(ctx, "SELECT slug,slug_key FROM tags WHERE id=?", id).Scan(&oldSlug, &oldKey); err != nil {
+			return nil, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE tags SET slug=?,slug_key=?,name=?,description=?,updated_at=? WHERE id=?`, input.Slug, slugKey, input.Name, input.Description, millis(now), id)
+		if err == nil && oldKey != slugKey {
+			err = saveTermRedirect(ctx, tx, "/tags/"+oldSlug, "/tags/"+oldKey, "/tags/"+input.Slug, "/tags/"+slugKey, "tag_slug", now)
+		}
+		return result, err
 	})
 	if err != nil {
 		return Tag{}, mapWriteError(err)
@@ -158,7 +180,7 @@ func (r *Repository) tag(ctx context.Context, id int64) (Tag, error) {
 }
 
 func (r *Repository) NavigationItems(ctx context.Context, location string, publicOnly bool) ([]NavigationItem, error) {
-	query := `SELECT ni.id,nm.location,COALESCE(ni.parent_id,0),ni.label,ni.target_kind,COALESCE(ni.content_id,ni.category_id,ni.tag_id,0),COALESCE(ni.external_url,''),ni.sort_order,c.kind,c.status,c.slug,ca.slug,t.slug FROM navigation_items ni JOIN navigation_menus nm ON nm.id=ni.menu_id LEFT JOIN contents c ON c.id=ni.content_id LEFT JOIN categories ca ON ca.id=ni.category_id LEFT JOIN tags t ON t.id=ni.tag_id`
+	query := `SELECT ni.id,nm.location,COALESCE(ni.parent_id,0),ni.label,ni.target_kind,COALESCE(ni.content_id,ni.category_id,ni.tag_id,0),COALESCE(ni.external_url,''),ni.sort_order,c.kind,c.status,COALESCE(c.published_slug,c.slug),ca.slug,t.slug FROM navigation_items ni JOIN navigation_menus nm ON nm.id=ni.menu_id LEFT JOIN contents c ON c.id=ni.content_id LEFT JOIN categories ca ON ca.id=ni.category_id LEFT JOIN tags t ON t.id=ni.tag_id`
 	args := []any{}
 	if location != "" {
 		query += " WHERE nm.location = ?"
@@ -517,6 +539,36 @@ func mapNavigationError(err error) error {
 		return ErrInvalidTarget
 	}
 	return err
+}
+
+func saveTermRedirect(ctx context.Context, tx *sql.Tx, sourcePath, sourceKey, targetPath, targetKey, reason string, now time.Time) error {
+	var targetReserved bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM redirects WHERE source_path_key=?)", targetKey).Scan(&targetReserved); err != nil {
+		return err
+	}
+	if targetReserved {
+		return ErrSlugUnavailable
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE redirects SET target_path=?,target_path_key=?,updated_at=? WHERE target_path_key=?", targetPath, targetKey, millis(now), sourceKey); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO redirects(source_path,source_path_key,target_path,target_path_key,status_code,reason,created_at,updated_at)
+		VALUES(?,?,?,?,301,?,?,?)
+		ON CONFLICT(source_path_key) DO UPDATE SET target_path=excluded.target_path,target_path_key=excluded.target_path_key,status_code=301,reason=excluded.reason,updated_at=excluded.updated_at
+	`, sourcePath, sourceKey, targetPath, targetKey, reason, millis(now), millis(now))
+	return err
+}
+
+func ensureTermPathAvailable(ctx context.Context, tx *sql.Tx, pathKey string) error {
+	var reserved bool
+	if err := tx.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM redirects WHERE source_path_key=?)", pathKey).Scan(&reserved); err != nil {
+		return err
+	}
+	if reserved {
+		return ErrSlugUnavailable
+	}
+	return nil
 }
 func millis(value time.Time) int64     { return value.UTC().UnixMilli() }
 func fromMillis(value int64) time.Time { return time.UnixMilli(value).UTC() }

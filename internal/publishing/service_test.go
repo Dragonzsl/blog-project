@@ -18,10 +18,12 @@ func TestArticleDraftPreviewPublishAndStablePermalink(t *testing.T) {
 	service.now = func() time.Time { return fixedTime }
 
 	draft, err := service.CreateDraft(ctx, DraftInput{
-		Title:        "第一篇文章",
-		Slug:         "first-post",
-		Excerpt:      "一段摘要",
-		BodyMarkdown: "# 初稿\n\n正文。",
+		Title:          "第一篇文章",
+		Slug:           "first-post",
+		Excerpt:        "一段摘要",
+		SEOTitle:       "独立 SEO 标题",
+		SEODescription: "独立 SEO 摘要",
+		BodyMarkdown:   "# 初稿\n\n正文。",
 	})
 	if err != nil {
 		t.Fatalf("CreateDraft() error = %v", err)
@@ -34,10 +36,12 @@ func TestArticleDraftPreviewPublishAndStablePermalink(t *testing.T) {
 	}
 
 	updated, err := service.UpdateDraft(ctx, draft.ID, draft.LockVersion, DraftInput{
-		Title:        "第一篇文章",
-		Slug:         "first-post",
-		Excerpt:      "更新后的摘要",
-		BodyMarkdown: "# 可发布版本\n\n正文。",
+		Title:          "第一篇文章",
+		Slug:           "first-post",
+		Excerpt:        "更新后的摘要",
+		SEOTitle:       "更新 SEO 标题",
+		SEODescription: "更新 SEO 摘要",
+		BodyMarkdown:   "# 可发布版本\n\n正文。",
 	})
 	if err != nil {
 		t.Fatalf("UpdateDraft() error = %v", err)
@@ -60,8 +64,8 @@ func TestArticleDraftPreviewPublishAndStablePermalink(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicArticle() error = %v", err)
 	}
-	if public.BodyMarkdown != "# 可发布版本\n\n正文。" {
-		t.Fatalf("public body = %q", public.BodyMarkdown)
+	if public.BodyMarkdown != "# 可发布版本\n\n正文。" || public.SEOTitle != "更新 SEO 标题" || public.SEODescription != "更新 SEO 摘要" {
+		t.Fatalf("public content = %+v", public)
 	}
 
 	newDraft, err := service.UpdateDraft(ctx, published.ID, published.LockVersion, DraftInput{
@@ -80,24 +84,44 @@ func TestArticleDraftPreviewPublishAndStablePermalink(t *testing.T) {
 	if public.Title != "第一篇文章" || public.BodyMarkdown != "# 可发布版本\n\n正文。" {
 		t.Fatalf("unpublished edit leaked publicly: %+v", public)
 	}
-	if _, err := service.UpdateDraft(ctx, newDraft.ID, newDraft.LockVersion, DraftInput{
-		Title: "改链接", Slug: "changed-post",
-	}); !errors.Is(err, ErrPublishedSlugImmutable) {
-		t.Fatalf("published slug change error = %v", err)
+	renamed, err := service.UpdateDraft(ctx, newDraft.ID, newDraft.LockVersion, DraftInput{
+		Title: "改链接", Slug: "changed-post", BodyMarkdown: "新地址正文",
+	})
+	if err != nil {
+		t.Fatalf("save renamed draft: %v", err)
+	}
+	if _, err := service.PublicArticle(ctx, "changed-post"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("renamed draft became public early: %v", err)
+	}
+	if _, err := service.PublicArticle(ctx, "first-post"); err != nil {
+		t.Fatalf("old public path changed before publication: %v", err)
+	}
+	if _, err := service.Publish(ctx, renamed.ID, renamed.LockVersion); err != nil {
+		t.Fatalf("publish renamed draft: %v", err)
+	}
+	if _, err := service.PublicArticle(ctx, "first-post"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old path remained canonical: %v", err)
+	}
+	if public, err := service.PublicArticle(ctx, "changed-post"); err != nil || public.Title != "改链接" {
+		t.Fatalf("new public path: article=%+v err=%v", public, err)
+	}
+	var redirectTarget string
+	if err := db.Reader.QueryRow("SELECT target_path FROM redirects WHERE source_path_key='/posts/first-post'").Scan(&redirectTarget); err != nil || redirectTarget != "/posts/changed-post" {
+		t.Fatalf("redirect target=%q err=%v", redirectTarget, err)
 	}
 
 	var epoch int64
 	if err := db.Reader.QueryRow("SELECT render_epoch FROM system_state WHERE id = 1").Scan(&epoch); err != nil {
 		t.Fatal(err)
 	}
-	if epoch != 2 {
-		t.Fatalf("render epoch = %d, want 2", epoch)
+	if epoch != 3 {
+		t.Fatalf("render epoch = %d, want 3", epoch)
 	}
 	var revisions, checkpoints int
 	if err := db.Reader.QueryRow("SELECT count(*), sum(is_publication_checkpoint) FROM content_revisions WHERE content_id = ?", draft.ID).Scan(&revisions, &checkpoints); err != nil {
 		t.Fatal(err)
 	}
-	if revisions != 3 || checkpoints != 1 {
+	if revisions != 4 || checkpoints != 2 {
 		t.Fatalf("revisions = %d, checkpoints = %d", revisions, checkpoints)
 	}
 }

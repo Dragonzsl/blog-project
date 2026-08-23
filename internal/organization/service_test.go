@@ -116,3 +116,36 @@ func TestTaxonomyNavigationAndRenderInvalidation(t *testing.T) {
 		t.Fatalf("render epoch=%d", epoch)
 	}
 }
+
+func TestTaxonomyRedirectChainsAreFlattenedAndHistoricalPathsStayReserved(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, config.Database{Path: filepath.Join(t.TempDir(), "blog.sqlite"), BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service := organization.NewService(db)
+	category, err := service.CreateCategory(ctx, organization.TermInput{Name: "技术", Slug: "tech"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	category, err = service.UpdateCategory(ctx, category.ID, organization.TermInput{Name: "技术", Slug: "engineering"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.UpdateCategory(ctx, category.ID, organization.TermInput{Name: "技术", Slug: "architecture"}); err != nil {
+		t.Fatal(err)
+	}
+	for source, want := range map[string]string{"/categories/tech": "/categories/architecture", "/categories/engineering": "/categories/architecture"} {
+		var target string
+		if err := db.Reader.QueryRowContext(ctx, "SELECT target_path FROM redirects WHERE source_path_key=?", source).Scan(&target); err != nil || target != want {
+			t.Fatalf("redirect %s target=%q err=%v", source, target, err)
+		}
+	}
+	if _, err := service.CreateCategory(ctx, organization.TermInput{Name: "旧地址", Slug: "tech"}); !errors.Is(err, organization.ErrSlugUnavailable) {
+		t.Fatalf("reuse historical taxonomy path error=%v", err)
+	}
+	if _, err := service.UpdateCategory(ctx, category.ID, organization.TermInput{Name: "技术", Slug: "tech"}); !errors.Is(err, organization.ErrSlugUnavailable) {
+		t.Fatalf("redirect loop error=%v", err)
+	}
+}

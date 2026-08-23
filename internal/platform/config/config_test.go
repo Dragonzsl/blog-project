@@ -36,6 +36,13 @@ revision_limit = 80
 trash_retention_days = 45
 trash_cleanup_interval = "4h"
 
+[discovery]
+base_url = "https://example.test/blog"
+sync_batch_size = 18
+max_results = 40
+feed_limit = 30
+sitemap_limit = 20000
+
 [logging]
 level = "warn"
 format = "json"
@@ -47,6 +54,7 @@ format = "json"
 	t.Setenv("BLOG_DATABASE_READ_CONNECTIONS", "3")
 	t.Setenv("BLOG_MEDIA_VARIANT_WIDTHS", "800, 1600")
 	t.Setenv("BLOG_PUBLISHING_SCHEDULER_BATCH_SIZE", "16")
+	t.Setenv("BLOG_SEARCH_MAX_RESULTS", "35")
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -69,6 +77,9 @@ format = "json"
 	}
 	if cfg.Publishing.SchedulerInterval.Duration != 9*time.Second || cfg.Publishing.SchedulerBatchSize != 16 || cfg.Publishing.EditingSnapshotInterval.Duration != 20*time.Second || cfg.Publishing.RevisionLimit != 80 || cfg.Publishing.TrashRetentionDays != 45 || cfg.Publishing.TrashCleanupInterval.Duration != 4*time.Hour {
 		t.Fatalf("publishing configuration = %+v", cfg.Publishing)
+	}
+	if cfg.Discovery.BaseURL != "https://example.test/blog" || cfg.Discovery.SyncBatchSize != 18 || cfg.Discovery.MaxResults != 35 || cfg.Discovery.FeedLimit != 30 || cfg.Discovery.SitemapLimit != 20000 {
+		t.Fatalf("discovery configuration = %+v", cfg.Discovery)
 	}
 	wantDataDir := filepath.Join(filepath.Dir(configPath), "var")
 	if cfg.Storage.DataDir != wantDataDir {
