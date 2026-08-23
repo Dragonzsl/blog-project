@@ -1,6 +1,6 @@
 # 个人博客系统
 
-这是一个面向公开复用的单站点自托管博客系统。当前正在按纵向切片实现阶段一核心闭环，完成情况见[阶段一实施记录](./docs/progress/stage-1.md)。
+这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环已经完成，完成情况与验证证据见[阶段一实施记录](./docs/progress/stage-1.md)。
 
 核心方向：Go 模块化单体、SQLite、Markdown、服务端渲染、可上传主题、可信编译期插件，以及可在 1 核 1 GiB VPS 上稳定运行的硬性资源预算。
 
@@ -21,7 +21,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站，以及中英文搜索、SEO、RSS、Sitemap、robots 和永久重定向。阶段一目前只剩完整备份恢复与恢复演练。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -32,7 +32,7 @@ curl --insecure https://localhost/readyz
 
 随后访问 `https://localhost/admin/setup`，创建唯一站主并绑定任意兼容 TOTP 的验证器。初始化完成时会显示 10 枚单次恢复码；系统不会再次保存或展示其明文。
 
-本地 `localhost` 使用 Caddy 内部证书，因此命令行演示带 `--insecure`；部署到已解析的公开域名时，将 `BLOG_SITE_ADDRESS` 改为实际 HTTPS 地址，Caddy 会自动申请证书。运行数据保存在 `blog_data` 命名卷中，普通停止不会删除数据：
+本地 `localhost` 使用 Caddy 内部证书，因此命令行演示带 `--insecure`；部署到已解析的公开域名时，将 `BLOG_SITE_ADDRESS` 改为实际 HTTPS 地址，Caddy 会自动申请证书。运行数据保存在 `blog_data` 命名卷的 `/data/site` 子目录中，使恢复流程可以原子切换整个站点数据；普通停止不会删除数据：
 
 ```bash
 docker compose down
@@ -59,6 +59,30 @@ printf '%s\n' 'your-new-password' | docker compose run --rm -T app auth recover 
 ```
 
 命令输出新的 TOTP URI、手动密钥和一次性恢复码，请立即离线保存。密码至少 12 个字符，不应直接写入命令行参数。若未设置 `BLOG_AUTH_SECRET`，应用首次启动会在数据卷内生成权限为 `0600` 的 `secrets/auth.key`；它用于加密 TOTP 密钥，不会出现在普通站点配置中。
+
+### 备份、演练与恢复
+
+应用默认每 24 小时创建一份一致性备份，并保留 7 个每日点和 4 个每周点；手动及升级前备份不受自动保留策略删除。备份使用 SQLite `VACUUM INTO` 快照和逐文件 SHA-256 清单，包含数据库、媒体、认证秘密、主题和插件，不包含缓存及其他备份：
+
+```bash
+docker compose exec -T app /blog backup create
+docker compose exec -T app /blog backup list
+docker compose exec -T app /blog status
+docker compose exec -T app /blog audit list
+docker compose exec -T app /blog upgrade prepare
+docker compose exec -T app /blog backup drill --archive /data/site/backups/<文件名>.tar.gz
+```
+
+完整恢复必须先停止正式应用，避免绕过数据目录锁。`--replace` 会原子切换数据目录，并把原数据保存在命令输出的 `site.before-restore-*` 回滚目录中：
+
+```bash
+docker compose stop app
+docker compose run --rm -T app restore --archive /data/site/backups/<文件名>.tar.gz --replace
+docker compose up -d
+docker compose ps
+```
+
+恢复完成后，所用归档位于旧数据的回滚目录内，因为备份不会递归包含备份文件；确认站点健康并另行保存归档前，不要删除该回滚目录。备份文件权限为 `0600`，但本地归档本身不加密且包含认证秘密，只能通过加密传输和受保护存储复制；对象存储与归档加密留作后续可选适配器。
 
 ## 当前约束
 
