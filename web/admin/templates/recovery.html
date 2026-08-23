@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>保存恢复码 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=2">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-intro" aria-labelledby="recovery-title">
+      <div class="wordmark"><span aria-hidden="true">✦</span> Personal Press</div>
+      <p class="eyebrow">最后一步</p>
+      <h1 id="recovery-title">把备用钥匙放在安全的地方。</h1>
+      <p class="lede">每枚恢复码只能使用一次。关闭页面后，系统不会再次显示这些明文。</p>
+      <ol class="step-list" aria-label="初始化步骤">
+        <li class="done"><span>01</span>站点与站主</li>
+        <li class="done"><span>02</span>绑定验证器</li>
+        <li class="active"><span>03</span>保存恢复码</li>
+      </ol>
+    </section>
+    <section class="auth-card wide">
+      <div>
+        <p class="eyebrow">步骤 3 / 3</p>
+        <h2>一次性恢复码</h2>
+        <p class="muted">建议保存到密码管理器，并额外保留一份离线副本。</p>
+      </div>
+      <div class="notice warning" role="status">这些恢复码只显示这一次。</div>
+      <ul class="recovery-codes" aria-label="恢复码">
+        {{range .Codes}}<li><code>{{.}}</code></li>{{end}}
+      </ul>
+      <a class="button-link" href="/admin/">我已安全保存，进入后台 <span aria-hidden="true">→</span></a>
+    </section>
+  </main>
+</body>
+</html>

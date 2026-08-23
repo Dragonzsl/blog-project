@@ -11,10 +11,12 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
+	"github.com/zhushilin/blog-project/internal/identity"
 	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
+	"github.com/zhushilin/blog-project/internal/platform/secrets"
 )
 
 type App struct {
@@ -29,6 +31,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	if err != nil {
 		return nil, err
 	}
+	authSecret, err := secrets.LoadOrCreateAuthSecret(cfg.Security)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	identityService, err := identity.NewService(identity.NewRepository(db), authSecret, cfg.Security.SessionLifetime.Duration)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	identityHTTP, err := identity.NewHTTPHandler(identityService, cfg.Security, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -38,6 +55,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	health := operations.NewHealthHandler(db, time.Now(), buildinfo.Version)
 	router.Get("/livez", health.Live)
 	router.Get("/readyz", health.Ready)
+	router.Mount("/admin", identityHTTP.Routes())
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddress,

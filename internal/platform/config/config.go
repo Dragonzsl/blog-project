@@ -30,6 +30,7 @@ type Config struct {
 	Storage  Storage  `toml:"storage"`
 	Database Database `toml:"database"`
 	Logging  Logging  `toml:"logging"`
+	Security Security `toml:"security"`
 }
 
 type Server struct {
@@ -53,6 +54,13 @@ type Logging struct {
 	Format string `toml:"format"`
 }
 
+type Security struct {
+	AuthSecret      string   `toml:"-"`
+	AuthSecretFile  string   `toml:"auth_secret_file"`
+	CookieSecure    bool     `toml:"cookie_secure"`
+	SessionLifetime Duration `toml:"session_lifetime"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: Server{
@@ -67,6 +75,11 @@ func Defaults() Config {
 			ReadConnections: 2,
 		},
 		Logging: Logging{Level: "info", Format: "text"},
+		Security: Security{
+			AuthSecretFile:  "secrets/auth.key",
+			CookieSecure:    true,
+			SessionLifetime: Duration{Duration: 12 * time.Hour},
+		},
 	}
 }
 
@@ -99,14 +112,24 @@ func Load(path string) (Config, error) {
 	if err := applyEnvironment(&cfg); err != nil {
 		return Config{}, err
 	}
-	if !filepath.IsAbs(cfg.Storage.DataDir) {
+	if strings.TrimSpace(cfg.Storage.DataDir) != "" && !filepath.IsAbs(cfg.Storage.DataDir) {
 		cfg.Storage.DataDir = filepath.Join(baseDir, cfg.Storage.DataDir)
 	}
-	cfg.Storage.DataDir = filepath.Clean(cfg.Storage.DataDir)
-	if !filepath.IsAbs(cfg.Database.Path) {
+	if strings.TrimSpace(cfg.Storage.DataDir) != "" {
+		cfg.Storage.DataDir = filepath.Clean(cfg.Storage.DataDir)
+	}
+	if strings.TrimSpace(cfg.Database.Path) != "" && !filepath.IsAbs(cfg.Database.Path) {
 		cfg.Database.Path = filepath.Join(cfg.Storage.DataDir, cfg.Database.Path)
 	}
-	cfg.Database.Path = filepath.Clean(cfg.Database.Path)
+	if strings.TrimSpace(cfg.Database.Path) != "" {
+		cfg.Database.Path = filepath.Clean(cfg.Database.Path)
+	}
+	if strings.TrimSpace(cfg.Security.AuthSecretFile) != "" && !filepath.IsAbs(cfg.Security.AuthSecretFile) {
+		cfg.Security.AuthSecretFile = filepath.Join(cfg.Storage.DataDir, cfg.Security.AuthSecretFile)
+	}
+	if strings.TrimSpace(cfg.Security.AuthSecretFile) != "" {
+		cfg.Security.AuthSecretFile = filepath.Clean(cfg.Security.AuthSecretFile)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -123,6 +146,8 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_DATABASE_PATH", &cfg.Database.Path},
 		{"BLOG_LOG_LEVEL", &cfg.Logging.Level},
 		{"BLOG_LOG_FORMAT", &cfg.Logging.Format},
+		{"BLOG_AUTH_SECRET", &cfg.Security.AuthSecret},
+		{"BLOG_AUTH_SECRET_FILE", &cfg.Security.AuthSecretFile},
 	}
 	for _, override := range stringOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -136,6 +161,7 @@ func applyEnvironment(cfg *Config) error {
 	}{
 		{"BLOG_SHUTDOWN_TIMEOUT", &cfg.Server.ShutdownTimeout},
 		{"BLOG_DATABASE_BUSY_TIMEOUT", &cfg.Database.BusyTimeout},
+		{"BLOG_SESSION_LIFETIME", &cfg.Security.SessionLifetime},
 	}
 	for _, override := range durationOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -160,6 +186,13 @@ func applyEnvironment(cfg *Config) error {
 			}
 			*override.target = parsed
 		}
+	}
+	if value, ok := os.LookupEnv("BLOG_COOKIE_SECURE"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_COOKIE_SECURE: %w", err)
+		}
+		cfg.Security.CookieSecure = parsed
 	}
 	return nil
 }
@@ -194,6 +227,12 @@ func (cfg Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		problems = append(problems, errors.New("logging.level must be debug, info, warn, or error"))
+	}
+	if strings.TrimSpace(cfg.Security.AuthSecret) == "" && strings.TrimSpace(cfg.Security.AuthSecretFile) == "" {
+		problems = append(problems, errors.New("security.auth_secret_file is required when BLOG_AUTH_SECRET is unset"))
+	}
+	if cfg.Security.SessionLifetime.Duration < 15*time.Minute || cfg.Security.SessionLifetime.Duration > 7*24*time.Hour {
+		problems = append(problems, errors.New("security.session_lifetime must be between 15m and 168h"))
 	}
 	return errors.Join(problems...)
 }

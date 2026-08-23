@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>绑定验证器 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=2">
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <section class="auth-intro" aria-labelledby="totp-title">
+      <div class="wordmark"><span aria-hidden="true">✦</span> Personal Press</div>
+      <p class="eyebrow">保护站主账户</p>
+      <h1 id="totp-title">让登录多一道可靠防线。</h1>
+      <p class="lede">用任意兼容 TOTP 的验证器扫描二维码。系统不依赖短信、邮件或云端认证。</p>
+      <ol class="step-list" aria-label="初始化步骤">
+        <li class="done"><span>01</span>站点与站主</li>
+        <li class="active"><span>02</span>绑定验证器</li>
+        <li><span>03</span>保存恢复码</li>
+      </ol>
+    </section>
+    <section class="auth-card">
+      <div>
+        <p class="eyebrow">步骤 2 / 3</p>
+        <h2>扫描并确认</h2>
+        <p class="muted">无法扫码时，可手动输入下方密钥。</p>
+      </div>
+      {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+      <div class="totp-grid">
+        <img class="qr" src="{{.QRCode}}" width="220" height="220" alt="TOTP 设置二维码">
+        <div class="secret-panel"><span>手动密钥</span><code id="totp-secret">{{.Secret}}</code></div>
+      </div>
+      <form method="post" action="/admin/setup/complete" class="stack compact">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>验证器中的 6 位代码<input name="totp_code" inputmode="numeric" pattern="[0-9 ]{6,7}" maxlength="7" autocomplete="one-time-code" required autofocus></label>
+        <button type="submit">完成安全设置 <span aria-hidden="true">→</span></button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

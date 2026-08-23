@@ -53,6 +53,10 @@ format = "json"
 	if cfg.Database.Path != wantDatabase {
 		t.Fatalf("database path = %q, want %q", cfg.Database.Path, wantDatabase)
 	}
+	wantAuthSecret := filepath.Join(wantDataDir, "secrets/auth.key")
+	if cfg.Security.AuthSecretFile != wantAuthSecret {
+		t.Fatalf("auth secret path = %q, want %q", cfg.Security.AuthSecretFile, wantAuthSecret)
+	}
 }
 
 func TestLoadRejectsInvalidEnvironment(t *testing.T) {

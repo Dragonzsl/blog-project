@@ -33,6 +33,8 @@ services:
       BLOG_DATA_DIR: ${BLOG_DATA_DIR:-/data}
       BLOG_LOG_LEVEL: ${BLOG_LOG_LEVEL:-info}
       BLOG_LOG_FORMAT: ${BLOG_LOG_FORMAT:-json}
+      BLOG_AUTH_SECRET: ${BLOG_AUTH_SECRET:-}
+      BLOG_COOKIE_SECURE: "true"
       GOMEMLIMIT: ${BLOG_MEMORY_LIMIT:-640MiB}
     volumes:
       - blog_data:/data

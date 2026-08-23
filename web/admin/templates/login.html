@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>登录 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=2">
+</head>
+<body class="auth-page">
+  <main class="login-shell">
+    <section class="auth-card login-card" aria-labelledby="login-title">
+      <div class="wordmark"><span aria-hidden="true">✦</span> {{.SiteName}}</div>
+      <div>
+        <p class="eyebrow">站主管理</p>
+        <h1 id="login-title">欢迎回来。</h1>
+        <p class="muted">使用密码与验证器代码，或使用一枚尚未用过的恢复码。</p>
+      </div>
+      {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+      <form method="post" action="/admin/login" class="stack">
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>用户名<input name="username" value="{{.Username}}" autocomplete="username" required autofocus></label>
+        <label>密码<input type="password" name="password" autocomplete="current-password" required></label>
+        <label>验证器代码或恢复码<input name="second_factor" autocomplete="one-time-code" required></label>
+        <button type="submit">安全登录 <span aria-hidden="true">→</span></button>
+      </form>
+      <p class="fine-print">忘记凭据？服务器管理员可使用 <code>blog auth recover</code>。</p>
+    </section>
+  </main>
+</body>
+</html>

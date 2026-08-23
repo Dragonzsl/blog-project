@@ -21,7 +21,7 @@
 
 ## 运行当前版本
 
-当前切片提供应用骨架、SQLite 迁移及存活/就绪检查。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现提供应用骨架、SQLite 迁移、存活/就绪检查和唯一站主安全初始化。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -29,6 +29,8 @@ docker compose up --build -d
 curl --insecure https://localhost/livez
 curl --insecure https://localhost/readyz
 ```
+
+随后访问 `https://localhost/admin/setup`，创建唯一站主并绑定任意兼容 TOTP 的验证器。初始化完成时会显示 10 枚单次恢复码；系统不会再次保存或展示其明文。
 
 本地 `localhost` 使用 Caddy 内部证书，因此命令行演示带 `--insecure`；部署到已解析的公开域名时，将 `BLOG_SITE_ADDRESS` 改为实际 HTTPS 地址，Caddy 会自动申请证书。运行数据保存在 `blog_data` 命名卷中，普通停止不会删除数据：
 
@@ -45,6 +47,16 @@ make build
 ```
 
 发行构建必须使用 `fts5 sqlite_omit_load_extension` 标签；Makefile 和 Dockerfile 已固定这些标签。应用容器以非 root、只读根文件系统运行，默认限制为 0.85 CPU、768 MiB，Go 堆软上限为 640 MiB。
+
+### 无邮件认证恢复
+
+服务器管理员可以从标准输入或权限受限文件提供新密码。命令会轮换密码、TOTP 和恢复码，并使全部旧会话失效：
+
+```bash
+printf '%s\n' 'your-new-password' | docker compose run --rm -T app auth recover --username owner --password-file -
+```
+
+命令输出新的 TOTP URI、手动密钥和一次性恢复码，请立即离线保存。密码至少 12 个字符，不应直接写入命令行参数。若未设置 `BLOG_AUTH_SECRET`，应用首次启动会在数据卷内生成权限为 `0600` 的 `secrets/auth.key`；它用于加密 TOTP 密钥，不会出现在普通站点配置中。
 
 ## 当前约束
 

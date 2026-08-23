@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>概览 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=2">
+</head>
+<body class="admin-page">
+  <header class="admin-header">
+    <a class="wordmark" href="/admin/"><span aria-hidden="true">✦</span> {{.SiteName}}</a>
+    <nav aria-label="站主管理"><span class="owner-pill">{{.Username}}</span><form method="post" action="/admin/logout"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><button class="quiet-button" type="submit">退出</button></form></nav>
+  </header>
+  <main class="dashboard">
+    <p class="eyebrow">管理概览</p>
+    <h1>下午好，{{.Username}}。</h1>
+    <p class="lede dark">安全初始化已经完成。下一切片将从这里接入文章编辑、预览与发布。</p>
+    <section class="status-grid" aria-label="系统状态">
+      <article><span class="status-dot"></span><p>身份系统</p><strong>已保护</strong><small>密码 + TOTP</small></article>
+      <article><span class="status-dot"></span><p>数据库</p><strong>运行正常</strong><small>SQLite WAL</small></article>
+      <article><span class="status-dot pending"></span><p>内容</p><strong>等待创作</strong><small>下一切片启用</small></article>
+    </section>
+  </main>
+</body>
+</html>
