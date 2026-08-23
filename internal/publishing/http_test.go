@@ -37,7 +37,6 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	}
 	router := chi.NewRouter()
 	router.Route("/admin", handler.RegisterAdmin)
-	handler.RegisterPublic(router)
 
 	create := formRequest(http.MethodPost, "/admin/articles", url.Values{
 		"csrf_token":    {"test-csrf"},
@@ -52,12 +51,6 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 		t.Fatalf("create status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 
-	preview := httptest.NewRecorder()
-	router.ServeHTTP(preview, httptest.NewRequest(http.MethodGet, "/admin/articles/1/preview", nil))
-	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), "私密预览") {
-		t.Fatalf("preview status=%d body=%s", preview.Code, preview.Body.String())
-	}
-
 	publish := httptest.NewRecorder()
 	router.ServeHTTP(publish, formRequest(http.MethodPost, "/admin/articles/1/publish", url.Values{
 		"csrf_token":   {"test-csrf"},
@@ -67,14 +60,6 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 		t.Fatalf("publish status=%d location=%q body=%s", publish.Code, publish.Header().Get("Location"), publish.Body.String())
 	}
 
-	public := httptest.NewRecorder()
-	router.ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/posts/safe-publish", nil))
-	if public.Code != http.StatusOK {
-		t.Fatalf("public status=%d body=%s", public.Code, public.Body.String())
-	}
-	if strings.Contains(public.Body.String(), "<script>alert(1)</script>") || !strings.Contains(public.Body.String(), "&lt;script&gt;alert(1)&lt;/script&gt;") {
-		t.Fatalf("public source was not escaped: %s", public.Body.String())
-	}
 }
 
 func formRequest(method, target string, values url.Values) *http.Request {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +18,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
+	"github.com/zhushilin/blog-project/internal/presentation"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
@@ -53,6 +55,24 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	defaultTheme, err := presentation.NewDefaultTheme(presentation.NewMarkdown())
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	pageCache, err := presentation.NewPageCache(filepath.Join(cfg.Storage.DataDir, "cache", "pages"), 32, 4<<20)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	presentationHTTP := presentation.NewHTTPHandler(
+		publishingService,
+		identityService,
+		presentation.NewStateRepository(db),
+		defaultTheme,
+		pageCache,
+		logger,
+	)
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -62,7 +82,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	health := operations.NewHealthHandler(db, time.Now(), buildinfo.Version)
 	router.Get("/livez", health.Live)
 	router.Get("/readyz", health.Ready)
-	publishingHTTP.RegisterPublic(router)
+	presentationHTTP.RegisterPublic(router)
 	router.Route("/admin", func(admin chi.Router) {
 		admin.Use(identityHTTP.SecurityHeaders)
 		identityHTTP.RegisterPublic(admin)
@@ -70,6 +90,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			protected.Use(identityHTTP.RequireSession)
 			identityHTTP.RegisterProtected(protected)
 			publishingHTTP.RegisterAdmin(protected)
+			presentationHTTP.RegisterAdmin(protected)
 		})
 	})
 

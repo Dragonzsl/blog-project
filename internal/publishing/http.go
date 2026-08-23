@@ -46,12 +46,7 @@ func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Post("/articles", h.articleCreate)
 	router.Get("/articles/{articleID}/edit", h.articleEdit)
 	router.Post("/articles/{articleID}", h.articleUpdate)
-	router.Get("/articles/{articleID}/preview", h.articlePreview)
 	router.Post("/articles/{articleID}/publish", h.articlePublish)
-}
-
-func (h *HTTPHandler) RegisterPublic(router chi.Router) {
-	router.Get("/posts/{slug}", h.articlePublic)
 }
 
 func (h *HTTPHandler) articleList(w http.ResponseWriter, r *http.Request) {
@@ -179,26 +174,6 @@ func (h *HTTPHandler) articlePublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, "/posts/"+article.Slug, http.StatusSeeOther)
-}
-
-func (h *HTTPHandler) articlePreview(w http.ResponseWriter, r *http.Request) {
-	article, ok := h.loadArticle(w, r)
-	if !ok {
-		return
-	}
-	h.renderPage(w, r, "article_preview.html", map[string]any{
-		"Article": article,
-		"BackURL": fmt.Sprintf("/admin/articles/%d/edit", article.ID),
-	}, http.StatusOK, true)
-}
-
-func (h *HTTPHandler) articlePublic(w http.ResponseWriter, r *http.Request) {
-	article, err := h.service.PublicArticle(r.Context(), chi.URLParam(r, "slug"))
-	if err != nil {
-		h.handleReadError(w, r, err)
-		return
-	}
-	h.renderPage(w, r, "article_public.html", map[string]any{"Article": article}, http.StatusOK, false)
 }
 
 func (h *HTTPHandler) loadArticle(w http.ResponseWriter, r *http.Request) (Article, bool) {

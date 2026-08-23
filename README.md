@@ -46,7 +46,7 @@ make build
 ./bin/blog serve --config config.example.toml
 ```
 
-发行构建必须使用 `fts5 sqlite_omit_load_extension` 标签；Makefile 和 Dockerfile 已固定这些标签。应用容器以非 root、只读根文件系统运行，默认限制为 0.85 CPU、768 MiB，Go 堆软上限为 640 MiB。
+发行构建必须使用 `fts5 sqlite_omit_load_extension` 标签；Makefile 和 Dockerfile 已固定这些标签。应用容器以非 root、只读根文件系统运行，默认限制为 0.85 CPU、256 MiB，Go 堆软上限为 192 MiB；Caddy 默认限制为 64 MiB。该预算仍为 Argon2id 的单并发 64 MiB 工作区保留余量。
 
 ### 无邮件认证恢复
 

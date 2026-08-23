@@ -22,7 +22,7 @@ services:
     user: "65532:65532"
     read_only: true
     init: true
-    mem_limit: 768m
+    mem_limit: 256m
     cpus: 0.85
     pids_limit: 128
     depends_on:
@@ -35,7 +35,7 @@ services:
       BLOG_LOG_FORMAT: ${BLOG_LOG_FORMAT:-json}
       BLOG_AUTH_SECRET: ${BLOG_AUTH_SECRET:-}
       BLOG_COOKIE_SECURE: "true"
-      GOMEMLIMIT: ${BLOG_MEMORY_LIMIT:-640MiB}
+      GOMEMLIMIT: ${BLOG_MEMORY_LIMIT:-192MiB}
     volumes:
       - blog_data:/data
     tmpfs:
@@ -56,7 +56,7 @@ services:
 
   caddy:
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
-    mem_limit: 128m
+    mem_limit: 64m
     cpus: 0.15
     pids_limit: 64
     depends_on:

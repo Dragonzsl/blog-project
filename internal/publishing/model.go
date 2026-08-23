@@ -23,6 +23,7 @@ type Article struct {
 	CurrentRevisionID   int64
 	PublishedRevisionID int64
 	PublishedAt         *time.Time
+	PublishedRevisionAt *time.Time
 	LockVersion         int64
 	CreatedAt           time.Time
 	UpdatedAt           time.Time

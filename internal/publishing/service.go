@@ -94,6 +94,16 @@ func (s *Service) Articles(ctx context.Context) ([]Article, error) {
 	return s.repository.Articles(ctx)
 }
 
+func (s *Service) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return s.repository.PublishedArticles(ctx, limit)
+}
+
 func validateInput(input DraftInput) (DraftInput, error) {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Slug = strings.ToLower(strings.TrimSpace(input.Slug))

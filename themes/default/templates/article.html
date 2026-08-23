@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ef">
+  <title>{{.Article.Title}} · {{.SiteName}}</title>
+  {{if .Article.Excerpt}}<meta name="description" content="{{.Article.Excerpt}}">{{end}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+</head>
+<body>
+  {{if .Preview}}<div class="preview-ribbon"><span>私密预览 · 当前编辑版本</span><a href="{{.BackURL}}">返回编辑</a></div>{{end}}
+  <header class="site-header">
+    <a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a>
+    <nav aria-label="主导航"><a href="/">文章</a></nav>
+  </header>
+  <main>
+    <article class="article">
+      <header class="article-header">
+        <p class="kicker">Essay</p>
+        <h1>{{.Article.Title}}</h1>
+        {{if .Article.Excerpt}}<p class="deck">{{.Article.Excerpt}}</p>{{end}}
+        {{if .Article.PublishedAt}}<time datetime="{{.Article.PublishedISO}}">{{.Article.PublishedAt}}</time>{{end}}
+      </header>
+      <div class="prose">{{.Article.BodyHTML}}</div>
+    </article>
+  </main>
+  <footer class="site-footer"><span>{{.SiteName}}</span><span>用心写作，安静发布。</span></footer>
+</body>
+</html>

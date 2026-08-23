@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f7f5ef">
+  <title>{{.SiteName}}</title>
+  <meta name="description" content="{{.SiteName}}的文章与思考。">
+  <link rel="stylesheet" href="{{.AssetURL}}">
+</head>
+<body>
+  <header class="site-header home-header">
+    <a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a>
+    <nav aria-label="主导航"><a aria-current="page" href="/">文章</a></nav>
+  </header>
+  <main>
+    <section class="hero">
+      <p class="kicker">Independent writing</p>
+      <h1>慢下来，<br>把值得留下的写清楚。</h1>
+      <p>这里收录文章、笔记与持续生长的想法。</p>
+    </section>
+    {{if .Articles}}
+    <section class="article-list" aria-labelledby="latest-heading">
+      <div class="section-heading"><p class="kicker">Latest</p><h2 id="latest-heading">最近文章</h2></div>
+      <div>
+        {{range .Articles}}
+        <article class="article-card">
+          <time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>
+          <h3><a href="/posts/{{.Slug}}">{{.Title}}</a></h3>
+          {{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}
+          <a class="read-more" href="/posts/{{.Slug}}">阅读全文 <span aria-hidden="true">→</span></a>
+        </article>
+        {{end}}
+      </div>
+    </section>
+    {{else}}
+    <section class="empty"><p class="kicker">Soon</p><h2>第一篇文章正在路上。</h2><p>稍后回来看看，新的文字会出现在这里。</p></section>
+    {{end}}
+  </main>
+  <footer class="site-footer"><span>{{.SiteName}}</span><span>用心写作，安静发布。</span></footer>
+</body>
+</html>

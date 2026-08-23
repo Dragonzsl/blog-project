@@ -187,6 +187,7 @@ func (r *Repository) PublicArticle(ctx context.Context, slug string) (Article, e
 		SELECT c.id, c.public_id, c.status, c.slug,
 		       r.title, r.excerpt, r.body_markdown,
 		       c.current_revision_id, c.published_revision_id, c.published_at,
+		       r.created_at,
 		       c.lock_version, c.created_at, c.updated_at
 		FROM contents c
 		JOIN content_revisions r ON r.id = c.published_revision_id
@@ -215,9 +216,41 @@ func (r *Repository) Articles(ctx context.Context) ([]Article, error) {
 	return articles, nil
 }
 
+func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT c.id, c.public_id, c.status, c.slug,
+		       r.title, r.excerpt, r.body_markdown,
+		       c.current_revision_id, c.published_revision_id, c.published_at,
+		       r.created_at,
+		       c.lock_version, c.created_at, c.updated_at
+		FROM contents c
+		JOIN content_revisions r ON r.id = c.published_revision_id
+		WHERE c.kind = 'article' AND c.status = 'published' AND c.trashed_at IS NULL
+		ORDER BY c.published_at DESC, c.id DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list published articles: %w", err)
+	}
+	defer rows.Close()
+	articles := make([]Article, 0, limit)
+	for rows.Next() {
+		article, err := scanArticle(rows)
+		if err != nil {
+			return nil, err
+		}
+		articles = append(articles, article)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list published articles: %w", err)
+	}
+	return articles, nil
+}
+
 const articleSelect = `
 	SELECT c.id, c.public_id, c.status, c.slug, c.title, c.excerpt, c.body_markdown,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
+	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
 	       c.lock_version, c.created_at, c.updated_at
 	FROM contents c`
 
@@ -228,7 +261,7 @@ type scanner interface {
 func scanArticle(row scanner) (Article, error) {
 	var article Article
 	var currentRevision, publishedRevision sql.NullInt64
-	var publishedAt sql.NullInt64
+	var publishedAt, publishedRevisionAt sql.NullInt64
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&article.ID,
@@ -241,6 +274,7 @@ func scanArticle(row scanner) (Article, error) {
 		&currentRevision,
 		&publishedRevision,
 		&publishedAt,
+		&publishedRevisionAt,
 		&article.LockVersion,
 		&createdAt,
 		&updatedAt,
@@ -256,6 +290,10 @@ func scanArticle(row scanner) (Article, error) {
 	if publishedAt.Valid {
 		value := fromMillis(publishedAt.Int64)
 		article.PublishedAt = &value
+	}
+	if publishedRevisionAt.Valid {
+		value := fromMillis(publishedRevisionAt.Int64)
+		article.PublishedRevisionAt = &value
 	}
 	article.CreatedAt = fromMillis(createdAt)
 	article.UpdatedAt = fromMillis(updatedAt)
