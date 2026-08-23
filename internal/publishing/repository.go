@@ -73,7 +73,7 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 	return r.Content(ctx, kind, contentID)
 }
 
-func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedVersion int64, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time) (Article, error) {
+func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedVersion int64, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time, configuredLimit ...int) (Article, error) {
 	tx, err := r.database.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, fmt.Errorf("begin %s update: %w", kind, err)
@@ -136,6 +136,16 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 		}
 		return Article{}, ErrConflict
 	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM editing_snapshots WHERE content_id=?", id); err != nil {
+		return Article{}, err
+	}
+	limit := 50
+	if len(configuredLimit) > 0 {
+		limit = configuredLimit[0]
+	}
+	if err := pruneRevisions(ctx, tx, id, limit); err != nil {
+		return Article{}, fmt.Errorf("prune content revisions: %w", err)
+	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".saved", kind, publicID, now); err != nil {
 		return Article{}, err
 	}
@@ -171,6 +181,7 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 		UPDATE contents
 		SET status = 'published', published_revision_id = current_revision_id,
 		    published_at = COALESCE(published_at, ?), scheduled_at = NULL,
+		    withdrawn_at = NULL,
 		    lock_version = lock_version + 1, updated_at = ?
 		WHERE id = ? AND kind = ? AND lock_version = ?
 	`, millis(now), millis(now), id, kind, expectedVersion)
@@ -182,6 +193,9 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 			return Article{}, fmt.Errorf("check publication: %w", err)
 		}
 		return Article{}, ErrConflict
+	}
+	if err := rebaseEditingSnapshot(ctx, tx, id, expectedVersion); err != nil {
+		return Article{}, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE reserved_paths SET reason = 'published' WHERE content_id = ? AND path_key = ?", id, publicPath(kind, slugKey)); err != nil {
 		return Article{}, fmt.Errorf("publish reserved path: %w", err)
@@ -242,6 +256,23 @@ func (r *Repository) Contents(ctx context.Context, kind string) ([]Article, erro
 	return contents, rows.Err()
 }
 
+func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, contentSelect+" WHERE c.trashed_at IS NOT NULL ORDER BY c.trashed_at DESC, c.id DESC")
+	if err != nil {
+		return nil, fmt.Errorf("list trashed contents: %w", err)
+	}
+	defer rows.Close()
+	var contents []Article
+	for rows.Next() {
+		content, err := scanContent(rows)
+		if err != nil {
+			return nil, err
+		}
+		contents = append(contents, content)
+	}
+	return contents, rows.Err()
+}
+
 func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = 'article' AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -277,6 +308,7 @@ const contentSelect = `
 	       NULL, NULL,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
+	       c.scheduled_at, c.withdrawn_at, c.trashed_at,
 	       c.lock_version, c.created_at, c.updated_at
 	FROM contents c`
 
@@ -285,7 +317,8 @@ const publicContentSelect = `
 	       r.title, r.excerpt, r.body_markdown,
 	       r.category_public_id, r.tag_public_ids_json,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
-	       r.created_at, c.lock_version, c.created_at, c.updated_at
+	       r.created_at, c.scheduled_at, c.withdrawn_at, c.trashed_at,
+	       c.lock_version, c.created_at, c.updated_at
 	FROM contents c
 	JOIN content_revisions r ON r.id = c.published_revision_id`
 
@@ -294,7 +327,7 @@ type scanner interface{ Scan(dest ...any) error }
 func scanContent(row scanner) (Article, error) {
 	var content Article
 	var currentRevision, publishedRevision sql.NullInt64
-	var publishedAt, publishedRevisionAt sql.NullInt64
+	var publishedAt, publishedRevisionAt, scheduledAt, withdrawnAt, trashedAt sql.NullInt64
 	var publishedCategoryPublicID []byte
 	var publishedTagPublicIDsJSON sql.NullString
 	var createdAt, updatedAt int64
@@ -303,6 +336,7 @@ func scanContent(row scanner) (Article, error) {
 		&content.Title, &content.Excerpt, &content.BodyMarkdown,
 		&publishedCategoryPublicID, &publishedTagPublicIDsJSON,
 		&currentRevision, &publishedRevision, &publishedAt, &publishedRevisionAt,
+		&scheduledAt, &withdrawnAt, &trashedAt,
 		&content.LockVersion, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -322,6 +356,18 @@ func scanContent(row scanner) (Article, error) {
 	if publishedRevisionAt.Valid {
 		value := fromMillis(publishedRevisionAt.Int64)
 		content.PublishedRevisionAt = &value
+	}
+	if scheduledAt.Valid {
+		value := fromMillis(scheduledAt.Int64)
+		content.ScheduledAt = &value
+	}
+	if withdrawnAt.Valid {
+		value := fromMillis(withdrawnAt.Int64)
+		content.WithdrawnAt = &value
+	}
+	if trashedAt.Valid {
+		value := fromMillis(trashedAt.Int64)
+		content.TrashedAt = &value
 	}
 	content.CreatedAt = fromMillis(createdAt)
 	content.UpdatedAt = fromMillis(updatedAt)

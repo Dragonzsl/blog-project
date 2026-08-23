@@ -40,6 +40,10 @@ func TestHTTPSetupAndLogoutFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &http.Client{Jar: jar}
+	editorScript := getBody(t, client, server.URL+"/admin/assets/editor.js")
+	if !strings.Contains(editorScript, "data-snapshot-url") {
+		t.Fatalf("editor script body = %s", editorScript)
+	}
 
 	setupBody := getBody(t, client, server.URL+"/admin/setup")
 	setupCSRF := extract(t, csrfPattern, setupBody)

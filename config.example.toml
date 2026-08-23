@@ -18,6 +18,14 @@ max_image_pixels = 16000000
 variant_widths = [640, 1280]
 jpeg_quality = 92
 
+[publishing]
+scheduler_interval = "15s"
+scheduler_batch_size = 20
+editing_snapshot_interval = "15s"
+revision_limit = 50
+trash_retention_days = 30
+trash_cleanup_interval = "6h"
+
 [logging]
 level = "info"
 format = "text"

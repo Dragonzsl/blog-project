@@ -37,6 +37,17 @@ func (r *Repository) SiteName(ctx context.Context) (string, error) {
 	return name, nil
 }
 
+func (r *Repository) Timezone(ctx context.Context) (string, error) {
+	var timezone string
+	if err := r.database.Reader.QueryRowContext(ctx, "SELECT timezone FROM sites WHERE id = 1").Scan(&timezone); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "Asia/Shanghai", nil
+		}
+		return "", fmt.Errorf("read site timezone: %w", err)
+	}
+	return timezone, nil
+}
+
 func (r *Repository) SaveSetupChallenge(ctx context.Context, challenge setupChallenge, now time.Time) error {
 	tx, err := r.database.Writer.BeginTx(ctx, nil)
 	if err != nil {

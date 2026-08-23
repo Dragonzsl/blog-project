@@ -17,7 +17,7 @@ func NewReferenceRepository() *ReferenceRepository { return &ReferenceRepository
 
 func (r *ReferenceRepository) ReplaceBodyReferencesTx(ctx context.Context, tx *sql.Tx, contentID int64, markdown string, now time.Time) error {
 	var publishedBody sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT pr.body_markdown FROM contents c LEFT JOIN content_revisions pr ON pr.id=c.published_revision_id WHERE c.id=?`, contentID).Scan(&publishedBody)
+	err := tx.QueryRowContext(ctx, `SELECT CASE WHEN c.status='published' THEN pr.body_markdown END FROM contents c LEFT JOIN content_revisions pr ON pr.id=c.published_revision_id WHERE c.id=?`, contentID).Scan(&publishedBody)
 	if err != nil && err != sql.ErrNoRows {
 		return err
 	}

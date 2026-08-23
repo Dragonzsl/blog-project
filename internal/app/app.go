@@ -25,10 +25,13 @@ import (
 )
 
 type App struct {
-	config   config.Config
-	logger   *slog.Logger
-	database *database.DB
-	server   *http.Server
+	config               config.Config
+	logger               *slog.Logger
+	database             *database.DB
+	server               *http.Server
+	publishing           *publishing.Service
+	lifecycleInterval    time.Duration
+	trashCleanupInterval time.Duration
 }
 
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
@@ -51,7 +54,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
-	publishingService := publishing.NewService(publishing.NewRepository(db))
+	publishingService := publishing.NewService(publishing.NewRepository(db), publishing.Options{
+		SchedulerBatchSize: cfg.Publishing.SchedulerBatchSize,
+		SnapshotInterval:   cfg.Publishing.EditingSnapshotInterval.Duration,
+		RevisionLimit:      cfg.Publishing.RevisionLimit,
+		TrashRetention:     time.Duration(cfg.Publishing.TrashRetentionDays) * 24 * time.Hour,
+	})
 	publishingHTTP, err := publishing.NewHTTPHandler(publishingService, identityHTTP, identityService, logger)
 	if err != nil {
 		db.Close()
@@ -128,29 +136,79 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	return &App{config: cfg, logger: logger, database: db, server: server}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration}, nil
 }
 
 func (app *App) Run(ctx context.Context) error {
+	runContext, cancel := context.WithCancel(ctx)
+	defer cancel()
 	serverErrors := make(chan error, 1)
 	go func() {
 		app.logger.Info("server listening", "address", app.server.Addr)
 		serverErrors <- app.server.ListenAndServe()
 	}()
+	lifecycleDone := make(chan struct{})
+	go func() {
+		defer close(lifecycleDone)
+		app.runLifecycle(runContext)
+	}()
 
 	select {
 	case err := <-serverErrors:
+		cancel()
+		<-lifecycleDone
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
 		return fmt.Errorf("serve HTTP: %w", err)
 	case <-ctx.Done():
+		cancel()
 		shutdownContext, cancel := context.WithTimeout(context.Background(), app.config.Server.ShutdownTimeout.Duration)
 		defer cancel()
 		if err := app.server.Shutdown(shutdownContext); err != nil {
 			return fmt.Errorf("shutdown HTTP server: %w", err)
 		}
+		<-lifecycleDone
 		return nil
+	}
+}
+
+func (app *App) runLifecycle(ctx context.Context) {
+	processScheduled := func() {
+		published, err := app.publishing.ProcessScheduled(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "process scheduled publishing", "error", err)
+			return
+		}
+		if published > 0 {
+			app.logger.InfoContext(ctx, "scheduled publishing processed", "published", published)
+		}
+	}
+	cleanupTrash := func() {
+		purged, err := app.publishing.PurgeExpiredTrash(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "purge expired trash", "error", err)
+			return
+		}
+		if purged > 0 {
+			app.logger.InfoContext(ctx, "expired trash purged", "purged", purged)
+		}
+	}
+	processScheduled()
+	cleanupTrash()
+	schedulerTicker := time.NewTicker(app.lifecycleInterval)
+	defer schedulerTicker.Stop()
+	cleanupTicker := time.NewTicker(app.trashCleanupInterval)
+	defer cleanupTicker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-schedulerTicker.C:
+			processScheduled()
+		case <-cleanupTicker.C:
+			cleanupTrash()
+		}
 	}
 }
 

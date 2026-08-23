@@ -57,6 +57,10 @@ func (s *Service) SiteName(ctx context.Context) (string, error) {
 	return s.repository.SiteName(ctx)
 }
 
+func (s *Service) Timezone(ctx context.Context) (string, error) {
+	return s.repository.Timezone(ctx)
+}
+
 func (s *Service) StartSetup(ctx context.Context, siteName, username, password string) (SetupStartResult, error) {
 	initialized, err := s.repository.Initialized(ctx)
 	if err != nil {

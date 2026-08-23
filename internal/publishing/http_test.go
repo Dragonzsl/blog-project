@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -23,9 +24,11 @@ func (fakeAdminSecurity) VerifyParsedCSRF(http.ResponseWriter, *http.Request) bo
 type fakeSiteNamer struct{}
 
 func (fakeSiteNamer) SiteName(context.Context) (string, error) { return "纸上花园", nil }
+func (fakeSiteNamer) Timezone(context.Context) (string, error) { return "Asia/Shanghai", nil }
 
 func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	service, _ := newPublishingTestService(t)
+	service.now = func() time.Time { return time.Date(2026, time.August, 23, 8, 0, 0, 0, time.UTC) }
 	handler, err := NewHTTPHandler(
 		service,
 		fakeAdminSecurity{},
@@ -79,6 +82,62 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	router.ServeHTTP(pageEditor, httptest.NewRequest(http.MethodGet, "/admin/pages/new", nil))
 	if strings.Contains(pageEditor.Body.String(), "tag_ids") {
 		t.Fatal("page editor exposed article tags")
+	}
+
+	versions := httptest.NewRecorder()
+	router.ServeHTTP(versions, httptest.NewRequest(http.MethodGet, "/admin/articles/1/versions", nil))
+	if versions.Code != http.StatusOK || !strings.Contains(versions.Body.String(), "发布检查点") || !strings.Contains(versions.Body.String(), "安全发布") {
+		t.Fatalf("versions status=%d body=%s", versions.Code, versions.Body.String())
+	}
+	versionDetail := httptest.NewRecorder()
+	router.ServeHTTP(versionDetail, httptest.NewRequest(http.MethodGet, "/admin/articles/1/versions/1", nil))
+	if versionDetail.Code != http.StatusOK || !strings.Contains(versionDetail.Body.String(), "# Hello") {
+		t.Fatalf("version detail status=%d body=%s", versionDetail.Code, versionDetail.Body.String())
+	}
+	snapshot := httptest.NewRecorder()
+	router.ServeHTTP(snapshot, formRequest(http.MethodPost, "/admin/articles/1/snapshot", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"2"}, "browser_version": {"100"}, "title": {"断线编辑"}, "slug": {"safe-publish"}, "body_markdown": {"尚未正式保存"}}))
+	if snapshot.Code != http.StatusNoContent || snapshot.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("snapshot status=%d body=%s", snapshot.Code, snapshot.Body.String())
+	}
+	editWithSnapshot := httptest.NewRecorder()
+	router.ServeHTTP(editWithSnapshot, httptest.NewRequest(http.MethodGet, "/admin/articles/1/edit", nil))
+	if !strings.Contains(editWithSnapshot.Body.String(), "检测到") || !strings.Contains(editWithSnapshot.Body.String(), "editor.js") {
+		t.Fatalf("editor snapshot recovery missing: %s", editWithSnapshot.Body.String())
+	}
+	loadedSnapshot := httptest.NewRecorder()
+	router.ServeHTTP(loadedSnapshot, httptest.NewRequest(http.MethodGet, "/admin/articles/1/edit?snapshot=load", nil))
+	if loadedSnapshot.Code != http.StatusOK || !strings.Contains(loadedSnapshot.Body.String(), "尚未正式保存") || !strings.Contains(loadedSnapshot.Body.String(), "先正式保存") || strings.Contains(loadedSnapshot.Body.String(), `action="/admin/articles/1/publish"`) {
+		t.Fatalf("loaded snapshot status=%d body=%s", loadedSnapshot.Code, loadedSnapshot.Body.String())
+	}
+	unpublish := httptest.NewRecorder()
+	router.ServeHTTP(unpublish, formRequest(http.MethodPost, "/admin/articles/1/unpublish", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"2"}}))
+	if unpublish.Code != http.StatusSeeOther {
+		t.Fatalf("unpublish status=%d body=%s", unpublish.Code, unpublish.Body.String())
+	}
+	schedule := httptest.NewRecorder()
+	router.ServeHTTP(schedule, formRequest(http.MethodPost, "/admin/articles/1/schedule", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"3"}, "scheduled_at": {"2026-08-23T18:00"}}))
+	if schedule.Code != http.StatusSeeOther {
+		t.Fatalf("schedule status=%d body=%s", schedule.Code, schedule.Body.String())
+	}
+	scheduledEditor := httptest.NewRecorder()
+	router.ServeHTTP(scheduledEditor, httptest.NewRequest(http.MethodGet, "/admin/articles/1/edit", nil))
+	if !strings.Contains(scheduledEditor.Body.String(), "取消定时，保留草稿") || !strings.Contains(scheduledEditor.Body.String(), "Asia/Shanghai") {
+		t.Fatalf("scheduled editor body=%s", scheduledEditor.Body.String())
+	}
+	trash := httptest.NewRecorder()
+	router.ServeHTTP(trash, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"4"}}))
+	if trash.Code != http.StatusSeeOther || trash.Header().Get("Location") != "/admin/trash" {
+		t.Fatalf("trash status=%d location=%q", trash.Code, trash.Header().Get("Location"))
+	}
+	trashPage := httptest.NewRecorder()
+	router.ServeHTTP(trashPage, httptest.NewRequest(http.MethodGet, "/admin/trash", nil))
+	if trashPage.Code != http.StatusOK || !strings.Contains(trashPage.Body.String(), "安全发布") {
+		t.Fatalf("trash page status=%d body=%s", trashPage.Code, trashPage.Body.String())
+	}
+	restoreTrash := httptest.NewRecorder()
+	router.ServeHTTP(restoreTrash, formRequest(http.MethodPost, "/admin/trash/1/restore", url.Values{"csrf_token": {"test-csrf"}}))
+	if restoreTrash.Code != http.StatusSeeOther || restoreTrash.Header().Get("Location") != "/admin/articles/1/edit" {
+		t.Fatalf("restore trash status=%d location=%q", restoreTrash.Code, restoreTrash.Header().Get("Location"))
 	}
 
 }

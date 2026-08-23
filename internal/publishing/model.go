@@ -12,6 +12,7 @@ var (
 	ErrConflict               = errors.New("content was changed by another editor")
 	ErrSlugUnavailable        = errors.New("slug is already reserved")
 	ErrPublishedSlugImmutable = errors.New("published permalink cannot be changed")
+	ErrInvalidTransition      = errors.New("content lifecycle transition is not allowed")
 )
 
 type Article struct {
@@ -27,6 +28,9 @@ type Article struct {
 	PublishedRevisionID       int64
 	PublishedAt               *time.Time
 	PublishedRevisionAt       *time.Time
+	ScheduledAt               *time.Time
+	WithdrawnAt               *time.Time
+	TrashedAt                 *time.Time
 	LockVersion               int64
 	CreatedAt                 time.Time
 	UpdatedAt                 time.Time
@@ -34,6 +38,30 @@ type Article struct {
 	Tags                      []organization.Tag
 	publishedCategoryPublicID []byte
 	publishedTagPublicIDsJSON string
+}
+
+type Revision struct {
+	ID                      int64
+	PublicID                []byte
+	ContentID               int64
+	Number                  int64
+	Title                   string
+	Slug                    string
+	Excerpt                 string
+	BodyMarkdown            string
+	CategoryPublicID        []byte
+	TagPublicIDsJSON        string
+	Reason                  string
+	IsPublicationCheckpoint bool
+	CreatedAt               time.Time
+}
+
+type EditingSnapshot struct {
+	ContentID       int64
+	BaseLockVersion int64
+	BrowserVersion  int64
+	Input           DraftInput
+	UpdatedAt       time.Time
 }
 
 type DraftInput struct {

@@ -21,7 +21,7 @@
 
 ## 运行当前版本
 
-当前实现提供应用骨架、SQLite 迁移、存活/就绪检查和唯一站主安全初始化。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回和 30 天回收站。阶段一仍在继续实现搜索、SEO 与完整备份恢复。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env

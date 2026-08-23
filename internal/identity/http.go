@@ -33,6 +33,8 @@ type HTTPHandler struct {
 	templates *template.Template
 	css       []byte
 	cssETag   string
+	js        []byte
+	jsETag    string
 }
 
 func NewHTTPHandler(service *Service, security config.Security, logger *slog.Logger) (*HTTPHandler, error) {
@@ -45,6 +47,11 @@ func NewHTTPHandler(service *Service, security config.Security, logger *slog.Log
 		return nil, fmt.Errorf("read admin stylesheet: %w", err)
 	}
 	hash := sha256.Sum256(css)
+	js, err := adminweb.Files.ReadFile("static/editor.js")
+	if err != nil {
+		return nil, fmt.Errorf("read admin editor script: %w", err)
+	}
+	jsHash := sha256.Sum256(js)
 	return &HTTPHandler{
 		service:   service,
 		security:  security,
@@ -52,11 +59,14 @@ func NewHTTPHandler(service *Service, security config.Security, logger *slog.Log
 		templates: templates,
 		css:       css,
 		cssETag:   `"` + base64.RawURLEncoding.EncodeToString(hash[:12]) + `"`,
+		js:        js,
+		jsETag:    `"` + base64.RawURLEncoding.EncodeToString(jsHash[:12]) + `"`,
 	}, nil
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Get("/assets/admin.css", h.stylesheet)
+	router.Get("/assets/editor.js", h.editorScript)
 	router.Get("/setup", h.setupPage)
 	router.Post("/setup/start", h.setupStart)
 	router.Post("/setup/complete", h.setupComplete)
@@ -115,6 +125,17 @@ func (h *HTTPHandler) stylesheet(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
 	w.Header().Set("ETag", h.cssETag)
 	_, _ = w.Write(h.css)
+}
+
+func (h *HTTPHandler) editorScript(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("If-None-Match") == h.jsETag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+	w.Header().Set("ETag", h.jsETag)
+	_, _ = w.Write(h.js)
 }
 
 func (h *HTTPHandler) setupPage(w http.ResponseWriter, r *http.Request) {
@@ -444,7 +465,7 @@ func (h *HTTPHandler) cookieName(base string) string {
 
 func (h *HTTPHandler) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "same-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")

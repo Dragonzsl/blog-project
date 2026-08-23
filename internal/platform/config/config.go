@@ -26,12 +26,13 @@ func (d *Duration) UnmarshalText(value []byte) error {
 }
 
 type Config struct {
-	Server   Server   `toml:"server"`
-	Storage  Storage  `toml:"storage"`
-	Database Database `toml:"database"`
-	Media    Media    `toml:"media"`
-	Logging  Logging  `toml:"logging"`
-	Security Security `toml:"security"`
+	Server     Server     `toml:"server"`
+	Storage    Storage    `toml:"storage"`
+	Database   Database   `toml:"database"`
+	Media      Media      `toml:"media"`
+	Publishing Publishing `toml:"publishing"`
+	Logging    Logging    `toml:"logging"`
+	Security   Security   `toml:"security"`
 }
 
 type Server struct {
@@ -55,6 +56,15 @@ type Media struct {
 	MaxImagePixels int   `toml:"max_image_pixels"`
 	VariantWidths  []int `toml:"variant_widths"`
 	JPEGQuality    int   `toml:"jpeg_quality"`
+}
+
+type Publishing struct {
+	SchedulerInterval       Duration `toml:"scheduler_interval"`
+	SchedulerBatchSize      int      `toml:"scheduler_batch_size"`
+	EditingSnapshotInterval Duration `toml:"editing_snapshot_interval"`
+	RevisionLimit           int      `toml:"revision_limit"`
+	TrashRetentionDays      int      `toml:"trash_retention_days"`
+	TrashCleanupInterval    Duration `toml:"trash_cleanup_interval"`
 }
 
 type Logging struct {
@@ -87,6 +97,14 @@ func Defaults() Config {
 			MaxImagePixels: 16_000_000,
 			VariantWidths:  []int{640, 1280},
 			JPEGQuality:    92,
+		},
+		Publishing: Publishing{
+			SchedulerInterval:       Duration{Duration: 15 * time.Second},
+			SchedulerBatchSize:      20,
+			EditingSnapshotInterval: Duration{Duration: 15 * time.Second},
+			RevisionLimit:           50,
+			TrashRetentionDays:      30,
+			TrashCleanupInterval:    Duration{Duration: 6 * time.Hour},
 		},
 		Logging: Logging{Level: "info", Format: "text"},
 		Security: Security{
@@ -176,6 +194,9 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_SHUTDOWN_TIMEOUT", &cfg.Server.ShutdownTimeout},
 		{"BLOG_DATABASE_BUSY_TIMEOUT", &cfg.Database.BusyTimeout},
 		{"BLOG_SESSION_LIFETIME", &cfg.Security.SessionLifetime},
+		{"BLOG_PUBLISHING_SCHEDULER_INTERVAL", &cfg.Publishing.SchedulerInterval},
+		{"BLOG_PUBLISHING_SNAPSHOT_INTERVAL", &cfg.Publishing.EditingSnapshotInterval},
+		{"BLOG_PUBLISHING_TRASH_CLEANUP_INTERVAL", &cfg.Publishing.TrashCleanupInterval},
 	}
 	for _, override := range durationOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -194,6 +215,9 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_MEDIA_MAX_UPLOAD_BYTES", &cfg.Media.MaxUploadBytes},
 		{"BLOG_MEDIA_MAX_IMAGE_PIXELS", &cfg.Media.MaxImagePixels},
 		{"BLOG_MEDIA_JPEG_QUALITY", &cfg.Media.JPEGQuality},
+		{"BLOG_PUBLISHING_SCHEDULER_BATCH_SIZE", &cfg.Publishing.SchedulerBatchSize},
+		{"BLOG_PUBLISHING_REVISION_LIMIT", &cfg.Publishing.RevisionLimit},
+		{"BLOG_PUBLISHING_TRASH_RETENTION_DAYS", &cfg.Publishing.TrashRetentionDays},
 	}
 	if value, ok := os.LookupEnv("BLOG_MEDIA_VARIANT_WIDTHS"); ok && strings.TrimSpace(value) != "" {
 		var widths []int
@@ -268,6 +292,24 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Media.JPEGQuality < 85 || cfg.Media.JPEGQuality > 100 {
 		problems = append(problems, errors.New("media.jpeg_quality must be between 85 and 100"))
+	}
+	if cfg.Publishing.SchedulerInterval.Duration < time.Second || cfg.Publishing.SchedulerInterval.Duration > 5*time.Minute {
+		problems = append(problems, errors.New("publishing.scheduler_interval must be between 1s and 5m"))
+	}
+	if cfg.Publishing.SchedulerBatchSize < 1 || cfg.Publishing.SchedulerBatchSize > 100 {
+		problems = append(problems, errors.New("publishing.scheduler_batch_size must be between 1 and 100"))
+	}
+	if cfg.Publishing.EditingSnapshotInterval.Duration < 5*time.Second || cfg.Publishing.EditingSnapshotInterval.Duration > 5*time.Minute {
+		problems = append(problems, errors.New("publishing.editing_snapshot_interval must be between 5s and 5m"))
+	}
+	if cfg.Publishing.RevisionLimit < 10 || cfg.Publishing.RevisionLimit > 500 {
+		problems = append(problems, errors.New("publishing.revision_limit must be between 10 and 500"))
+	}
+	if cfg.Publishing.TrashRetentionDays < 1 || cfg.Publishing.TrashRetentionDays > 3650 {
+		problems = append(problems, errors.New("publishing.trash_retention_days must be between 1 and 3650"))
+	}
+	if cfg.Publishing.TrashCleanupInterval.Duration < time.Minute || cfg.Publishing.TrashCleanupInterval.Duration > 24*time.Hour {
+		problems = append(problems, errors.New("publishing.trash_cleanup_interval must be between 1m and 24h"))
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))

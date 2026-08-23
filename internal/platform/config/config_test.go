@@ -28,6 +28,14 @@ max_image_pixels = 12000000
 variant_widths = [720, 1440]
 jpeg_quality = 94
 
+[publishing]
+scheduler_interval = "9s"
+scheduler_batch_size = 12
+editing_snapshot_interval = "20s"
+revision_limit = 80
+trash_retention_days = 45
+trash_cleanup_interval = "4h"
+
 [logging]
 level = "warn"
 format = "json"
@@ -38,6 +46,7 @@ format = "json"
 	t.Setenv("BLOG_LISTEN_ADDRESS", ":7777")
 	t.Setenv("BLOG_DATABASE_READ_CONNECTIONS", "3")
 	t.Setenv("BLOG_MEDIA_VARIANT_WIDTHS", "800, 1600")
+	t.Setenv("BLOG_PUBLISHING_SCHEDULER_BATCH_SIZE", "16")
 
 	cfg, err := Load(configPath)
 	if err != nil {
@@ -57,6 +66,9 @@ format = "json"
 	}
 	if len(cfg.Media.VariantWidths) != 2 || cfg.Media.VariantWidths[0] != 800 || cfg.Media.VariantWidths[1] != 1600 {
 		t.Fatalf("media variant widths = %v", cfg.Media.VariantWidths)
+	}
+	if cfg.Publishing.SchedulerInterval.Duration != 9*time.Second || cfg.Publishing.SchedulerBatchSize != 16 || cfg.Publishing.EditingSnapshotInterval.Duration != 20*time.Second || cfg.Publishing.RevisionLimit != 80 || cfg.Publishing.TrashRetentionDays != 45 || cfg.Publishing.TrashCleanupInterval.Duration != 4*time.Hour {
+		t.Fatalf("publishing configuration = %+v", cfg.Publishing)
 	}
 	wantDataDir := filepath.Join(filepath.Dir(configPath), "var")
 	if cfg.Storage.DataDir != wantDataDir {
