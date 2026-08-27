@@ -4,6 +4,17 @@ shutdown_timeout = "10s"
 
 [storage]
 data_dir = "./data"
+adapter = "local"
+
+[storage.s3]
+endpoint = ""
+bucket = ""
+region = "us-east-1"
+access_key = ""
+secret_key = ""
+prefix = "blog/"
+force_path_style = false
+use_tls = true
 
 [database]
 path = "db/blog.sqlite"
@@ -47,3 +58,32 @@ format = "text"
 auth_secret_file = "secrets/auth.key"
 cookie_secure = false
 session_lifetime = "12h"
+
+[extensions]
+theme_package_max_bytes = 33554432
+theme_max_files = 256
+theme_max_unpacked_bytes = 67108864
+enabled_plugins = []
+
+[analytics]
+enabled = false
+retention_days = 365
+
+[comments]
+enabled = false
+require_moderation = true
+provider = "local"
+
+[mail]
+enabled = false
+host = ""
+port = 587
+username = ""
+password = ""
+from = ""
+starttls = true
+
+[newsletter]
+enabled = false
+provider = "disabled"
+endpoint = ""

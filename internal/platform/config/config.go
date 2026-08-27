@@ -36,6 +36,11 @@ type Config struct {
 	Operations Operations `toml:"operations"`
 	Logging    Logging    `toml:"logging"`
 	Security   Security   `toml:"security"`
+	Extensions Extensions `toml:"extensions"`
+	Analytics  Analytics  `toml:"analytics"`
+	Comments   Comments   `toml:"comments"`
+	Mail       Mail       `toml:"mail"`
+	Newsletter Newsletter `toml:"newsletter"`
 }
 
 type Server struct {
@@ -45,6 +50,19 @@ type Server struct {
 
 type Storage struct {
 	DataDir string `toml:"data_dir"`
+	Adapter string `toml:"adapter"`
+	S3      S3     `toml:"s3"`
+}
+
+type S3 struct {
+	Endpoint       string `toml:"endpoint"`
+	Bucket         string `toml:"bucket"`
+	Region         string `toml:"region"`
+	AccessKey      string `toml:"access_key"`
+	SecretKey      string `toml:"secret_key"`
+	Prefix         string `toml:"prefix"`
+	ForcePathStyle bool   `toml:"force_path_style"`
+	UseTLS         bool   `toml:"use_tls"`
 }
 
 type Database struct {
@@ -96,13 +114,48 @@ type Security struct {
 	SessionLifetime Duration `toml:"session_lifetime"`
 }
 
+type Extensions struct {
+	ThemePackageMaxBytes int      `toml:"theme_package_max_bytes"`
+	ThemeMaxFiles        int      `toml:"theme_max_files"`
+	ThemeMaxUnpacked     int64    `toml:"theme_max_unpacked_bytes"`
+	EnabledPlugins       []string `toml:"enabled_plugins"`
+}
+
+type Analytics struct {
+	Enabled       bool `toml:"enabled"`
+	RetentionDays int  `toml:"retention_days"`
+}
+
+type Comments struct {
+	Enabled           bool   `toml:"enabled"`
+	RequireModeration bool   `toml:"require_moderation"`
+	Provider          string `toml:"provider"`
+}
+
+type Mail struct {
+	Enabled  bool   `toml:"enabled"`
+	Host     string `toml:"host"`
+	Port     int    `toml:"port"`
+	Username string `toml:"username"`
+	Password string `toml:"password"`
+	From     string `toml:"from"`
+	StartTLS bool   `toml:"starttls"`
+}
+
+type Newsletter struct {
+	Enabled  bool   `toml:"enabled"`
+	Provider string `toml:"provider"`
+	Endpoint string `toml:"endpoint"`
+	Token    string `toml:"-"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: Server{
 			ListenAddress:   ":8080",
 			ShutdownTimeout: Duration{Duration: 10 * time.Second},
 		},
-		Storage: Storage{DataDir: "./data"},
+		Storage: Storage{DataDir: "./data", Adapter: "local", S3: S3{Region: "us-east-1", UseTLS: true}},
 		Database: Database{
 			Path:            "db/blog.sqlite",
 			BusyTimeout:     Duration{Duration: 5 * time.Second},
@@ -141,6 +194,11 @@ func Defaults() Config {
 			CookieSecure:    true,
 			SessionLifetime: Duration{Duration: 12 * time.Hour},
 		},
+		Extensions: Extensions{ThemePackageMaxBytes: 32 << 20, ThemeMaxFiles: 256, ThemeMaxUnpacked: 64 << 20},
+		Analytics:  Analytics{Enabled: false, RetentionDays: 365},
+		Comments:   Comments{Enabled: false, RequireModeration: true, Provider: "local"},
+		Mail:       Mail{Port: 587, StartTLS: true},
+		Newsletter: Newsletter{Provider: "disabled"},
 	}
 }
 
@@ -210,6 +268,20 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_AUTH_SECRET", &cfg.Security.AuthSecret},
 		{"BLOG_AUTH_SECRET_FILE", &cfg.Security.AuthSecretFile},
 		{"BLOG_BASE_URL", &cfg.Discovery.BaseURL},
+		{"BLOG_STORAGE_ADAPTER", &cfg.Storage.Adapter},
+		{"BLOG_S3_ENDPOINT", &cfg.Storage.S3.Endpoint},
+		{"BLOG_S3_BUCKET", &cfg.Storage.S3.Bucket},
+		{"BLOG_S3_REGION", &cfg.Storage.S3.Region},
+		{"BLOG_S3_ACCESS_KEY", &cfg.Storage.S3.AccessKey},
+		{"BLOG_S3_SECRET_KEY", &cfg.Storage.S3.SecretKey},
+		{"BLOG_S3_PREFIX", &cfg.Storage.S3.Prefix},
+		{"BLOG_MAIL_HOST", &cfg.Mail.Host},
+		{"BLOG_MAIL_USERNAME", &cfg.Mail.Username},
+		{"BLOG_MAIL_PASSWORD", &cfg.Mail.Password},
+		{"BLOG_MAIL_FROM", &cfg.Mail.From},
+		{"BLOG_NEWSLETTER_PROVIDER", &cfg.Newsletter.Provider},
+		{"BLOG_NEWSLETTER_ENDPOINT", &cfg.Newsletter.Endpoint},
+		{"BLOG_NEWSLETTER_TOKEN", &cfg.Newsletter.Token},
 	}
 	for _, override := range stringOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -255,6 +327,10 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_SITEMAP_LIMIT", &cfg.Discovery.SitemapLimit},
 		{"BLOG_BACKUP_DAILY_RETENTION", &cfg.Operations.BackupDailyRetention},
 		{"BLOG_BACKUP_WEEKLY_RETENTION", &cfg.Operations.BackupWeeklyRetention},
+		{"BLOG_THEME_PACKAGE_MAX_BYTES", &cfg.Extensions.ThemePackageMaxBytes},
+		{"BLOG_THEME_MAX_FILES", &cfg.Extensions.ThemeMaxFiles},
+		{"BLOG_ANALYTICS_RETENTION_DAYS", &cfg.Analytics.RetentionDays},
+		{"BLOG_MAIL_PORT", &cfg.Mail.Port},
 	}
 	if value, ok := os.LookupEnv("BLOG_MEDIA_VARIANT_WIDTHS"); ok && strings.TrimSpace(value) != "" {
 		var widths []int
@@ -276,12 +352,47 @@ func applyEnvironment(cfg *Config) error {
 			*override.target = parsed
 		}
 	}
+	if value, ok := os.LookupEnv("BLOG_THEME_MAX_UNPACKED_BYTES"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil {
+			return fmt.Errorf("parse BLOG_THEME_MAX_UNPACKED_BYTES: %w", err)
+		}
+		cfg.Extensions.ThemeMaxUnpacked = parsed
+	}
 	if value, ok := os.LookupEnv("BLOG_COOKIE_SECURE"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
 			return fmt.Errorf("parse BLOG_COOKIE_SECURE: %w", err)
 		}
 		cfg.Security.CookieSecure = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_S3_FORCE_PATH_STYLE"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_S3_FORCE_PATH_STYLE: %w", err)
+		}
+		cfg.Storage.S3.ForcePathStyle = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_MAIL_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_MAIL_ENABLED: %w", err)
+		}
+		cfg.Mail.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_ANALYTICS_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_ANALYTICS_ENABLED: %w", err)
+		}
+		cfg.Analytics.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_COMMENTS_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_COMMENTS_ENABLED: %w", err)
+		}
+		cfg.Comments.Enabled = parsed
 	}
 	return nil
 }
@@ -296,6 +407,14 @@ func (cfg Config) Validate() error {
 	}
 	if strings.TrimSpace(cfg.Storage.DataDir) == "" {
 		problems = append(problems, errors.New("storage.data_dir is required"))
+	}
+	if cfg.Storage.Adapter != "local" && cfg.Storage.Adapter != "s3" {
+		problems = append(problems, errors.New("storage.adapter must be local or s3"))
+	}
+	if cfg.Storage.Adapter == "s3" {
+		if strings.TrimSpace(cfg.Storage.S3.Endpoint) == "" || strings.TrimSpace(cfg.Storage.S3.Bucket) == "" || strings.TrimSpace(cfg.Storage.S3.Region) == "" {
+			problems = append(problems, errors.New("storage.s3 endpoint, bucket, and region are required when storage.adapter is s3"))
+		}
 	}
 	if strings.TrimSpace(cfg.Database.Path) == "" {
 		problems = append(problems, errors.New("database.path is required"))
@@ -372,6 +491,27 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Operations.BackupWeeklyRetention < 0 || cfg.Operations.BackupWeeklyRetention > 52 {
 		problems = append(problems, errors.New("operations.backup_weekly_retention must be between 0 and 52"))
+	}
+	if cfg.Extensions.ThemePackageMaxBytes < 1<<20 || cfg.Extensions.ThemePackageMaxBytes > 256<<20 {
+		problems = append(problems, errors.New("extensions.theme_package_max_bytes must be between 1 MiB and 256 MiB"))
+	}
+	if cfg.Extensions.ThemeMaxFiles < 16 || cfg.Extensions.ThemeMaxFiles > 4096 {
+		problems = append(problems, errors.New("extensions.theme_max_files must be between 16 and 4096"))
+	}
+	if cfg.Extensions.ThemeMaxUnpacked < 1<<20 || cfg.Extensions.ThemeMaxUnpacked > 512<<20 {
+		problems = append(problems, errors.New("extensions.theme_max_unpacked_bytes must be between 1 MiB and 512 MiB"))
+	}
+	if cfg.Analytics.RetentionDays < 30 || cfg.Analytics.RetentionDays > 3650 {
+		problems = append(problems, errors.New("analytics.retention_days must be between 30 and 3650"))
+	}
+	if cfg.Comments.Provider != "local" && cfg.Comments.Provider != "external" && cfg.Comments.Provider != "disabled" {
+		problems = append(problems, errors.New("comments.provider must be local, external, or disabled"))
+	}
+	if cfg.Mail.Port < 1 || cfg.Mail.Port > 65535 {
+		problems = append(problems, errors.New("mail.port must be between 1 and 65535"))
+	}
+	if cfg.Newsletter.Provider == "" {
+		problems = append(problems, errors.New("newsletter.provider must not be empty"))
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))
