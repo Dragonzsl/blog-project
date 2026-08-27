@@ -60,7 +60,7 @@ func (c *ThemeCatalog) Install(ctx context.Context, source io.Reader, options Th
 		_ = os.RemoveAll(pkg.Path)
 		return ThemeRecord{}, err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO theme_settings(theme_id,schema_version,values_json,updated_at) VALUES(?,1,?,?)", id, values, now.UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, "INSERT INTO theme_settings(theme_id,schema_version,values_json,updated_at) VALUES(?,1,?,?)", id, string(values), now.UnixMilli()); err != nil {
 		_ = os.RemoveAll(pkg.Path)
 		return ThemeRecord{}, err
 	}
