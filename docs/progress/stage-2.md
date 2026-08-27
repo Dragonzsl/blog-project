@@ -66,10 +66,12 @@ blog storage migrate --to local
 
 ## 验收记录
 
-- 自动化：`go test -tags "fts5 sqlite_omit_load_extension" ./...`、race、`go vet`、`go mod verify` 和 `git diff --check` 均应通过。
+- 自动化（2026-08-27）：`go test -tags "fts5 sqlite_omit_load_extension" ./...`、`go test -race -tags "fts5 sqlite_omit_load_extension" ./...`、`go vet -tags "fts5 sqlite_omit_load_extension" ./...`、`go mod verify` 和 `git diff --check` 均通过。
 - 数据库从阶段一版本 8 向前迁移到版本 9；旧数据位置会由 `media_storage_locations` 补齐本地索引。
-- 浏览器验收覆盖管理员登录后的插件/主题/重定向页面，以及启用评论/统计后的公开接口；桌面和移动宽度均不得出现横向溢出。
-- 资源验收继续使用 Compose 的应用 256 MiB、Caddy 64 MiB 上限；空载不启用可选插件，启用后只增加对应请求/任务开销。
+- Compose 实例重建后 `/livez`、`/readyz` 均为 200，迁移版本为 9；持久化站点未完成初始化时只验证了登录/初始化保护，不改写真实凭据。
+- 使用隔离内存盘实例完成一次临时初始化：插件、主题、重定向管理页均为 200；启用评论/统计后公开首页与统计面板可用；停用统计插件后其后台路由为 404，重新启用恢复 200。临时实例已销毁。
+- 本次环境未提供可用的内置浏览器连接器，因此页面验收通过实际 HTTPS/HTTP 响应、响应头和隔离实例后台流程完成；后续连接浏览器后可直接复用同一地址做视觉回归。
+- 资源实测（空载）：应用 `25.02 MiB / 256 MiB`，Caddy `13.47 MiB / 64 MiB`；镜像 `15,016,782` 字节。空载不启用可选插件，启用后只增加对应请求/任务开销。
 
 ## 剩余项
 
