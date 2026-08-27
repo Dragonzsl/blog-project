@@ -44,6 +44,22 @@ type NavigationItem struct {
 	SortOrder   int
 }
 
+type Redirect struct {
+	ID         int64
+	SourcePath string
+	TargetPath string
+	StatusCode int
+	Reason     string
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+type RedirectInput struct {
+	SourcePath string
+	TargetPath string
+	StatusCode int
+}
+
 type ContentOption struct {
 	ID    int64
 	Kind  string

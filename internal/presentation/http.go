@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,6 +54,10 @@ type DiscoveryQueries interface {
 	ResolveRedirect(context.Context, string) (discovery.Redirect, error)
 }
 
+type AnalyticsRecorder interface {
+	Record(context.Context, string, string) error
+}
+
 type StateRepository struct {
 	database *database.DB
 }
@@ -79,11 +84,14 @@ type HTTPHandler struct {
 	logger       *slog.Logger
 	organization OrganizationQueries
 	discovery    DiscoveryQueries
+	analytics    AnalyticsRecorder
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
 
 func (h *HTTPHandler) SetThemeManager(manager *ThemeManager) { h.themeManager = manager }
+
+func (h *HTTPHandler) SetAnalyticsRecorder(recorder AnalyticsRecorder) { h.analytics = recorder }
 
 func (h *HTTPHandler) currentTheme() *Theme {
 	if h.themeManager != nil {
@@ -530,6 +538,7 @@ func (h *HTTPHandler) serveCachedDocument(w http.ResponseWriter, r *http.Request
 	key := h.currentTheme().Version() + "|" + semanticKey
 	if cached, ok := h.cache.Get(key, epoch); ok {
 		h.writeCacheEntry(w, r, cached, "HIT")
+		h.recordAnalytics(r)
 		return
 	}
 	body, lastModified, err := render(r.Context())
@@ -554,6 +563,24 @@ func (h *HTTPHandler) serveCachedDocument(w http.ResponseWriter, r *http.Request
 		h.logger.WarnContext(r.Context(), "prune public page cache", "error", err)
 	}
 	h.writeCacheEntry(w, r, entry, "MISS")
+	h.recordAnalytics(r)
+}
+
+func (h *HTTPHandler) recordAnalytics(r *http.Request) {
+	if h.analytics == nil || r.Method != http.MethodGet {
+		return
+	}
+	if err := h.analytics.Record(r.Context(), r.URL.Path, analyticsVisitor(r)); err != nil {
+		h.logger.DebugContext(r.Context(), "record public analytics", "error", err)
+	}
+}
+
+func analyticsVisitor(r *http.Request) string {
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(remote); err == nil {
+		remote = host
+	}
+	return remote + "\x00" + strings.TrimSpace(r.UserAgent())
 }
 
 func (h *HTTPHandler) writeCacheEntry(w http.ResponseWriter, r *http.Request, entry CacheEntry, cacheStatus string) {

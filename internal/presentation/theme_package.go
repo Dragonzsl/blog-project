@@ -299,27 +299,105 @@ func coreRangeAllows(required, current string) bool {
 	if strings.TrimSpace(required) == "" {
 		return true
 	}
-	// The first implementation intentionally accepts the documented semver
-	// range forms while keeping the parser allocation-free and deterministic.
+	currentVersion, currentOK := parseSemver(current)
+	if !currentOK {
+		return false
+	}
+	required = strings.ReplaceAll(required, ",", " ")
 	for _, part := range strings.Fields(required) {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, ">=") && current < strings.TrimPrefix(part, ">=") {
+		operator := ""
+		for _, candidate := range []string{">=", "<=", ">", "<", "="} {
+			if strings.HasPrefix(part, candidate) {
+				operator = candidate
+				part = strings.TrimPrefix(part, candidate)
+				break
+			}
+		}
+		version, ok := parseSemver(part)
+		if !ok {
 			return false
 		}
-		if strings.HasPrefix(part, ">") && current <= strings.TrimPrefix(part, ">") {
-			return false
-		}
-		if strings.HasPrefix(part, "<=") && current > strings.TrimPrefix(part, "<=") {
-			return false
-		}
-		if strings.HasPrefix(part, "<") && current >= strings.TrimPrefix(part, "<") {
-			return false
-		}
-		if !strings.ContainsAny(part, "<>") && part != current {
-			return false
+		comparison := compareSemver(currentVersion, version)
+		switch operator {
+		case ">=":
+			if comparison < 0 {
+				return false
+			}
+		case ">":
+			if comparison <= 0 {
+				return false
+			}
+		case "<=":
+			if comparison > 0 {
+				return false
+			}
+		case "<":
+			if comparison >= 0 {
+				return false
+			}
+		default:
+			if comparison != 0 {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+type semver struct{ major, minor, patch int }
+
+func parseSemver(value string) (semver, bool) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "v")
+	if dash := strings.IndexByte(value, '-'); dash >= 0 {
+		value = value[:dash]
+	}
+	if plus := strings.IndexByte(value, '+'); plus >= 0 {
+		value = value[:plus]
+	}
+	parts := strings.Split(value, ".")
+	if len(parts) != 3 {
+		return semver{}, false
+	}
+	values := [3]int{}
+	for index, part := range parts {
+		if part == "" {
+			return semver{}, false
+		}
+		number := 0
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return semver{}, false
+			}
+			number = number*10 + int(r-'0')
+			if number > 1_000_000 {
+				return semver{}, false
+			}
+		}
+		values[index] = number
+	}
+	return semver{major: values[0], minor: values[1], patch: values[2]}, true
+}
+
+func compareSemver(left, right semver) int {
+	if left.major != right.major {
+		if left.major < right.major {
+			return -1
+		}
+		return 1
+	}
+	if left.minor != right.minor {
+		if left.minor < right.minor {
+			return -1
+		}
+		return 1
+	}
+	if left.patch < right.patch {
+		return -1
+	}
+	if left.patch > right.patch {
+		return 1
+	}
+	return 0
 }
 
 // NewThemeFromDirectory parses all templates before a package can become

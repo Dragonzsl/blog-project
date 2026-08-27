@@ -16,14 +16,17 @@ import (
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/app"
+	contentarchive "github.com/zhushilin/blog-project/internal/archive"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
 	"github.com/zhushilin/blog-project/internal/identity"
+	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/logging"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
 	"github.com/zhushilin/blog-project/internal/presentation"
+	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
 func main() {
@@ -54,6 +57,10 @@ func run(arguments []string) error {
 		return upgrade(arguments[1:])
 	case "theme":
 		return theme(arguments[1:])
+	case "archive":
+		return archiveCommand(arguments[1:])
+	case "storage":
+		return storageCommand(arguments[1:])
 	case "audit":
 		return audit(arguments[1:])
 	case "status":
@@ -513,6 +520,128 @@ func themeWithOutput(arguments []string, output io.Writer) error {
 	}
 }
 
+func archiveCommand(arguments []string) error {
+	if len(arguments) == 0 {
+		return fmt.Errorf("usage: blog archive <export|verify|import> [options]")
+	}
+	flags := flag.NewFlagSet("archive", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to TOML configuration")
+	archivePath := flags.String("archive", "", "content archive ZIP path")
+	outputPath := flags.String("output", "", "output content archive ZIP path")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	lock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	db, err := database.Open(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	service := publishing.NewService(publishing.NewRepository(db))
+	switch arguments[0] {
+	case "export":
+		if *outputPath == "" {
+			return fmt.Errorf("--output is required")
+		}
+		manifest, err := contentarchive.Export(context.Background(), service, *outputPath)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "Content archive exported: %s (%d entries)\n", *outputPath, len(manifest.Entries))
+		return nil
+	case "verify":
+		if *archivePath == "" {
+			return fmt.Errorf("--archive is required")
+		}
+		verified, err := contentarchive.Verify(context.Background(), *archivePath)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "Content archive is valid: %s (%d entries, %d bytes)\n", *archivePath, len(verified.Manifest.Entries), verified.SizeBytes)
+		return nil
+	case "import":
+		if *archivePath == "" {
+			return fmt.Errorf("--archive is required")
+		}
+		created, err := contentarchive.Import(context.Background(), service, *archivePath)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "Content archive imported: %d drafts\n", created)
+		return nil
+	default:
+		return fmt.Errorf("usage: blog archive <export|verify|import> [options]")
+	}
+}
+
+func storageCommand(arguments []string) error {
+	if len(arguments) == 0 || arguments[0] != "migrate" {
+		return fmt.Errorf("usage: blog storage migrate --to <local|s3> [options]")
+	}
+	flags := flag.NewFlagSet("storage migrate", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to TOML configuration")
+	target := flags.String("to", "", "destination adapter: local or s3")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if *target != "local" && *target != "s3" {
+		return fmt.Errorf("--to must be local or s3")
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	lock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	db, err := database.Open(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	local, err := media.NewLocalStorage(filepath.Join(cfg.Storage.DataDir, "media"))
+	if err != nil {
+		return err
+	}
+	var s3 *media.S3Storage
+	if cfg.Storage.S3.Endpoint != "" {
+		s3, err = media.NewS3Storage(cfg.Storage.S3.Endpoint, cfg.Storage.S3.Bucket, cfg.Storage.S3.Region, cfg.Storage.S3.AccessKey, cfg.Storage.S3.SecretKey, cfg.Storage.S3.Prefix, cfg.Storage.S3.ForcePathStyle, cfg.Storage.S3.UseTLS)
+		if err != nil {
+			return err
+		}
+	}
+	var source, destination media.Storage
+	if cfg.Storage.Adapter == "s3" {
+		source = s3
+	} else {
+		source = local
+	}
+	if *target == "s3" {
+		if s3 == nil {
+			return fmt.Errorf("S3 settings are required for --to s3")
+		}
+		destination = s3
+	} else {
+		destination = local
+	}
+	result, err := media.MigrateStorage(context.Background(), db, source, destination)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Storage migration %s -> %s completed: %d/%d objects\n", result.SourceAdapter, result.Destination, result.CopiedObjects, result.TotalObjects)
+	return nil
+}
+
 func openBackupService(configPath string) (*operations.BackupService, *database.DB, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -573,5 +702,5 @@ func readPassword(path string) (string, error) {
 }
 
 func printUsage() {
-	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|theme|audit|version> [options]")
+	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|theme|archive|storage|audit|version> [options]")
 }

@@ -54,6 +54,13 @@ type MenuItem struct {
 	Order    int
 }
 
+type PluginState struct {
+	Manifest       Manifest
+	Enabled        bool
+	LastInitResult string
+	UpdatedAt      time.Time
+}
+
 type Event struct {
 	Name       string
 	Version    int
@@ -119,6 +126,9 @@ func (h *Host) RegisterTask(kind string, handler TaskHandler) error {
 	return nil
 }
 func (h *Host) EnqueueTask(ctx context.Context, kind string, payload any, idempotency string, availableAt time.Time) error {
+	if !h.registry.isEnabled(h.pluginID) {
+		return ErrPluginDisabled
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -139,6 +149,7 @@ func (h *Host) Route(method, path string, handler http.HandlerFunc) error {
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") {
 		return ErrCapabilityDenied
 	}
+	handler = h.guard(handler)
 	switch strings.ToUpper(method) {
 	case http.MethodGet:
 		h.registry.router.Get(path, handler)
@@ -157,27 +168,70 @@ func (h *Host) AdminRoute(method, path string, handler http.HandlerFunc) error {
 	if !strings.HasPrefix(path, "/") {
 		return ErrCapabilityDenied
 	}
-	return h.Route(method, "/admin/plugins/"+h.pluginID+path, handler)
+	if h.registry.adminRouter == nil {
+		return ErrCapabilityDenied
+	}
+	if handler == nil || strings.Contains(path, "..") {
+		return ErrCapabilityDenied
+	}
+	handler = h.guard(handler)
+	prefix := h.registry.adminPrefix
+	scoped := prefix + "/plugins/" + h.pluginID + path
+	switch strings.ToUpper(method) {
+	case http.MethodGet:
+		h.registry.adminRouter.Get(scoped, handler)
+	case http.MethodPost:
+		h.registry.adminRouter.Post(scoped, handler)
+	case http.MethodPut:
+		h.registry.adminRouter.Put(scoped, handler)
+	case http.MethodDelete:
+		h.registry.adminRouter.Delete(scoped, handler)
+	default:
+		return fmt.Errorf("unsupported plugin route method %q", method)
+	}
+	return nil
 }
 func (h *Host) Logger() *slog.Logger { return h.registry.logger.With("plugin", h.pluginID) }
 
+func (h *Host) guard(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.registry.isEnabled(h.pluginID) {
+			http.NotFound(w, r)
+			return
+		}
+		handler(w, r)
+	}
+}
+
 type Registry struct {
-	db      *database.DB
-	router  chi.Router
-	logger  *slog.Logger
-	mu      sync.RWMutex
-	plugins map[string]Plugin
-	schemas map[string]SettingsSchema
-	events  map[string][]EventHandler
-	tasks   map[string]TaskHandler
-	menus   []MenuItem
+	db          *database.DB
+	router      chi.Router
+	adminRouter chi.Router
+	adminPrefix string
+	logger      *slog.Logger
+	mu          sync.RWMutex
+	plugins     map[string]Plugin
+	schemas     map[string]SettingsSchema
+	events      map[string][]EventHandler
+	tasks       map[string]TaskHandler
+	menus       []MenuItem
+	enabled     map[string]bool
+	initialized map[string]bool
 }
 
 func NewRegistry(db *database.DB, router chi.Router, logger *slog.Logger) *Registry {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Registry{db: db, router: router, logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]EventHandler), tasks: make(map[string]TaskHandler)}
+	return &Registry{db: db, router: router, adminRouter: router, adminPrefix: "/admin", logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]EventHandler), tasks: make(map[string]TaskHandler), enabled: make(map[string]bool), initialized: make(map[string]bool)}
+}
+
+// SetAdminRouter binds the protected /admin subtree. It must be called before
+// enabling plugins; keeping it separate prevents a plugin from accidentally
+// registering an unauthenticated administrative endpoint.
+func (r *Registry) SetAdminRouter(router chi.Router) {
+	r.adminRouter = router
+	r.adminPrefix = ""
 }
 
 func (r *Registry) Register(plugin Plugin) error {
@@ -217,6 +271,9 @@ func (r *Registry) Initialize(ctx context.Context, enabled []string) error {
 	var failures []error
 	for _, id := range ids {
 		if _, ok := wanted[id]; !ok {
+			if err := r.Disable(ctx, id); err != nil {
+				failures = append(failures, err)
+			}
 			continue
 		}
 		if err := r.Enable(ctx, id); err != nil {
@@ -242,11 +299,28 @@ func (r *Registry) Enable(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	r.mu.RLock()
+	alreadyInitialized := r.initialized[id]
+	r.mu.RUnlock()
+	if alreadyInitialized {
+		r.mu.Lock()
+		r.enabled[id] = true
+		r.mu.Unlock()
+		_, err := r.db.Writer.ExecContext(ctx, "UPDATE plugin_states SET enabled=1,last_init_result='ready',updated_at=? WHERE plugin_id=?", time.Now().UTC().UnixMilli(), id)
+		return err
+	}
 	host := &Host{registry: r, pluginID: id}
 	if err := plugin.Register(host); err != nil {
+		r.mu.Lock()
+		r.enabled[id] = false
+		r.mu.Unlock()
 		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE plugin_states SET last_init_result=?,enabled=0,updated_at=? WHERE plugin_id=?", err.Error(), time.Now().UTC().UnixMilli(), id)
 		return fmt.Errorf("initialize plugin %s: %w", id, err)
 	}
+	r.mu.Lock()
+	r.initialized[id] = true
+	r.enabled[id] = true
+	r.mu.Unlock()
 	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE plugin_states SET enabled=1,last_init_result='ready',updated_at=? WHERE plugin_id=?", time.Now().UTC().UnixMilli(), id); err != nil {
 		return err
 	}
@@ -254,10 +328,25 @@ func (r *Registry) Enable(ctx context.Context, id string) error {
 }
 
 func (r *Registry) Disable(ctx context.Context, id string) error {
+	r.mu.Lock()
+	_, exists := r.plugins[id]
+	if exists {
+		r.enabled[id] = false
+	}
+	r.mu.Unlock()
+	if !exists {
+		return ErrPluginNotFound
+	}
 	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE plugin_states SET enabled=0,last_init_result='disabled',updated_at=? WHERE plugin_id=?", time.Now().UTC().UnixMilli(), id); err != nil {
 		return err
 	}
 	return nil
+}
+
+func (r *Registry) isEnabled(id string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.enabled[id]
 }
 
 func (r *Registry) Registered() []Manifest {
@@ -268,6 +357,24 @@ func (r *Registry) Registered() []Manifest {
 		result = append(result, plugin.Manifest())
 	}
 	return result
+}
+
+func (r *Registry) States(ctx context.Context) ([]PluginState, error) {
+	rows, err := r.db.Reader.QueryContext(ctx, `SELECT plugin_id,name,version,api_version,kind,enabled,last_init_result,updated_at FROM plugin_states ORDER BY plugin_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []PluginState
+	for rows.Next() {
+		var id, name, version, kind, initResult string
+		var api, enabled, updated int64
+		if err := rows.Scan(&id, &name, &version, &api, &kind, &enabled, &initResult, &updated); err != nil {
+			return nil, err
+		}
+		result = append(result, PluginState{Manifest: Manifest{ID: id, Name: name, Version: version, APIVersion: int(api), Kind: kind}, Enabled: enabled == 1, LastInitResult: initResult, UpdatedAt: time.UnixMilli(updated).UTC()})
+	}
+	return result, rows.Err()
 }
 func (r *Registry) Menus() []MenuItem {
 	r.mu.RLock()

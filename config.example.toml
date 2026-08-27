@@ -73,6 +73,7 @@ retention_days = 365
 enabled = false
 require_moderation = true
 provider = "local"
+external_endpoint = ""
 
 [mail]
 enabled = false

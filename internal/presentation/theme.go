@@ -86,7 +86,11 @@ func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
 }
 
 func (t *Theme) Version() string {
-	return defaulttheme.Version + "+" + t.assetHash
+	version := t.version
+	if version == "" {
+		version = defaulttheme.Version
+	}
+	return version + "+" + t.assetHash
 }
 
 func (t *Theme) AssetURL() string  { return t.assetURL }

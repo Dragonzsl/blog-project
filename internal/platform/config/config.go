@@ -130,6 +130,7 @@ type Comments struct {
 	Enabled           bool   `toml:"enabled"`
 	RequireModeration bool   `toml:"require_moderation"`
 	Provider          string `toml:"provider"`
+	ExternalEndpoint  string `toml:"external_endpoint"`
 }
 
 type Mail struct {
@@ -394,6 +395,9 @@ func applyEnvironment(cfg *Config) error {
 		}
 		cfg.Comments.Enabled = parsed
 	}
+	if value, ok := os.LookupEnv("BLOG_COMMENTS_EXTERNAL_ENDPOINT"); ok && strings.TrimSpace(value) != "" {
+		cfg.Comments.ExternalEndpoint = strings.TrimSpace(value)
+	}
 	return nil
 }
 
@@ -506,6 +510,12 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Comments.Provider != "local" && cfg.Comments.Provider != "external" && cfg.Comments.Provider != "disabled" {
 		problems = append(problems, errors.New("comments.provider must be local, external, or disabled"))
+	}
+	if cfg.Comments.Provider == "external" {
+		external, err := url.Parse(strings.TrimSpace(cfg.Comments.ExternalEndpoint))
+		if err != nil || (external.Scheme != "http" && external.Scheme != "https") || external.Host == "" || external.User != nil || external.RawQuery != "" || external.Fragment != "" {
+			problems = append(problems, errors.New("comments.external_endpoint must be an absolute HTTP or HTTPS URL without credentials, query, or fragment when provider is external"))
+		}
 	}
 	if cfg.Mail.Port < 1 || cfg.Mail.Port > 65535 {
 		problems = append(problems, errors.New("mail.port must be between 1 and 65535"))

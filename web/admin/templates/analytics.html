@@ -1,0 +1,6 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>访问统计</title><link rel="stylesheet" href="/admin/assets/admin.css?v=7"></head>
+<body class="admin-page"><header class="admin-header"><a class="wordmark" href="/admin/">✦ 站主管理</a><nav><a class="nav-link" href="/admin/articles">文章</a><a class="nav-link active" href="/admin/plugins/analytics.local/analytics">统计</a></nav></header>
+<main class="content-shell"><div class="page-heading"><div><p class="eyebrow">Analytics</p><h1>访问统计。</h1></div><p class="heading-note">仅保存按日聚合数据与不可逆访客摘要，不收集原始 IP。</p></div>
+<section class="article-table" aria-label="每日访问统计"><div class="article-row table-head"><strong>日期</strong><strong>路径</strong><strong>访问</strong><strong>独立访客</strong></div>{{range .Rows}}<div class="article-row"><span>{{.Day}}</span><span>{{.Path}}</span><span>{{.Views}}</span><span>{{.UniqueVisitors}}</span></div>{{else}}<p class="empty-copy">暂无统计数据。</p>{{end}}</section></main></body></html>

@@ -1,6 +1,6 @@
 # 个人博客系统
 
-这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环已经完成，完成情况与验证证据见[阶段一实施记录](./docs/progress/stage-1.md)。
+这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环与阶段二扩展能力已经完成，实施记录见[阶段一](./docs/progress/stage-1.md)和[阶段二](./docs/progress/stage-2.md)。
 
 核心方向：Go 模块化单体、SQLite、Markdown、服务端渲染、可上传主题、可信编译期插件，以及可在 1 核 1 GiB VPS 上稳定运行的硬性资源预算。
 
@@ -21,7 +21,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -39,6 +39,10 @@ docker compose down
 ```
 
 `BLOG_SITE_ADDRESS` 同时作为 canonical、Open Graph、RSS、Sitemap 和 robots 的公开基址，正式部署前必须设置为访问者实际使用的地址。内容编辑器可单独覆盖 SEO 标题和描述；留空时自动回退到内容标题、摘要与站点名。
+
+### 阶段二可选能力
+
+所有扩展默认关闭，不配置外部服务也能完整运行。管理员可在 `/admin/plugins` 启停已编译的官方插件；主题包在 `/admin/themes` 上传、预览并原子切换。评论、统计和 Newsletter 启用后分别提供受保护审核/统计页面及公开接口。S3、SMTP 和外部 Newsletter 的凭据建议通过 `.env` 注入，具体命令与迁移流程见[阶段二实施记录](./docs/progress/stage-2.md)。
 
 开发机已安装 Go 1.26 和 C 编译器时，可运行：
 

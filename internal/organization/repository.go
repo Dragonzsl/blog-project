@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
@@ -56,6 +57,55 @@ func (r *Repository) Tags(ctx context.Context) ([]Tag, error) {
 		result = append(result, value)
 	}
 	return result, rows.Err()
+}
+
+func (r *Repository) Redirects(ctx context.Context, limit int) ([]Redirect, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, `SELECT id,source_path,target_path,status_code,reason,created_at,updated_at FROM redirects ORDER BY updated_at DESC,id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []Redirect
+	for rows.Next() {
+		var item Redirect
+		var created, updated int64
+		if err := rows.Scan(&item.ID, &item.SourcePath, &item.TargetPath, &item.StatusCode, &item.Reason, &created, &updated); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, item.UpdatedAt = fromMillis(created), fromMillis(updated)
+		result = append(result, item)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) CreateRedirect(ctx context.Context, input RedirectInput, now time.Time) error {
+	result, err := r.database.Writer.ExecContext(ctx, `INSERT INTO redirects(source_path,source_path_key,target_path,target_path_key,status_code,reason,created_at,updated_at) VALUES(?,?,?,?,?,'manual',?,?)`, input.SourcePath, strings.ToLower(input.SourcePath), input.TargetPath, strings.ToLower(input.TargetPath), input.StatusCode, millis(now), millis(now))
+	if err != nil {
+		return mapWriteError(err)
+	}
+	if affected(result) != 1 {
+		return ErrNotFound
+	}
+	_, _ = r.database.Writer.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES('organization.redirect.created','redirect','succeeded',?,?)`, fmt.Sprintf(`{"source":%q,"target":%q}`, input.SourcePath, input.TargetPath), millis(now))
+	return nil
+}
+
+func (r *Repository) DeleteRedirect(ctx context.Context, id int64, now time.Time) error {
+	result, err := r.database.Writer.ExecContext(ctx, "DELETE FROM redirects WHERE id=? AND reason='manual'", id)
+	if err != nil {
+		return err
+	}
+	if affected(result) != 1 {
+		return ErrNotFound
+	}
+	_, _ = r.database.Writer.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES('organization.redirect.deleted','redirect','succeeded',?,?)`, fmt.Sprintf(`{"id":%d}`, id), millis(now))
+	return nil
 }
 
 func (r *Repository) CreateCategory(ctx context.Context, publicID []byte, input TermInput, slugKey string, now time.Time) (Category, error) {

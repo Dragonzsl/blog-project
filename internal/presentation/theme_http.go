@@ -44,6 +44,7 @@ func (h *ThemeHTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/themes", h.index)
 	router.Post("/themes/upload", h.upload)
 	router.Post("/themes/{themeID}/{version}/activate", h.activate)
+	router.Get("/themes/{themeID}/{version}/preview", h.preview)
 	router.Post("/themes/rollback", h.rollback)
 }
 
@@ -110,6 +111,37 @@ func (h *ThemeHTTPHandler) rollback(w http.ResponseWriter, r *http.Request) {
 	h.redirect(w, r)
 }
 
+func (h *ThemeHTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
+	record, err := h.catalog.Resolve(chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	theme, err := NewThemeFromDirectory(record.Path, record.Manifest)
+	if err != nil {
+		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	siteName, err := h.siteNamer.SiteName(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	body, err := theme.RenderHomePage(siteName, nil, Navigation{}, PageMetadata{NoIndex: true})
+	if err != nil {
+		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	setPublicSecurityHeaders(w, body)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
+}
+
 func (h *ThemeHTTPHandler) verifyAction(w http.ResponseWriter, r *http.Request) bool {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid theme action", http.StatusBadRequest)
@@ -118,9 +150,14 @@ func (h *ThemeHTTPHandler) verifyAction(w http.ResponseWriter, r *http.Request) 
 	return h.security.VerifyParsedCSRF(w, r)
 }
 
-func (h *ThemeHTTPHandler) render(w http.ResponseWriter, r *http.Request, data map[string]any) {
+func (h *ThemeHTTPHandler) render(w http.ResponseWriter, r *http.Request, data map[string]any, statuses ...int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	status := http.StatusOK
+	if len(statuses) > 0 {
+		status = statuses[0]
+	}
+	w.WriteHeader(status)
 	if err := h.templates.ExecuteTemplate(w, "themes.html", data); err != nil {
 		h.logger.ErrorContext(r.Context(), "render themes", "error", err)
 	}
@@ -133,8 +170,7 @@ func (h *ThemeHTTPHandler) renderError(w http.ResponseWriter, r *http.Request, m
 		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid"})
 	}
 	siteName, _ := h.siteNamer.SiteName(r.Context())
-	w.WriteHeader(status)
-	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20)})
+	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20)}, status)
 }
 
 func (h *ThemeHTTPHandler) redirect(w http.ResponseWriter, r *http.Request) {

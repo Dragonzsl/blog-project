@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -85,6 +86,69 @@ func (s *Service) DeleteTag(ctx context.Context, id int64) error {
 
 func (s *Service) NavigationItems(ctx context.Context) ([]NavigationItem, error) {
 	return s.repository.NavigationItems(ctx, "", false)
+}
+
+func (s *Service) Redirects(ctx context.Context, limit int) ([]Redirect, error) {
+	return s.repository.Redirects(ctx, limit)
+}
+
+func (s *Service) CreateRedirect(ctx context.Context, input RedirectInput) error {
+	cleanSource, sourceKey, err := normalizeRedirectPath(input.SourcePath)
+	if err != nil {
+		return err
+	}
+	cleanTarget, targetKey, err := normalizeRedirectPath(input.TargetPath)
+	if err != nil {
+		return err
+	}
+	if sourceKey == targetKey {
+		return ValidationError{Message: "重定向源地址与目标地址不能相同"}
+	}
+	if input.StatusCode != 301 && input.StatusCode != 308 {
+		return ValidationError{Message: "状态码只能是 301 或 308"}
+	}
+	if sourceKey == "/admin" || strings.HasPrefix(sourceKey, "/admin/") || sourceKey == "/assets" || strings.HasPrefix(sourceKey, "/assets/") {
+		return ValidationError{Message: "系统路径不能创建手动重定向"}
+	}
+	input.SourcePath, input.TargetPath = cleanSource, cleanTarget
+	// Follow the existing target chain with a small bound to reject direct and
+	// indirect cycles before the new row is written.
+	current := targetKey
+	for depth := 0; depth < 32; depth++ {
+		if current == sourceKey {
+			return ValidationError{Message: "重定向会形成循环"}
+		}
+		var next string
+		err := s.repository.database.Reader.QueryRowContext(ctx, "SELECT target_path_key FROM redirects WHERE source_path_key=?", current).Scan(&next)
+		if errors.Is(err, sql.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		current = next
+	}
+	return s.repository.CreateRedirect(ctx, input, s.now())
+}
+
+func (s *Service) DeleteRedirect(ctx context.Context, id int64) error {
+	if id < 1 {
+		return ErrNotFound
+	}
+	return s.repository.DeleteRedirect(ctx, id, s.now())
+}
+
+func normalizeRedirectPath(value string) (string, string, error) {
+	value = strings.TrimSpace(value)
+	parsed, err := url.ParseRequestURI(value)
+	if err != nil || parsed.Path == "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Scheme != "" || parsed.Host != "" || !strings.HasPrefix(parsed.Path, "/") {
+		return "", "", ValidationError{Message: "重定向地址必须是站内绝对路径"}
+	}
+	clean := path.Clean(parsed.Path)
+	if clean == "." || strings.Contains(clean, "\x00") || strings.HasPrefix(clean, "/../") || clean == "/.." || len(clean) > 512 {
+		return "", "", ValidationError{Message: "重定向地址无效"}
+	}
+	return clean, strings.ToLower(clean), nil
 }
 
 func (s *Service) PublicNavigation(ctx context.Context, location string) ([]NavigationItem, error) {

@@ -6,6 +6,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/organization"
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	platformslug "github.com/zhushilin/blog-project/internal/platform/slug"
@@ -15,6 +16,9 @@ type Service struct {
 	repository *Repository
 	options    Options
 	now        func() time.Time
+	events     interface {
+		Dispatch(context.Context, extensions.Event) []error
+	}
 }
 
 type Options struct {
@@ -47,6 +51,12 @@ func NewService(repository *Repository, configured ...Options) *Service {
 		}
 	}
 	return &Service{repository: repository, options: options, now: func() time.Time { return time.Now().UTC() }}
+}
+
+func (s *Service) SetEventSink(sink interface {
+	Dispatch(context.Context, extensions.Event) []error
+}) {
+	s.events = sink
 }
 
 func (s *Service) CreateDraft(ctx context.Context, input DraftInput) (Article, error) {
@@ -122,14 +132,22 @@ func (s *Service) Publish(ctx context.Context, id, expectedVersion int64) (Artic
 	if id < 1 || expectedVersion < 1 {
 		return Article{}, ErrNotFound
 	}
-	return s.repository.Publish(ctx, "article", id, expectedVersion, s.now())
+	article, err := s.repository.Publish(ctx, "article", id, expectedVersion, s.now())
+	if err == nil && s.events != nil {
+		_ = s.events.Dispatch(ctx, extensions.Event{Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), article.PublicID...), Payload: map[string]any{"kind": "article", "slug": article.Slug}})
+	}
+	return article, err
 }
 
 func (s *Service) PublishPage(ctx context.Context, id, expectedVersion int64) (Article, error) {
 	if id < 1 || expectedVersion < 1 {
 		return Article{}, ErrNotFound
 	}
-	return s.repository.Publish(ctx, "page", id, expectedVersion, s.now())
+	page, err := s.repository.Publish(ctx, "page", id, expectedVersion, s.now())
+	if err == nil && s.events != nil {
+		_ = s.events.Dispatch(ctx, extensions.Event{Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), page.PublicID...), Payload: map[string]any{"kind": "page", "slug": page.Slug}})
+	}
+	return page, err
 }
 
 func (s *Service) Article(ctx context.Context, id int64) (Article, error) {

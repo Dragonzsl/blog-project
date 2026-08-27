@@ -11,10 +11,14 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/zhushilin/blog-project/internal/analytics"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
+	"github.com/zhushilin/blog-project/internal/comments"
 	"github.com/zhushilin/blog-project/internal/discovery"
+	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/identity"
 	"github.com/zhushilin/blog-project/internal/media"
+	"github.com/zhushilin/blog-project/internal/notifications"
 	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
@@ -34,6 +38,9 @@ type App struct {
 	discovery            *discovery.Service
 	backups              *operations.BackupService
 	themeManager         *presentation.ThemeManager
+	extensions           *extensions.Registry
+	analytics            *analytics.Service
+	outbox               *notifications.Outbox
 	dataLock             *operations.DataLock
 	lifecycleInterval    time.Duration
 	trashCleanupInterval time.Duration
@@ -70,6 +77,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	mailer, err := notifications.NewSMTPSender(notifications.SMTPConfig{Enabled: cfg.Mail.Enabled, Host: cfg.Mail.Host, Port: cfg.Mail.Port, Username: cfg.Mail.Username, Password: cfg.Mail.Password, From: cfg.Mail.From, StartTLS: cfg.Mail.StartTLS})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	outbox := notifications.NewOutbox(db, mailer)
 	publishingService := publishing.NewService(publishing.NewRepository(db), publishing.Options{
 		SchedulerBatchSize: cfg.Publishing.SchedulerBatchSize,
 		SnapshotInterval:   cfg.Publishing.EditingSnapshotInterval.Duration,
@@ -112,7 +125,23 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
-	mediaService, err := media.NewService(db, filepath.Join(cfg.Storage.DataDir, "media"), logger, media.Options{
+	redirectHTTP, err := organization.NewRedirectHTTPHandler(organizationService, identityHTTP, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	mediaRoot := filepath.Join(cfg.Storage.DataDir, "media")
+	var mediaStorage media.Storage
+	if cfg.Storage.Adapter == "s3" {
+		mediaStorage, err = media.NewS3Storage(cfg.Storage.S3.Endpoint, cfg.Storage.S3.Bucket, cfg.Storage.S3.Region, cfg.Storage.S3.AccessKey, cfg.Storage.S3.SecretKey, cfg.Storage.S3.Prefix, cfg.Storage.S3.ForcePathStyle, cfg.Storage.S3.UseTLS)
+	} else {
+		mediaStorage, err = media.NewLocalStorage(mediaRoot)
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	mediaService, err := media.NewServiceWithStorage(db, mediaRoot, mediaStorage, logger, media.Options{
 		MaxUploadBytes: int64(cfg.Media.MaxUploadBytes),
 		MaxImagePixels: cfg.Media.MaxImagePixels,
 		VariantWidths:  cfg.Media.VariantWidths,
@@ -161,6 +190,46 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	presentationHTTP.SetDiscovery(discoveryService)
 	presentationHTTP.SetThemeManager(themeManager)
+	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration)
+	if cfg.Mail.Enabled {
+		commentService.SetNotifier(outbox, cfg.Mail.From)
+	}
+	var commentHTTP *comments.HTTPHandler
+	if cfg.Comments.Enabled || contains(cfg.Extensions.EnabledPlugins, "comments.local") {
+		commentHTTP = comments.NewHTTPHandler(commentService, publishingService, identityHTTP, logger)
+	}
+	analyticsService := analytics.NewService(db, authSecret, cfg.Analytics.RetentionDays)
+	var analyticsHTTP *analytics.HTTPHandler
+	if cfg.Analytics.Enabled || contains(cfg.Extensions.EnabledPlugins, "analytics.local") {
+		analyticsHTTP, err = analytics.NewHTTPHandler(analyticsService, identityHTTP, logger)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if cfg.Analytics.Enabled || contains(cfg.Extensions.EnabledPlugins, "analytics.local") {
+		presentationHTTP.SetAnalyticsRecorder(analyticsService)
+	}
+	var newsletterPlugin *notifications.NewsletterPlugin
+	if cfg.Newsletter.Enabled {
+		var adapter notifications.NewsletterAdapter
+		if cfg.Newsletter.Provider == "local" {
+			adapter = notifications.NewLocalNewsletter(db, authSecret)
+		} else {
+			adapter, err = notifications.NewHTTPNewsletter(cfg.Newsletter.Endpoint, cfg.Newsletter.Token, cfg.Newsletter.Provider)
+			if err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
+		newsletterService := notifications.NewsletterService{Adapter: adapter}
+		newsletterHandler := notifications.NewNewsletterHTTPHandler(newsletterService)
+		pluginID, pluginName := "newsletter.external", "外部 Newsletter"
+		if cfg.Newsletter.Provider == "local" {
+			pluginID, pluginName = "newsletter.local", "本地 Newsletter"
+		}
+		newsletterPlugin = &notifications.NewsletterPlugin{ID: pluginID, Name: pluginName, Handler: newsletterHandler}
+	}
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -172,19 +241,66 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	router.Get("/readyz", health.Ready)
 	mediaHTTP.RegisterPublic(router)
 	presentationHTTP.RegisterPublic(router)
+	extensionRegistry := extensions.NewRegistry(db, router, logger)
+	publishingService.SetEventSink(extensionRegistry)
+	extensionHTTP, err := extensions.NewHTTPHandler(extensionRegistry, identityHTTP, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := extensionRegistry.Register(comments.NewLocalPlugin(commentHTTP)); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := extensionRegistry.Register(comments.NewExternalPlugin(cfg.Comments.ExternalEndpoint)); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := extensionRegistry.Register(analytics.NewPlugin(analyticsHTTP)); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if newsletterPlugin != nil {
+		if err := extensionRegistry.Register(newsletterPlugin); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	var protectedRouter chi.Router
 	router.Route("/admin", func(admin chi.Router) {
 		admin.Use(identityHTTP.SecurityHeaders)
 		identityHTTP.RegisterPublic(admin)
 		admin.Group(func(protected chi.Router) {
+			protectedRouter = protected
 			protected.Use(identityHTTP.RequireSession)
 			identityHTTP.RegisterProtected(protected)
+			extensionHTTP.RegisterAdmin(protected)
 			publishingHTTP.RegisterAdmin(protected)
 			organizationHTTP.RegisterAdmin(protected)
+			redirectHTTP.RegisterAdmin(protected)
 			mediaHTTP.RegisterAdmin(protected)
 			presentationHTTP.RegisterAdmin(protected)
 			themeHTTP.RegisterAdmin(protected)
 		})
 	})
+	extensionRegistry.SetAdminRouter(protectedRouter)
+	enabledPlugins := append([]string(nil), cfg.Extensions.EnabledPlugins...)
+	if cfg.Comments.Enabled && cfg.Comments.Provider == "local" {
+		enabledPlugins = appendUnique(enabledPlugins, "comments.local")
+	}
+	if cfg.Comments.Enabled && cfg.Comments.Provider == "external" {
+		enabledPlugins = appendUnique(enabledPlugins, "comments.external")
+	}
+	if cfg.Analytics.Enabled {
+		enabledPlugins = appendUnique(enabledPlugins, "analytics.local")
+	}
+	if newsletterPlugin != nil {
+		enabledPlugins = appendUnique(enabledPlugins, newsletterPlugin.ID)
+	}
+	if err := extensionRegistry.Initialize(ctx, enabledPlugins); err != nil {
+		// Optional extensions must never prevent core publishing from starting.
+		logger.ErrorContext(ctx, "optional plugin initialization failed", "error", err)
+	}
 
 	server := &http.Server{
 		Addr:              cfg.Server.ListenAddress,
@@ -194,7 +310,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MaxHeaderBytes:    1 << 20,
 	}
 	keepLock = true
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, extensions: extensionRegistry, analytics: analyticsService, outbox: outbox, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, current := range values {
+		if current == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func contains(values []string, value string) bool {
+	for _, current := range values {
+		if current == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (app *App) Run(ctx context.Context) error {
@@ -267,6 +401,38 @@ func (app *App) runLifecycle(ctx context.Context) {
 			app.logger.InfoContext(ctx, "scheduled backup created", "path", result.Path, "size_bytes", result.SizeBytes)
 		}
 	}
+	purgeAnalytics := func() {
+		if app.analytics == nil || (!app.config.Analytics.Enabled && !contains(app.config.Extensions.EnabledPlugins, "analytics.local")) {
+			return
+		}
+		if purged, err := app.analytics.Purge(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "purge analytics", "error", err)
+		} else if purged > 0 {
+			app.logger.InfoContext(ctx, "analytics retention purge", "rows", purged)
+		}
+	}
+	processPluginTask := func() {
+		if app.extensions == nil {
+			return
+		}
+		processed, err := app.extensions.ProcessOne(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "process plugin task", "error", err)
+		} else if processed {
+			app.logger.DebugContext(ctx, "plugin task processed")
+		}
+	}
+	processNotification := func() {
+		if app.outbox == nil {
+			return
+		}
+		processed, err := app.outbox.ProcessOne(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "process notification outbox", "error", err)
+		} else if processed {
+			app.logger.DebugContext(ctx, "notification outbox processed")
+		}
+	}
 	if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		app.logger.ErrorContext(ctx, "initialize search documents", "error", err)
 	} else if indexed > 0 {
@@ -275,6 +441,9 @@ func (app *App) runLifecycle(ctx context.Context) {
 	processScheduled()
 	cleanupTrash()
 	backupIfDue()
+	purgeAnalytics()
+	processPluginTask()
+	processNotification()
 	schedulerTicker := time.NewTicker(app.lifecycleInterval)
 	defer schedulerTicker.Stop()
 	cleanupTicker := time.NewTicker(app.trashCleanupInterval)
@@ -287,8 +456,11 @@ func (app *App) runLifecycle(ctx context.Context) {
 			return
 		case <-schedulerTicker.C:
 			processScheduled()
+			processPluginTask()
+			processNotification()
 		case <-cleanupTicker.C:
 			cleanupTrash()
+			purgeAnalytics()
 		case <-backupTicker.C:
 			backupIfDue()
 		}

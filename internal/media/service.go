@@ -40,6 +40,7 @@ func DefaultOptions() Options {
 type Service struct {
 	repository  *Repository
 	root        string
+	storage     Storage
 	logger      *slog.Logger
 	variantGate chan struct{}
 	options     Options
@@ -47,15 +48,26 @@ type Service struct {
 }
 
 func NewService(db *database.DB, root string, logger *slog.Logger, configured ...Options) (*Service, error) {
+	storage, err := NewLocalStorage(root)
+	if err != nil {
+		return nil, err
+	}
+	return NewServiceWithStorage(db, root, storage, logger, configured...)
+}
+
+func NewServiceWithStorage(db *database.DB, root string, storage Storage, logger *slog.Logger, configured ...Options) (*Service, error) {
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return nil, fmt.Errorf("create media directory: %w", err)
+	}
+	if storage == nil {
+		return nil, fmt.Errorf("media storage is required")
 	}
 	options := DefaultOptions()
 	if len(configured) > 0 {
 		options = configured[0]
 	}
 	options.VariantWidths = append([]int(nil), options.VariantWidths...)
-	return &Service{repository: NewRepository(db), root: root, logger: logger, variantGate: make(chan struct{}, 1), options: options, now: func() time.Time { return time.Now().UTC() }}, nil
+	return &Service{repository: NewRepository(db), root: root, storage: storage, logger: logger, variantGate: make(chan struct{}, 1), options: options, now: func() time.Time { return time.Now().UTC() }}, nil
 }
 
 func (s *Service) MaxUploadBytes() int64 { return s.options.MaxUploadBytes }
@@ -158,12 +170,44 @@ func (s *Service) Upload(ctx context.Context, originalName, altText string, sour
 			return Item{}, err
 		}
 	}
+	if s.storage.Name() != "local" {
+		if err = s.putFile(ctx, item.ObjectKey, originalPath, item.SizeBytes); err != nil {
+			return Item{}, fmt.Errorf("store media original in %s: %w", s.storage.Name(), err)
+		}
+		for _, variant := range item.Variants {
+			variantPath := filepath.Join(s.root, filepath.FromSlash(variant.ObjectKey))
+			if err = s.putFile(ctx, variant.ObjectKey, variantPath, variant.SizeBytes); err != nil {
+				return Item{}, fmt.Errorf("store media variant in %s: %w", s.storage.Name(), err)
+			}
+		}
+	}
 	item, err = s.repository.Create(ctx, item, s.now())
 	if err != nil {
 		return Item{}, err
 	}
+	if err := s.recordStorageLocations(ctx, item); err != nil {
+		return Item{}, err
+	}
 	item.PublicIDText = publicText
 	return item, nil
+}
+
+func (s *Service) recordStorageLocations(ctx context.Context, item Item) error {
+	now := s.now().UnixMilli()
+	tx, err := s.repository.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO media_storage_locations(media_id,variant_key,adapter,object_key,size_bytes,content_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(media_id,variant_key) DO UPDATE SET adapter=excluded.adapter,object_key=excluded.object_key,size_bytes=excluded.size_bytes,content_hash=excluded.content_hash,updated_at=excluded.updated_at`, item.ID, "original", s.storage.Name(), item.ObjectKey, item.SizeBytes, item.ContentHash, now, now); err != nil {
+		return err
+	}
+	for _, variant := range item.Variants {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO media_storage_locations(media_id,variant_key,adapter,object_key,size_bytes,content_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(media_id,variant_key) DO UPDATE SET adapter=excluded.adapter,object_key=excluded.object_key,size_bytes=excluded.size_bytes,content_hash=excluded.content_hash,updated_at=excluded.updated_at`, item.ID, variant.Key, s.storage.Name(), variant.ObjectKey, variant.SizeBytes, variant.ContentHash, now, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Service) Items(ctx context.Context) ([]Item, error) {
@@ -178,6 +222,10 @@ func (s *Service) Items(ctx context.Context) ([]Item, error) {
 }
 
 func (s *Service) Delete(ctx context.Context, id int64) error {
+	existing, err := s.repository.Item(ctx, id)
+	if err != nil {
+		return err
+	}
 	item, err := s.repository.Delete(ctx, id, s.now())
 	if err != nil {
 		return err
@@ -186,6 +234,12 @@ func (s *Service) Delete(ctx context.Context, id int64) error {
 	directory := s.directory(publicText)
 	if err := os.RemoveAll(directory); err != nil {
 		s.logger.ErrorContext(ctx, "remove deleted media files", "error", err, "media_id", publicText)
+	}
+	if s.storage.Name() != "local" {
+		_ = s.storage.Delete(ctx, item.ObjectKey)
+		for _, variant := range existing.Variants {
+			_ = s.storage.Delete(ctx, variant.ObjectKey)
+		}
 	}
 	return nil
 }
@@ -197,13 +251,69 @@ func (s *Service) Asset(ctx context.Context, publicIDText, variant string) (Asse
 	}
 	return s.repository.Asset(ctx, publicID, variant)
 }
-func (s *Service) Open(asset Asset) (*os.File, error) {
+
+type ReadSeekCloser interface {
+	io.ReadSeeker
+	io.Closer
+}
+
+func (s *Service) Open(asset Asset) (ReadSeekCloser, error) {
 	path := filepath.Join(s.root, filepath.FromSlash(asset.ObjectKey))
 	relative, err := filepath.Rel(s.root, path)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return nil, ErrNotFound
 	}
-	return os.Open(path)
+	if file, err := os.Open(path); err == nil {
+		return file, nil
+	} else if s.storage.Name() == "local" {
+		return nil, err
+	}
+	remote, err := s.storage.Open(context.Background(), asset.ObjectKey)
+	if err != nil {
+		return nil, err
+	}
+	temporary, err := os.CreateTemp(s.root, ".remote-*.tmp")
+	if err != nil {
+		remote.Close()
+		return nil, err
+	}
+	if _, err := io.Copy(temporary, io.LimitReader(remote, asset.SizeBytes+1)); err != nil {
+		remote.Close()
+		temporary.Close()
+		os.Remove(temporary.Name())
+		return nil, err
+	}
+	remote.Close()
+	if err := temporary.Close(); err != nil {
+		os.Remove(temporary.Name())
+		return nil, err
+	}
+	file, err := os.Open(temporary.Name())
+	if err != nil {
+		os.Remove(temporary.Name())
+		return nil, err
+	}
+	return &managedFile{File: file, path: temporary.Name()}, nil
+}
+
+type managedFile struct {
+	*os.File
+	path string
+}
+
+func (f *managedFile) Close() error {
+	err := f.File.Close()
+	_ = os.Remove(f.path)
+	return err
+}
+
+func (s *Service) putFile(ctx context.Context, key, file string, size int64) error {
+	input, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	return s.storage.Put(ctx, key, input, size)
 }
 
 func (s *Service) generateVariants(ctx context.Context, item Item, extension string) ([]Variant, error) {
