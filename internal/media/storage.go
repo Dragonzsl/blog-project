@@ -80,7 +80,7 @@ func (s *LocalStorage) Put(ctx context.Context, key string, source io.Reader, si
 		temporary.Close()
 		return err
 	}
-	if size > 0 && written != size {
+	if size >= 0 && written != size {
 		temporary.Close()
 		return fmt.Errorf("object size mismatch: got %d, want %d", written, size)
 	}
@@ -321,7 +321,7 @@ func MigrateStorage(ctx context.Context, db *database.DB, source, destination St
 		}
 		temporary, tempErr := os.CreateTemp("", "blog-storage-migrate-*")
 		if tempErr == nil {
-			_, tempErr = io.Copy(temporary, reader)
+			_, tempErr = io.Copy(temporary, io.LimitReader(reader, item.size+1))
 		}
 		closeErr := reader.Close()
 		if tempErr == nil {

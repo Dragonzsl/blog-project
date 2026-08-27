@@ -47,6 +47,18 @@ type App struct {
 	backupInterval       time.Duration
 }
 
+type gatedAnalyticsRecorder struct {
+	registry *extensions.Registry
+	service  *analytics.Service
+}
+
+func (r gatedAnalyticsRecorder) Record(ctx context.Context, path, visitor string) error {
+	if r.registry == nil || r.service == nil || !r.registry.Enabled("analytics.local") {
+		return nil
+	}
+	return r.service.Record(ctx, path, visitor)
+}
+
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
 	dataLock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
 	if err != nil {
@@ -194,21 +206,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	if cfg.Mail.Enabled {
 		commentService.SetNotifier(outbox, cfg.Mail.From)
 	}
-	var commentHTTP *comments.HTTPHandler
-	if cfg.Comments.Enabled || contains(cfg.Extensions.EnabledPlugins, "comments.local") {
-		commentHTTP = comments.NewHTTPHandler(commentService, publishingService, identityHTTP, logger)
-	}
+	// Built-in handlers are tiny and are constructed at startup so an admin
+	// enable survives a restart; their routes remain absent (or guarded) while
+	// the corresponding plugin is disabled.
+	commentHTTP := comments.NewHTTPHandler(commentService, publishingService, identityHTTP, logger)
 	analyticsService := analytics.NewService(db, authSecret, cfg.Analytics.RetentionDays)
-	var analyticsHTTP *analytics.HTTPHandler
-	if cfg.Analytics.Enabled || contains(cfg.Extensions.EnabledPlugins, "analytics.local") {
-		analyticsHTTP, err = analytics.NewHTTPHandler(analyticsService, identityHTTP, logger)
-		if err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-	if cfg.Analytics.Enabled || contains(cfg.Extensions.EnabledPlugins, "analytics.local") {
-		presentationHTTP.SetAnalyticsRecorder(analyticsService)
+	analyticsHTTP, err := analytics.NewHTTPHandler(analyticsService, identityHTTP, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
 	var newsletterPlugin *notifications.NewsletterPlugin
 	if cfg.Newsletter.Enabled {
@@ -242,6 +248,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	mediaHTTP.RegisterPublic(router)
 	presentationHTTP.RegisterPublic(router)
 	extensionRegistry := extensions.NewRegistry(db, router, logger)
+	presentationHTTP.SetAnalyticsRecorder(gatedAnalyticsRecorder{registry: extensionRegistry, service: analyticsService})
 	publishingService.SetEventSink(extensionRegistry)
 	extensionHTTP, err := extensions.NewHTTPHandler(extensionRegistry, identityHTTP, logger)
 	if err != nil {

@@ -48,7 +48,11 @@ func (s *Service) Record(ctx context.Context, path, visitor string) error {
 	}
 	now := s.now().UTC()
 	day := now.Format("2006-01-02")
-	hash := s.visitorHash(visitor)
+	// Keep uniqueness scoped to the same day and path.  The digest remains
+	// keyed and opaque, while a visitor viewing two pages is counted once in
+	// each page's aggregate rather than being charged to whichever page came
+	// first.
+	hash := s.visitorHash(path, visitor)
 	tx, err := s.db.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -69,8 +73,10 @@ func (s *Service) Record(ctx context.Context, path, visitor string) error {
 	return tx.Commit()
 }
 
-func (s *Service) visitorHash(visitor string) []byte {
+func (s *Service) visitorHash(path, visitor string) []byte {
 	mac := hmac.New(sha256.New, s.secret)
+	_, _ = mac.Write([]byte(path))
+	_, _ = mac.Write([]byte{'\x00'})
 	_, _ = mac.Write([]byte(strings.TrimSpace(visitor)))
 	return mac.Sum(nil)
 }

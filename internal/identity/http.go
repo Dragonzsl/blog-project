@@ -423,7 +423,11 @@ func (h *HTTPHandler) internalError(w http.ResponseWriter, r *http.Request, err 
 }
 
 func (h *HTTPHandler) setSessionCookie(w http.ResponseWriter, session Session) {
-	h.setCookie(w, h.sessionCookieName(), session.Token, time.Until(session.ExpiresAt))
+	// Derive the cookie lifetime from the same clock used to create and
+	// validate the session.  Besides keeping the two expiry mechanisms in
+	// lockstep, this preserves deterministic tests that inject Service.now
+	// without accidentally emitting an already-expired browser cookie.
+	h.setCookie(w, h.sessionCookieName(), session.Token, session.ExpiresAt.Sub(h.service.now()))
 }
 
 func (h *HTTPHandler) setCookie(w http.ResponseWriter, name, value string, lifetime time.Duration) {

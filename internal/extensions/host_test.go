@@ -114,6 +114,52 @@ func TestPluginRouteIsScoped(t *testing.T) {
 	}
 }
 
+func TestDisabledPluginDoesNotReceiveEventsOrTasks(t *testing.T) {
+	db := openExtensionsDatabase(t)
+	registry := NewRegistry(db, chi.NewRouter(), nil)
+	plugin := &countingPlugin{}
+	if err := registry.Register(plugin); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Enable(context.Background(), "counting"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Disable(context.Background(), "counting"); err != nil {
+		t.Fatal(err)
+	}
+	registry.Dispatch(context.Background(), Event{Name: "counting.event", Version: 1})
+	if plugin.events != 0 || plugin.tasks != 0 {
+		t.Fatalf("disabled plugin ran: events=%d tasks=%d", plugin.events, plugin.tasks)
+	}
+	if _, err := db.Writer.ExecContext(context.Background(), `INSERT INTO jobs(kind,payload_version,payload,idempotency_key,status,available_at,attempts,created_at,updated_at) VALUES('plugin:counting:refresh',1,X'7B7D','disabled-task','pending',0,0,0,0)`); err != nil {
+		t.Fatal(err)
+	}
+	processed, err := registry.ProcessOne(context.Background())
+	if err != nil || processed {
+		t.Fatalf("disabled task processed=%v err=%v", processed, err)
+	}
+	var status string
+	if err := db.Reader.QueryRowContext(context.Background(), "SELECT status FROM jobs WHERE id=1").Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("disabled task status=%s err=%v", status, err)
+	}
+}
+
+type countingPlugin struct {
+	events int
+	tasks  int
+}
+
+func (*countingPlugin) Manifest() Manifest {
+	return Manifest{ID: "counting", Name: "counting", Version: "1.0.0", APIVersion: HostAPIVersion}
+}
+
+func (p *countingPlugin) Register(host *Host) error {
+	if err := host.Subscribe("counting.event", func(context.Context, Event) error { p.events++; return nil }); err != nil {
+		return err
+	}
+	return host.RegisterTask("refresh", func(context.Context, []byte) error { p.tasks++; return nil })
+}
+
 type routePlugin struct{}
 
 func (routePlugin) Manifest() Manifest {

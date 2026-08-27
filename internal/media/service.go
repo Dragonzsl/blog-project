@@ -151,6 +151,15 @@ func (s *Service) Upload(ctx context.Context, originalName, altText string, sour
 			_ = os.RemoveAll(directory)
 		}
 	}()
+	var uploadedKeys []string
+	defer func() {
+		if err == nil || s.storage.Name() == "local" {
+			return
+		}
+		for _, key := range uploadedKeys {
+			_ = s.storage.Delete(context.Background(), key)
+		}
+	}()
 	objectKey := filepath.ToSlash(filepath.Join(publicText[:2], publicText, "original"+extension))
 	originalPath := filepath.Join(s.root, filepath.FromSlash(objectKey))
 	if err = os.Rename(temporaryPath, originalPath); err != nil {
@@ -174,11 +183,13 @@ func (s *Service) Upload(ctx context.Context, originalName, altText string, sour
 		if err = s.putFile(ctx, item.ObjectKey, originalPath, item.SizeBytes); err != nil {
 			return Item{}, fmt.Errorf("store media original in %s: %w", s.storage.Name(), err)
 		}
+		uploadedKeys = append(uploadedKeys, item.ObjectKey)
 		for _, variant := range item.Variants {
 			variantPath := filepath.Join(s.root, filepath.FromSlash(variant.ObjectKey))
 			if err = s.putFile(ctx, variant.ObjectKey, variantPath, variant.SizeBytes); err != nil {
 				return Item{}, fmt.Errorf("store media variant in %s: %w", s.storage.Name(), err)
 			}
+			uploadedKeys = append(uploadedKeys, variant.ObjectKey)
 		}
 	}
 	item, err = s.repository.Create(ctx, item, s.now())
@@ -186,6 +197,10 @@ func (s *Service) Upload(ctx context.Context, originalName, altText string, sour
 		return Item{}, err
 	}
 	if err := s.recordStorageLocations(ctx, item); err != nil {
+		// The media row and its location index form one logical write.  If the
+		// second transaction cannot be committed, remove the orphan row while
+		// the deferred cleanup removes local/remote objects.
+		_, _ = s.repository.Delete(ctx, item.ID, s.now())
 		return Item{}, err
 	}
 	item.PublicIDText = publicText

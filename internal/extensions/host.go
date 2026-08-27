@@ -72,6 +72,11 @@ type Event struct {
 type EventHandler func(context.Context, Event) error
 type TaskHandler func(context.Context, []byte) error
 
+type eventSubscription struct {
+	pluginID string
+	handler  EventHandler
+}
+
 type Plugin interface {
 	Manifest() Manifest
 	Register(*Host) error
@@ -109,7 +114,7 @@ func (h *Host) Subscribe(event string, handler EventHandler) error {
 	}
 	h.registry.mu.Lock()
 	defer h.registry.mu.Unlock()
-	h.registry.events[event] = append(h.registry.events[event], handler)
+	h.registry.events[event] = append(h.registry.events[event], eventSubscription{pluginID: h.pluginID, handler: handler})
 	return nil
 }
 func (h *Host) RegisterTask(kind string, handler TaskHandler) error {
@@ -212,7 +217,7 @@ type Registry struct {
 	mu          sync.RWMutex
 	plugins     map[string]Plugin
 	schemas     map[string]SettingsSchema
-	events      map[string][]EventHandler
+	events      map[string][]eventSubscription
 	tasks       map[string]TaskHandler
 	menus       []MenuItem
 	enabled     map[string]bool
@@ -223,7 +228,7 @@ func NewRegistry(db *database.DB, router chi.Router, logger *slog.Logger) *Regis
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Registry{db: db, router: router, adminRouter: router, adminPrefix: "/admin", logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]EventHandler), tasks: make(map[string]TaskHandler), enabled: make(map[string]bool), initialized: make(map[string]bool)}
+	return &Registry{db: db, router: router, adminRouter: router, adminPrefix: "/admin", logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]eventSubscription), tasks: make(map[string]TaskHandler), enabled: make(map[string]bool), initialized: make(map[string]bool)}
 }
 
 // SetAdminRouter binds the protected /admin subtree. It must be called before
@@ -270,7 +275,14 @@ func (r *Registry) Initialize(ctx context.Context, enabled []string) error {
 	r.mu.RUnlock()
 	var failures []error
 	for _, id := range ids {
-		if _, ok := wanted[id]; !ok {
+		persisted, err := r.persistedEnabled(ctx, id)
+		if err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		// Explicit configuration wins, while a state previously changed in the
+		// admin UI survives a restart when no configuration entry overrides it.
+		if _, ok := wanted[id]; !ok && !persisted {
 			if err := r.Disable(ctx, id); err != nil {
 				failures = append(failures, err)
 			}
@@ -281,6 +293,15 @@ func (r *Registry) Initialize(ctx context.Context, enabled []string) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func (r *Registry) persistedEnabled(ctx context.Context, id string) (bool, error) {
+	var enabled int
+	err := r.db.Reader.QueryRowContext(ctx, "SELECT enabled FROM plugin_states WHERE plugin_id=?", id).Scan(&enabled)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return enabled == 1, err
 }
 
 func (r *Registry) Enable(ctx context.Context, id string) error {
@@ -349,6 +370,11 @@ func (r *Registry) isEnabled(id string) bool {
 	return r.enabled[id]
 }
 
+// Enabled reports the in-process state used by route, event, and task guards.
+// It is intentionally read-only; changes go through Enable/Disable so the
+// persisted plugin state remains the source of truth across restarts.
+func (r *Registry) Enabled(id string) bool { return r.isEnabled(id) }
+
 func (r *Registry) Registered() []Manifest {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -388,11 +414,14 @@ func (r *Registry) Dispatch(ctx context.Context, event Event) []error {
 		event.OccurredAt = time.Now().UTC()
 	}
 	r.mu.RLock()
-	handlers := append([]EventHandler(nil), r.events[event.Name]...)
+	handlers := append([]eventSubscription(nil), r.events[event.Name]...)
 	r.mu.RUnlock()
 	var failures []error
-	for _, handler := range handlers {
-		if err := handler(ctx, event); err != nil {
+	for _, subscription := range handlers {
+		if !r.isEnabled(subscription.pluginID) {
+			continue
+		}
+		if err := subscription.handler(ctx, event); err != nil {
 			failures = append(failures, err)
 			r.logger.ErrorContext(ctx, "plugin event failed", "event", event.Name, "error", err)
 		}
@@ -410,19 +439,50 @@ func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
 	if len(handlers) == 0 {
 		return false, nil
 	}
-	row := r.db.Writer.QueryRowContext(ctx, `SELECT id,kind,payload FROM jobs WHERE status='pending' AND available_at<=? AND kind LIKE 'plugin:%' ORDER BY available_at,id LIMIT 1`, time.Now().UTC().UnixMilli())
-	var id int64
-	var kind string
-	var payload []byte
-	if err := row.Scan(&id, &kind, &payload); err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
-		}
+	rows, err := r.db.Writer.QueryContext(ctx, `SELECT id,kind,payload FROM jobs WHERE status='pending' AND available_at<=? AND kind LIKE 'plugin:%' ORDER BY available_at,id LIMIT 50`, time.Now().UTC().UnixMilli())
+	if err != nil {
 		return false, err
 	}
-	handler, ok := handlers[strings.TrimPrefix(kind, "plugin:")]
-	if !ok {
-		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", "no handler", time.Now().UTC().UnixMilli(), id)
+	defer rows.Close()
+	var id int64
+	var payload []byte
+	var handler TaskHandler
+	var missing []int64
+	for rows.Next() {
+		var candidateID int64
+		var candidateKind string
+		var candidatePayload []byte
+		if err := rows.Scan(&candidateID, &candidateKind, &candidatePayload); err != nil {
+			return false, err
+		}
+		key := strings.TrimPrefix(candidateKind, "plugin:")
+		pluginID := key
+		if separator := strings.IndexByte(key, ':'); separator >= 0 {
+			pluginID = key[:separator]
+		}
+		if !r.isEnabled(pluginID) {
+			continue
+		}
+		candidateHandler, ok := handlers[key]
+		if !ok {
+			missing = append(missing, candidateID)
+			continue
+		}
+		id, payload, handler = candidateID, candidatePayload, candidateHandler
+		break
+	}
+	rowsErr := rows.Err()
+	closeErr := rows.Close()
+	if rowsErr != nil {
+		return false, rowsErr
+	}
+	if closeErr != nil {
+		return false, closeErr
+	}
+	for _, missingID := range missing {
+		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", "no handler", time.Now().UTC().UnixMilli(), missingID)
+	}
+	if handler == nil {
 		return false, nil
 	}
 	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='pending'", time.Now().UTC().UnixMilli(), id); err != nil {
@@ -432,7 +492,7 @@ func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
 		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", err.Error(), time.Now().UTC().UnixMilli(), id)
 		return true, err
 	}
-	_, err := r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='succeeded',updated_at=? WHERE id=?", time.Now().UTC().UnixMilli(), id)
+	_, err = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='succeeded',updated_at=? WHERE id=?", time.Now().UTC().UnixMilli(), id)
 	return true, err
 }
 
@@ -561,5 +621,13 @@ func contains(values []string, value string) bool {
 	return false
 }
 func validManifest(m Manifest) bool {
-	return m.ID != "" && m.Name != "" && m.Version != "" && m.APIVersion > 0 && len(m.ID) <= 80
+	if m.ID == "" || m.Name == "" || m.Version == "" || m.APIVersion <= 0 || len(m.ID) > 80 {
+		return false
+	}
+	for index, r := range m.ID {
+		if !(r == '-' || r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') || index == 0 && (r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
 }

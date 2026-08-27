@@ -24,6 +24,10 @@ const (
 	FormatVersion = 1
 	maxEntries    = 100000
 	maxFileSize   = 32 << 20
+	// Bound the total decompressed payload as well as each individual body so
+	// verification cannot be used to expand a highly compressed ZIP without
+	// limit.
+	maxUnpackedSize = 256 << 20
 )
 
 type Manifest struct {
@@ -166,6 +170,7 @@ func Verify(ctx context.Context, archivePath string) (Verified, error) {
 	}
 	var manifest Manifest
 	seen := map[string]bool{}
+	var unpackedSize int64
 	for _, item := range reader.File {
 		if err := ctx.Err(); err != nil {
 			return Verified{}, err
@@ -173,6 +178,10 @@ func Verify(ctx context.Context, archivePath string) (Verified, error) {
 		if !item.FileInfo().Mode().IsRegular() {
 			return Verified{}, fmt.Errorf("archive entry %q is not a regular file", item.Name)
 		}
+		if item.UncompressedSize64 > uint64(maxUnpackedSize) || unpackedSize > maxUnpackedSize-int64(item.UncompressedSize64) {
+			return Verified{}, errors.New("archive unpacked size exceeds limit")
+		}
+		unpackedSize += int64(item.UncompressedSize64)
 		if item.Name == "manifest.json" {
 			if seen[item.Name] {
 				return Verified{}, errors.New("manifest is duplicated")
