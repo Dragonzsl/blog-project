@@ -74,6 +74,7 @@ type HTTPHandler struct {
 	siteNamer    SiteNamer
 	state        *StateRepository
 	theme        *Theme
+	themeManager *ThemeManager
 	cache        *PageCache
 	logger       *slog.Logger
 	organization OrganizationQueries
@@ -81,6 +82,15 @@ type HTTPHandler struct {
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
+
+func (h *HTTPHandler) SetThemeManager(manager *ThemeManager) { h.themeManager = manager }
+
+func (h *HTTPHandler) currentTheme() *Theme {
+	if h.themeManager != nil {
+		return h.themeManager.Current()
+	}
+	return h.theme
+}
 
 func NewHTTPHandler(content ContentQueries, siteNamer SiteNamer, state *StateRepository, theme *Theme, cache *PageCache, logger *slog.Logger, organizations ...OrganizationQueries) *HTTPHandler {
 	handler := &HTTPHandler{content: content, siteNamer: siteNamer, state: state, theme: theme, cache: cache, logger: logger}
@@ -107,8 +117,8 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Head("/sitemap.xml", h.sitemap)
 	router.Get("/robots.txt", h.robots)
 	router.Head("/robots.txt", h.robots)
-	router.Get("/assets/theme/default/{fingerprint}/theme.css", h.asset)
-	router.Head("/assets/theme/default/{fingerprint}/theme.css", h.asset)
+	router.Get("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
+	router.Head("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
 	router.Get("/{slug}", h.page)
 	router.Head("/{slug}", h.page)
 }
@@ -139,7 +149,8 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 				"query-input": "required name=search_term_string",
 			},
 		})
-		body, err := h.theme.RenderHomePage(siteName, articleDataList(articles), navigation, metadata)
+		theme := h.currentTheme()
+		body, err := theme.RenderHomePage(siteName, articleDataList(articles), navigation, metadata)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
 			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -165,7 +176,8 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 		}
 		path := "/posts/" + article.Slug
 		metadata := h.articleMetadata(siteName, article, path)
-		body, err := h.theme.RenderArticlePage(siteName, articleData(article), false, "", navigation, metadata)
+		theme := h.currentTheme()
+		body, err := theme.RenderArticlePage(siteName, articleData(article), false, "", navigation, metadata)
 		lastModified := ""
 		if article.PublishedRevisionAt != nil {
 			lastModified = article.PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -191,7 +203,8 @@ func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
 		}
 		path := "/" + page.Slug
 		metadata := h.articleMetadata(siteName, page, path)
-		body, err := h.theme.RenderArticlePage(siteName, articleData(page), false, "", navigation, metadata)
+		theme := h.currentTheme()
+		body, err := theme.RenderArticlePage(siteName, articleData(page), false, "", navigation, metadata)
 		lastModified := ""
 		if page.PublishedRevisionAt != nil {
 			lastModified = page.PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -250,7 +263,8 @@ func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, ki
 			"@context": "https://schema.org", "@type": "CollectionPage", "name": title,
 			"url": h.absoluteURL(path), "description": description,
 		})
-		body, err := h.theme.RenderListingPage(siteName, title, description, articleDataList(articles), navigation, metadata)
+		theme := h.currentTheme()
+		body, err := theme.RenderListingPage(siteName, title, description, articleDataList(articles), navigation, metadata)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
 			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -310,7 +324,7 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 	}
 	metadata := h.metadata(siteName, "搜索 · "+siteName, "搜索"+siteName+"的公开文章与页面。", "/search", "website", nil)
 	metadata.NoIndex = true
-	body, err := h.theme.RenderSearch(siteName, page, navigation, metadata)
+	body, err := h.currentTheme().RenderSearch(siteName, page, navigation, metadata)
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -468,7 +482,7 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 	if kind == "page" {
 		backURL = fmt.Sprintf("/admin/pages/%d/edit", article.ID)
 	}
-	body, err := h.theme.RenderArticlePage(siteName, articleData(article), true, backURL, navigation, PageMetadata{NoIndex: true})
+	body, err := h.currentTheme().RenderArticlePage(siteName, articleData(article), true, backURL, navigation, PageMetadata{NoIndex: true})
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -484,11 +498,12 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) asset(w http.ResponseWriter, r *http.Request) {
-	if chi.URLParam(r, "fingerprint") != h.theme.AssetHash() {
+	theme := h.currentTheme()
+	if chi.URLParam(r, "themeID") != theme.ThemeID() || chi.URLParam(r, "fingerprint") != theme.AssetHash() {
 		http.NotFound(w, r)
 		return
 	}
-	etag := `"` + h.theme.AssetHash() + `"`
+	etag := `"` + theme.AssetHash() + `"`
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	w.Header().Set("ETag", etag)
@@ -498,7 +513,7 @@ func (h *HTTPHandler) asset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodHead {
-		_, _ = w.Write(h.theme.CSS())
+		_, _ = w.Write(theme.CSS())
 	}
 }
 
@@ -512,7 +527,7 @@ func (h *HTTPHandler) serveCachedDocument(w http.ResponseWriter, r *http.Request
 		h.handleRenderError(w, r, err)
 		return
 	}
-	key := h.theme.Version() + "|" + semanticKey
+	key := h.currentTheme().Version() + "|" + semanticKey
 	if cached, ok := h.cache.Get(key, epoch); ok {
 		h.writeCacheEntry(w, r, cached, "HIT")
 		return

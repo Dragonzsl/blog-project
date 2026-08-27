@@ -23,6 +23,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/logging"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
+	"github.com/zhushilin/blog-project/internal/presentation"
 )
 
 func main() {
@@ -51,6 +52,8 @@ func run(arguments []string) error {
 		return restore(arguments[1:])
 	case "upgrade":
 		return upgrade(arguments[1:])
+	case "theme":
+		return theme(arguments[1:])
 	case "audit":
 		return audit(arguments[1:])
 	case "status":
@@ -418,6 +421,98 @@ func statusWithOutput(arguments []string, output io.Writer) error {
 	return nil
 }
 
+func theme(arguments []string) error {
+	return themeWithOutput(arguments, os.Stdout)
+}
+
+func themeWithOutput(arguments []string, output io.Writer) error {
+	if len(arguments) == 0 {
+		return fmt.Errorf("usage: blog theme <install|list|activate|rollback> [options]")
+	}
+	flags := flag.NewFlagSet("theme", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to TOML configuration")
+	archivePath := flags.String("archive", "", "theme ZIP package")
+	themeID := flags.String("id", "", "theme ID")
+	version := flags.String("version", "", "theme version")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	lock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	db, err := database.Open(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	fallback, err := presentation.NewDefaultTheme(presentation.NewMarkdown())
+	if err != nil {
+		return err
+	}
+	manager, err := presentation.NewThemeManager(fallback, filepath.Join(cfg.Storage.DataDir, "themes"))
+	if err != nil {
+		return err
+	}
+	catalog := presentation.NewThemeCatalog(db, manager)
+	ctx := context.Background()
+	switch arguments[0] {
+	case "install":
+		if *archivePath == "" {
+			return fmt.Errorf("--archive is required")
+		}
+		archive, err := os.Open(*archivePath)
+		if err != nil {
+			return err
+		}
+		defer archive.Close()
+		record, err := catalog.Install(ctx, archive, presentation.ThemeInstallOptions{Root: filepath.Join(cfg.Storage.DataDir, "themes"), MaxBytes: int64(cfg.Extensions.ThemePackageMaxBytes), MaxFiles: cfg.Extensions.ThemeMaxFiles, MaxUnpacked: cfg.Extensions.ThemeMaxUnpacked})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Theme installed: %s@%s\n", record.Manifest.ID, record.Manifest.Version)
+		return nil
+	case "list":
+		records, err := catalog.List(ctx)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			active := "inactive"
+			if record.Active {
+				active = "active"
+			}
+			fmt.Fprintf(output, "%s@%s  %s  %s\n", record.Manifest.ID, record.Manifest.Version, active, record.ValidationStatus)
+		}
+		if manager.IsFallback() {
+			fmt.Fprintln(output, "default@embedded  active  fallback")
+		}
+		return nil
+	case "activate":
+		if *themeID == "" || *version == "" {
+			return fmt.Errorf("--id and --version are required")
+		}
+		if err := catalog.Activate(ctx, *themeID, *version); err != nil {
+			return err
+		}
+		fmt.Fprintf(output, "Theme activated: %s@%s\n", *themeID, *version)
+		return nil
+	case "rollback":
+		if err := catalog.Rollback(ctx); err != nil {
+			return err
+		}
+		fmt.Fprintln(output, "Theme rolled back to embedded default.")
+		return nil
+	default:
+		return fmt.Errorf("usage: blog theme <install|list|activate|rollback> [options]")
+	}
+}
+
 func openBackupService(configPath string) (*operations.BackupService, *database.DB, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -478,5 +573,5 @@ func readPassword(path string) (string, error) {
 }
 
 func printUsage() {
-	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|audit|version> [options]")
+	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|theme|audit|version> [options]")
 }

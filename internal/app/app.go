@@ -33,6 +33,7 @@ type App struct {
 	publishing           *publishing.Service
 	discovery            *discovery.Service
 	backups              *operations.BackupService
+	themeManager         *presentation.ThemeManager
 	dataLock             *operations.DataLock
 	lifecycleInterval    time.Duration
 	trashCleanupInterval time.Duration
@@ -131,6 +132,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	themeManager, err := presentation.NewThemeManager(defaultTheme, filepath.Join(cfg.Storage.DataDir, "themes"))
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	themeCatalog := presentation.NewThemeCatalog(db, themeManager)
+	themeHTTP, err := presentation.NewThemeHTTPHandler(themeCatalog, themeManager, identityHTTP, identityService, logger, presentation.ThemeInstallOptions{
+		Root: filepath.Join(cfg.Storage.DataDir, "themes"), MaxBytes: int64(cfg.Extensions.ThemePackageMaxBytes), MaxFiles: cfg.Extensions.ThemeMaxFiles, MaxUnpacked: cfg.Extensions.ThemeMaxUnpacked,
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	pageCache, err := presentation.NewPageCache(filepath.Join(cfg.Storage.DataDir, "cache", "pages"), 32, 4<<20)
 	if err != nil {
 		db.Close()
@@ -146,6 +160,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		organizationService,
 	)
 	presentationHTTP.SetDiscovery(discoveryService)
+	presentationHTTP.SetThemeManager(themeManager)
 
 	router := chi.NewRouter()
 	router.Use(middleware.RequestID)
@@ -167,6 +182,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			organizationHTTP.RegisterAdmin(protected)
 			mediaHTTP.RegisterAdmin(protected)
 			presentationHTTP.RegisterAdmin(protected)
+			themeHTTP.RegisterAdmin(protected)
 		})
 	})
 
@@ -178,7 +194,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MaxHeaderBytes:    1 << 20,
 	}
 	keepLock = true
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
 }
 
 func (app *App) Run(ctx context.Context) error {

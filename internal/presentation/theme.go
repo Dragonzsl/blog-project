@@ -58,6 +58,9 @@ type Theme struct {
 	css       []byte
 	assetHash string
 	assetURL  string
+	id        string
+	version   string
+	assetRoot string
 }
 
 func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
@@ -77,6 +80,8 @@ func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
 		css:       css,
 		assetHash: assetHash,
 		assetURL:  "/assets/theme/default/" + assetHash + "/theme.css",
+		id:        DefaultThemeID,
+		version:   defaulttheme.Version,
 	}, nil
 }
 
