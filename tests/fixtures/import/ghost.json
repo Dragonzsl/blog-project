@@ -1,0 +1,22 @@
+{
+  "db": [{
+    "meta": {"exported_on": "2026-08-26T10:00:00.000Z"},
+    "data": {
+      "posts": [{
+        "id": "ghost-42",
+        "title": "Ghost 迁移文章",
+        "slug": "ghost-migrated-post",
+        "html": "<p>Ghost 正文。</p>",
+        "status": "published",
+        "published_at": "2026-08-26T10:00:00Z",
+        "tags": [{"name": "迁移"}]
+      }],
+      "pages": [{
+        "id": "ghost-page-1",
+        "title": "关于本站",
+        "slug": "about",
+        "markdown": "这是 Ghost 页面。"
+      }]
+    }
+  }]
+}

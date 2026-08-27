@@ -14,6 +14,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/analytics"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
 	"github.com/zhushilin/blog-project/internal/comments"
+	"github.com/zhushilin/blog-project/internal/contentapi"
 	"github.com/zhushilin/blog-project/internal/discovery"
 	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/identity"
@@ -27,6 +28,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
 	"github.com/zhushilin/blog-project/internal/presentation"
 	"github.com/zhushilin/blog-project/internal/publishing"
+	"github.com/zhushilin/blog-project/internal/webhooks"
 )
 
 type App struct {
@@ -250,6 +252,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	extensionRegistry := extensions.NewRegistry(db, router, logger)
 	presentationHTTP.SetAnalyticsRecorder(gatedAnalyticsRecorder{registry: extensionRegistry, service: analyticsService})
 	publishingService.SetEventSink(extensionRegistry)
+	commentService.SetEventSink(extensionRegistry)
 	extensionHTTP, err := extensions.NewHTTPHandler(extensionRegistry, identityHTTP, logger)
 	if err != nil {
 		db.Close()
@@ -264,6 +267,14 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 	if err := extensionRegistry.Register(analytics.NewPlugin(analyticsHTTP)); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := extensionRegistry.Register(contentapi.NewPlugin(publishingService, identityService, discoveryService, contentapi.Config{Token: cfg.ContentAPI.Token})); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := extensionRegistry.Register(webhooks.NewPlugin(webhooks.NewStore(db), webhooks.Config{Endpoint: cfg.Webhooks.Endpoint, Secret: cfg.Webhooks.Secret, MaxAttempts: cfg.Webhooks.MaxAttempts})); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -300,6 +311,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	}
 	if cfg.Analytics.Enabled {
 		enabledPlugins = appendUnique(enabledPlugins, "analytics.local")
+	}
+	if cfg.ContentAPI.Enabled {
+		enabledPlugins = appendUnique(enabledPlugins, contentapi.PluginID)
+	}
+	if cfg.Webhooks.Enabled {
+		enabledPlugins = appendUnique(enabledPlugins, webhooks.PluginID)
 	}
 	if newsletterPlugin != nil {
 		enabledPlugins = appendUnique(enabledPlugins, newsletterPlugin.ID)

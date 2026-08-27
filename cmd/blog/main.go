@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -19,8 +20,10 @@ import (
 	contentarchive "github.com/zhushilin/blog-project/internal/archive"
 	"github.com/zhushilin/blog-project/internal/buildinfo"
 	"github.com/zhushilin/blog-project/internal/identity"
+	contentimport "github.com/zhushilin/blog-project/internal/importer"
 	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/operations"
+	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/logging"
@@ -61,6 +64,8 @@ func run(arguments []string) error {
 		return archiveCommand(arguments[1:])
 	case "storage":
 		return storageCommand(arguments[1:])
+	case "import":
+		return importCommand(arguments[1:])
 	case "audit":
 		return audit(arguments[1:])
 	case "status":
@@ -642,6 +647,64 @@ func storageCommand(arguments []string) error {
 	return nil
 }
 
+func importCommand(arguments []string) error {
+	if len(arguments) == 0 {
+		return fmt.Errorf("usage: blog import <wordpress|ghost|markdown> --input PATH [--dry-run] [--report FILE]")
+	}
+	format := strings.ToLower(strings.TrimSpace(arguments[0]))
+	flags := flag.NewFlagSet("import", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to TOML configuration")
+	input := flags.String("input", "", "WordPress WXR, Ghost JSON, Markdown file, directory, or ZIP")
+	dryRun := flags.Bool("dry-run", false, "parse and report without creating drafts")
+	reportPath := flags.String("report", "", "write the JSON report to this file")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return err
+	}
+	if *input == "" {
+		return fmt.Errorf("--input is required")
+	}
+	if format != contentimport.FormatWordPress && format != contentimport.FormatGhost && format != contentimport.FormatMarkdown {
+		return fmt.Errorf("unsupported import format %q", format)
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	lock, err := operations.AcquireDataLock(cfg.Storage.DataDir)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	db, err := database.Open(context.Background(), cfg.Database)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	service := contentimport.NewService(db, publishing.NewService(publishing.NewRepository(db)), organization.NewService(db))
+	report, err := service.ImportPath(context.Background(), format, *input, *dryRun)
+	if err != nil {
+		return err
+	}
+	encoded, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return err
+	}
+	encoded = append(encoded, '\n')
+	if *reportPath != "" {
+		if err := os.WriteFile(*reportPath, encoded, 0o600); err != nil {
+			return fmt.Errorf("write import report: %w", err)
+		}
+	}
+	fmt.Fprintf(os.Stdout, "Import %s %s: total=%d planned=%d imported=%d skipped=%d conflicts=%d duplicate=%t\n", format, map[bool]string{true: "dry-run", false: "completed"}[*dryRun], report.Total, report.Planned, report.Imported, report.Skipped, report.Conflicts, report.Duplicate)
+	if *reportPath != "" {
+		fmt.Fprintf(os.Stdout, "Report: %s\n", *reportPath)
+	}
+	if *dryRun || report.Duplicate {
+		_, _ = os.Stdout.Write(encoded)
+	}
+	return nil
+}
+
 func openBackupService(configPath string) (*operations.BackupService, *database.DB, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -702,5 +765,5 @@ func readPassword(path string) (string, error) {
 }
 
 func printUsage() {
-	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|theme|archive|storage|audit|version> [options]")
+	fmt.Println("usage: blog <serve|migrate|healthcheck|status|auth|backup|restore|upgrade|theme|archive|storage|import|audit|version> [options]")
 }

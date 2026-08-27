@@ -280,9 +280,23 @@ func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
 }
 
 func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
-	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = 'article' AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ?`, limit)
+	return r.publishedContents(ctx, "article", limit)
+}
+
+func (r *Repository) PublishedPages(ctx context.Context, limit int) ([]Article, error) {
+	return r.publishedContents(ctx, "page", limit)
+}
+
+func (r *Repository) publishedContents(ctx context.Context, kind string, limit int) ([]Article, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ?`, kind, limit)
 	if err != nil {
-		return nil, fmt.Errorf("list published articles: %w", err)
+		return nil, fmt.Errorf("list published %ss: %w", kind, err)
 	}
 	defer rows.Close()
 	articles := make([]Article, 0, limit)
@@ -292,6 +306,12 @@ func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Articl
 			return nil, err
 		}
 		articles = append(articles, article)
+	}
+	for index := range articles {
+		articles[index], err = r.enrichPublishedTaxonomy(ctx, articles[index])
+		if err != nil {
+			return nil, err
+		}
 	}
 	return articles, rows.Err()
 }

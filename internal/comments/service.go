@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	"github.com/zhushilin/blog-project/internal/presentation"
@@ -61,10 +62,19 @@ type Service struct {
 	now               func() time.Time
 	notifier          Notifier
 	notificationTo    string
+	events            interface {
+		Dispatch(context.Context, extensions.Event) []error
+	}
 }
 
 func (s *Service) SetNotifier(notifier Notifier, recipient string) {
 	s.notifier, s.notificationTo = notifier, strings.TrimSpace(recipient)
+}
+
+func (s *Service) SetEventSink(sink interface {
+	Dispatch(context.Context, extensions.Event) []error
+}) {
+	s.events = sink
 }
 
 func NewService(db *database.DB, lookup ContentLookup, markdown *presentation.Markdown, requireModeration bool) *Service {
@@ -246,6 +256,11 @@ func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 		return ErrNotFound
 	}
 	_, _ = s.db.Writer.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES('comments.moderated','comment','succeeded',?,?)`, fmt.Sprintf(`{"comment_id":%d,"status":%q}`, id, status), now.UnixMilli())
+	if status == "approved" && s.events != nil {
+		if comment, err := s.Get(ctx, id); err == nil {
+			_ = s.events.Dispatch(ctx, extensions.Event{Name: "CommentApproved.v1", Version: 1, ObjectID: append([]byte(nil), comment.PublicID...), Payload: map[string]any{"content_id": comment.ContentID, "comment_id": comment.ID}})
+		}
+	}
 	return nil
 }
 

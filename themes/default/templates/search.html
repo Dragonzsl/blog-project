@@ -10,10 +10,11 @@
   {{template "page_metadata" .Meta}}
   <link rel="stylesheet" href="{{.AssetURL}}">
 </head>
-<body>
+<body class="search-page">
   <header class="site-header"><a class="brand" href="/"><span aria-hidden="true">✦</span><strong>{{.SiteName}}</strong></a><nav aria-label="主导航"><a href="/">文章</a><a aria-current="page" href="/search">搜索</a>{{template "primary_navigation" .Navigation.Primary}}</nav></header>
-  <main>
-    <header class="listing-hero"><p class="kicker">Discovery</p><h1>搜索</h1><p>在已发布的文章与页面中查找内容。</p></header>
+  <main class="search-main">
+    <header class="listing-hero search-hero"><p class="kicker">Discovery</p><h1>搜索</h1><p>在已发布的文章与页面中查找内容。</p></header>
+    <div class="search-rule" aria-hidden="true"></div>
     <form class="search-form" action="/search" method="get" role="search">
       <label class="search-query"><span>关键词</span><input name="q" value="{{.Search.Query}}" minlength="2" maxlength="100" required placeholder="输入至少两个字符"></label>
       <label><span>类型</span><select name="type"><option value="">全部</option><option value="article" {{if eq .Search.Kind "article"}}selected{{end}}>文章</option><option value="page" {{if eq .Search.Kind "page"}}selected{{end}}>页面</option></select></label>

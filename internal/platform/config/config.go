@@ -41,6 +41,8 @@ type Config struct {
 	Comments   Comments   `toml:"comments"`
 	Mail       Mail       `toml:"mail"`
 	Newsletter Newsletter `toml:"newsletter"`
+	ContentAPI ContentAPI `toml:"content_api"`
+	Webhooks   Webhooks   `toml:"webhooks"`
 }
 
 type Server struct {
@@ -150,6 +152,18 @@ type Newsletter struct {
 	Token    string `toml:"-"`
 }
 
+type ContentAPI struct {
+	Enabled bool   `toml:"enabled"`
+	Token   string `toml:"-"`
+}
+
+type Webhooks struct {
+	Enabled     bool   `toml:"enabled"`
+	Endpoint    string `toml:"endpoint"`
+	Secret      string `toml:"-"`
+	MaxAttempts int    `toml:"max_attempts"`
+}
+
 func Defaults() Config {
 	return Config{
 		Server: Server{
@@ -200,6 +214,8 @@ func Defaults() Config {
 		Comments:   Comments{Enabled: false, RequireModeration: true, Provider: "local"},
 		Mail:       Mail{Port: 587, StartTLS: true},
 		Newsletter: Newsletter{Provider: "disabled"},
+		ContentAPI: ContentAPI{},
+		Webhooks:   Webhooks{MaxAttempts: 5},
 	}
 }
 
@@ -283,6 +299,9 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_NEWSLETTER_PROVIDER", &cfg.Newsletter.Provider},
 		{"BLOG_NEWSLETTER_ENDPOINT", &cfg.Newsletter.Endpoint},
 		{"BLOG_NEWSLETTER_TOKEN", &cfg.Newsletter.Token},
+		{"BLOG_CONTENT_API_TOKEN", &cfg.ContentAPI.Token},
+		{"BLOG_WEBHOOK_ENDPOINT", &cfg.Webhooks.Endpoint},
+		{"BLOG_WEBHOOK_SECRET", &cfg.Webhooks.Secret},
 	}
 	for _, override := range stringOverrides {
 		if value, ok := os.LookupEnv(override.name); ok && strings.TrimSpace(value) != "" {
@@ -394,6 +413,27 @@ func applyEnvironment(cfg *Config) error {
 			return fmt.Errorf("parse BLOG_COMMENTS_ENABLED: %w", err)
 		}
 		cfg.Comments.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_CONTENT_API_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_CONTENT_API_ENABLED: %w", err)
+		}
+		cfg.ContentAPI.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_WEBHOOKS_ENABLED"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_WEBHOOKS_ENABLED: %w", err)
+		}
+		cfg.Webhooks.Enabled = parsed
+	}
+	if value, ok := os.LookupEnv("BLOG_WEBHOOK_MAX_ATTEMPTS"); ok && strings.TrimSpace(value) != "" {
+		parsed, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("parse BLOG_WEBHOOK_MAX_ATTEMPTS: %w", err)
+		}
+		cfg.Webhooks.MaxAttempts = parsed
 	}
 	if value, ok := os.LookupEnv("BLOG_COMMENTS_EXTERNAL_ENDPOINT"); ok && strings.TrimSpace(value) != "" {
 		cfg.Comments.ExternalEndpoint = strings.TrimSpace(value)
@@ -522,6 +562,18 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Newsletter.Provider == "" {
 		problems = append(problems, errors.New("newsletter.provider must not be empty"))
+	}
+	if cfg.Webhooks.MaxAttempts < 1 || cfg.Webhooks.MaxAttempts > 5 {
+		problems = append(problems, errors.New("webhooks.max_attempts must be between 1 and 5"))
+	}
+	if cfg.Webhooks.Enabled || strings.TrimSpace(cfg.Webhooks.Endpoint) != "" {
+		parsed, err := url.Parse(strings.TrimSpace(cfg.Webhooks.Endpoint))
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+			problems = append(problems, errors.New("webhooks.endpoint must be an absolute HTTP or HTTPS URL without credentials or fragment"))
+		}
+		if strings.TrimSpace(cfg.Webhooks.Secret) == "" {
+			problems = append(problems, errors.New("webhooks.secret is required when webhooks are enabled"))
+		}
 	}
 	if cfg.Logging.Format != "text" && cfg.Logging.Format != "json" {
 		problems = append(problems, errors.New("logging.format must be text or json"))

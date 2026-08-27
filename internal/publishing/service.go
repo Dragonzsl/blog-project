@@ -376,6 +376,19 @@ func (s *Service) PublishedArticles(ctx context.Context, limit int) ([]Article, 
 	return s.repository.PublishedArticles(ctx, limit)
 }
 
+// PublishedPages returns only the currently published page revisions. It is
+// bounded for the same reason as PublishedArticles: public consumers should
+// never be able to request an unbounded database export.
+func (s *Service) PublishedPages(ctx context.Context, limit int) ([]Article, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	return s.repository.PublishedPages(ctx, limit)
+}
+
 func (s *Service) Categories(ctx context.Context) ([]organization.Category, error) {
 	return s.repository.organization.Categories(ctx)
 }

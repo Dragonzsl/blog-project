@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>Stage 3 WXR fixture</title>
+    <item>
+      <title>迁移文章</title>
+      <link>https://example.test/?p=42</link>
+      <pubDate>Wed, 26 Aug 2026 10:00:00 +0000</pubDate>
+      <dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">owner</dc:creator>
+      <guid>https://example.test/?p=42</guid>
+      <description>摘要</description>
+      <content:encoded><![CDATA[<h2>标题</h2><p>正文与 <strong>强调</strong>。</p>]]></content:encoded>
+      <excerpt:encoded xmlns:excerpt="http://wordpress.org/export/1.2/">摘要</excerpt:encoded>
+      <wp:post_id xmlns:wp="http://wordpress.org/export/1.2/">42</wp:post_id>
+      <wp:post_date xmlns:wp="http://wordpress.org/export/1.2/">2026-08-26 10:00:00</wp:post_date>
+      <wp:post_name xmlns:wp="http://wordpress.org/export/1.2/">migrated-post</wp:post_name>
+      <wp:status xmlns:wp="http://wordpress.org/export/1.2/">publish</wp:status>
+      <wp:post_type xmlns:wp="http://wordpress.org/export/1.2/">post</wp:post_type>
+      <category domain="category">迁移</category>
+      <category domain="post_tag">阶段三</category>
+    </item>
+  </channel>
+</rss>

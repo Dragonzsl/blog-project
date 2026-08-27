@@ -117,3 +117,22 @@ func TestValidateRejectsUnsafeMediaConfiguration(t *testing.T) {
 		t.Fatal("Validate() error = nil, want invalid media widths")
 	}
 }
+
+func TestStage3ExtensionEnvironmentOverrides(t *testing.T) {
+	t.Setenv("BLOG_CONTENT_API_ENABLED", "true")
+	t.Setenv("BLOG_CONTENT_API_TOKEN", "read-token")
+	t.Setenv("BLOG_WEBHOOKS_ENABLED", "true")
+	t.Setenv("BLOG_WEBHOOK_ENDPOINT", "https://hooks.example.test/blog")
+	t.Setenv("BLOG_WEBHOOK_SECRET", "01234567890123456789012345678901")
+	t.Setenv("BLOG_WEBHOOK_MAX_ATTEMPTS", "3")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.ContentAPI.Enabled || cfg.ContentAPI.Token != "read-token" {
+		t.Fatalf("content api=%+v", cfg.ContentAPI)
+	}
+	if !cfg.Webhooks.Enabled || cfg.Webhooks.Endpoint == "" || cfg.Webhooks.Secret == "" || cfg.Webhooks.MaxAttempts != 3 {
+		t.Fatalf("webhooks=%+v", cfg.Webhooks)
+	}
+}

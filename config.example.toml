@@ -88,3 +88,13 @@ starttls = true
 enabled = false
 provider = "disabled"
 endpoint = ""
+
+[content_api]
+# 默认关闭；启用后只公开已发布内容的 GET JSON 接口。
+enabled = false
+
+[webhooks]
+# 默认关闭；秘密值建议只通过 BLOG_WEBHOOK_SECRET 注入。
+enabled = false
+endpoint = ""
+max_attempts = 5

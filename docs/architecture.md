@@ -55,6 +55,9 @@ internal/
   discovery/
   operations/
   extensions/
+  contentapi/                 可选只读 `/api/v1` 插件
+  webhooks/                   可选签名投递与持久重试
+  importer/                   离线 WXR/Ghost/Markdown 解析器
 plugins/                     官方编译期插件，每个插件一个目录
   comments/
   analytics/
@@ -113,7 +116,7 @@ official plugin    -> narrow Host capabilities
 
 ## 任务执行器
 
-任务表使用 `pending/running/succeeded/failed` 状态、可见时间、尝试次数、租约到期和幂等键。单进程默认一个串行工作循环；图片处理、备份和 Webhook 分别有独立并发上限，但总并发受 1 GiB 预算约束。
+任务表使用 `pending/running/succeeded/failed` 状态、可见时间、尝试次数、短租约、有限指数退避和幂等键。单进程默认一个串行工作循环；图片处理、备份和 Webhook 分别有独立并发上限，但总并发受 1 GiB 预算约束。插件任务最多执行五次，过期租约会在重启后重新变为可执行，最终失败可在状态页审计。
 
 任务必须幂等。进程崩溃后，过期租约回到可执行状态。失败使用有上限指数退避并进入后台可见的失败列表；不引入 Redis、Kafka 或外部队列。
 

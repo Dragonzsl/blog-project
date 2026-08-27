@@ -72,6 +72,14 @@ type Event struct {
 type EventHandler func(context.Context, Event) error
 type TaskHandler func(context.Context, []byte) error
 
+const (
+	// Plugin work is intentionally bounded. A failed remote adapter must not
+	// spin forever or make the SQLite jobs table grow without an operator-visible
+	// terminal state.
+	maxTaskAttempts = 5
+	taskLease       = 30 * time.Second
+)
+
 type eventSubscription struct {
 	pluginID string
 	handler  EventHandler
@@ -430,6 +438,11 @@ func (r *Registry) Dispatch(ctx context.Context, event Event) []error {
 }
 
 func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
+	now := time.Now().UTC()
+	// A process crash can leave a task in running. Once its short lease expires
+	// it is safe to make it runnable again; handlers are required to be
+	// idempotent and the idempotency key remains unique in jobs.
+	_, _ = r.db.Writer.ExecContext(ctx, `UPDATE jobs SET status='pending',lease_expires_at=NULL,updated_at=? WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<?`, now.UnixMilli(), now.UnixMilli())
 	r.mu.RLock()
 	handlers := make(map[string]TaskHandler, len(r.tasks))
 	for key, handler := range r.tasks {
@@ -439,7 +452,7 @@ func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
 	if len(handlers) == 0 {
 		return false, nil
 	}
-	rows, err := r.db.Writer.QueryContext(ctx, `SELECT id,kind,payload FROM jobs WHERE status='pending' AND available_at<=? AND kind LIKE 'plugin:%' ORDER BY available_at,id LIMIT 50`, time.Now().UTC().UnixMilli())
+	rows, err := r.db.Writer.QueryContext(ctx, `SELECT id,kind,payload FROM jobs WHERE status='pending' AND available_at<=? AND kind LIKE 'plugin:%' AND attempts<? ORDER BY available_at,id LIMIT 50`, now.UnixMilli(), maxTaskAttempts)
 	if err != nil {
 		return false, err
 	}
@@ -485,15 +498,33 @@ func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
 	if handler == nil {
 		return false, nil
 	}
-	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='running',attempts=attempts+1,updated_at=? WHERE id=? AND status='pending'", time.Now().UTC().UnixMilli(), id); err != nil {
+	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='running',attempts=attempts+1,lease_expires_at=?,updated_at=? WHERE id=? AND status='pending'", now.Add(taskLease).UnixMilli(), now.UnixMilli(), id); err != nil {
 		return false, err
 	}
 	if err := handler(ctx, payload); err != nil {
-		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", err.Error(), time.Now().UTC().UnixMilli(), id)
+		var attempts int
+		_ = r.db.Writer.QueryRowContext(ctx, "SELECT attempts FROM jobs WHERE id=?", id).Scan(&attempts)
+		status := "pending"
+		availableAt := time.Now().UTC().Add(taskRetryDelay(attempts)).UnixMilli()
+		if attempts >= maxTaskAttempts {
+			status = "failed"
+			availableAt = now.UnixMilli()
+		}
+		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?", status, availableAt, err.Error(), time.Now().UTC().UnixMilli(), id)
 		return true, err
 	}
-	_, err = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='succeeded',updated_at=? WHERE id=?", time.Now().UTC().UnixMilli(), id)
+	_, err = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='succeeded',lease_expires_at=NULL,updated_at=? WHERE id=?", time.Now().UTC().UnixMilli(), id)
 	return true, err
+}
+
+func taskRetryDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if attempts > 5 {
+		attempts = 5
+	}
+	return time.Duration(1<<(attempts-1)) * time.Second
 }
 
 func (r *Registry) registerSettings(id string, schema SettingsSchema) error {

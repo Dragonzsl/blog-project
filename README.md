@@ -1,6 +1,6 @@
 # 个人博客系统
 
-这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环与阶段二扩展能力已经完成，实施记录见[阶段一](./docs/progress/stage-1.md)和[阶段二](./docs/progress/stage-2.md)。
+这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环、阶段二扩展能力与阶段三生态/发行加固已经完成，实施记录见[阶段一](./docs/progress/stage-1.md)、[阶段二](./docs/progress/stage-2.md)和[阶段三](./docs/progress/stage-3.md)。
 
 核心方向：Go 模块化单体、SQLite、Markdown、服务端渲染、可上传主题、可信编译期插件，以及可在 1 核 1 GiB VPS 上稳定运行的硬性资源预算。
 
@@ -11,6 +11,10 @@
 - [总体架构](./docs/architecture.md)
 - [数据模型](./docs/data-model.md)
 - [主题与插件契约](./docs/extensions.md)
+- [主题开发手册](./docs/development/themes.md)
+- [插件 Host API](./docs/development/plugins.md)
+- [视图模型参考](./docs/reference/view-models.md)
+- [事件版本策略](./docs/reference/events.md)
 - [功能范围与交付路线](./docs/product-and-roadmap.md)
 - [主流博客系统对照](./docs/research/popular-systems.md)
 - [架构决策索引](./docs/adr/README.md)
@@ -21,7 +25,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -51,6 +55,18 @@ make test
 make build
 ./bin/blog serve --config config.example.toml
 ```
+
+### 阶段三导入与集成
+
+```bash
+docker compose exec -T app /blog import wordpress --input /data/site/import/export.xml --dry-run --report /data/site/import/report.json
+docker compose exec -T app /blog import ghost --input /data/site/import/ghost.json
+docker compose exec -T app /blog import markdown --input /data/site/import/content --dry-run
+make perf-gate
+make stage3-acceptance
+```
+
+只读 API 和签名 Webhook 默认关闭；配置示例见 `config.example.toml` 与 `.env.example`。发布机可以运行 `make release` 生成多架构 OCI、SBOM、许可证审查和 `SHA256SUMS`；完整安全/恢复说明见[阶段三审计](./docs/security/stage-3-audit.md)。
 
 发行构建必须使用 `fts5 sqlite_omit_load_extension` 标签；Makefile 和 Dockerfile 已固定这些标签。应用容器以非 root、只读根文件系统运行，默认限制为 0.85 CPU、256 MiB，Go 堆软上限为 192 MiB；Caddy 默认限制为 64 MiB。该预算仍为 Argon2id 的单并发 64 MiB 工作区保留余量。
 
