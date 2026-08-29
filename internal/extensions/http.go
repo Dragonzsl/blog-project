@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/go-chi/chi/v5"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
@@ -48,7 +49,8 @@ func (h *HTTPHandler) index(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := h.templates.ExecuteTemplate(w, "plugins.html", map[string]any{"Plugins": states, "CSRF": h.security.CSRFToken(r)}); err != nil {
+	notice, message := pluginFeedback(r)
+	if err := h.templates.ExecuteTemplate(w, "plugins.html", map[string]any{"Plugins": states, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins", "Notice": notice, "Error": message}); err != nil {
 		h.internalError(w, r, err)
 	}
 }
@@ -66,10 +68,42 @@ func (h *HTTPHandler) change(w http.ResponseWriter, r *http.Request, enabled boo
 	} else {
 		err = h.registry.Disable(r.Context(), id)
 	}
-	if err != nil && !errors.Is(err, ErrPluginNotFound) {
-		h.logger.ErrorContext(r.Context(), "change plugin state", "plugin", id, "error", err)
+	if err != nil {
+		if !errors.Is(err, ErrPluginNotFound) {
+			h.logger.ErrorContext(r.Context(), "change plugin state", "plugin", id, "error", err)
+		}
+		query := url.Values{"error": []string{"change"}}
+		if errors.Is(err, ErrProviderConflict) {
+			query.Set("error", "conflict")
+		} else if errors.Is(err, ErrPluginNotFound) {
+			query.Set("error", "missing")
+		}
+		http.Redirect(w, r, "/admin/plugins?"+query.Encode(), http.StatusSeeOther)
+		return
 	}
-	http.Redirect(w, r, "/admin/plugins", http.StatusSeeOther)
+	status := "disabled"
+	if enabled {
+		status = "enabled"
+	}
+	http.Redirect(w, r, "/admin/plugins?notice="+status, http.StatusSeeOther)
+}
+
+func pluginFeedback(r *http.Request) (string, string) {
+	switch r.URL.Query().Get("notice") {
+	case "enabled":
+		return "插件已启用。", ""
+	case "disabled":
+		return "插件已停用。", ""
+	}
+	switch r.URL.Query().Get("error") {
+	case "conflict":
+		return "", "同类评论插件已经启用，请先停用当前插件。"
+	case "missing":
+		return "", "插件不存在或已被移除。"
+	case "change":
+		return "", "插件状态更新失败，请稍后重试。"
+	}
+	return "", ""
 }
 func (h *HTTPHandler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	h.logger.ErrorContext(r.Context(), "plugin admin request failed", "error", err)

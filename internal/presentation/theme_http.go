@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"mime"
 	"net/http"
+	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
@@ -45,6 +48,7 @@ func (h *ThemeHTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Post("/themes/upload", h.upload)
 	router.Post("/themes/{themeID}/{version}/activate", h.activate)
 	router.Get("/themes/{themeID}/{version}/preview", h.preview)
+	router.Get("/themes/{themeID}/{version}/preview-image", h.previewImage)
 	router.Post("/themes/rollback", h.rollback)
 }
 
@@ -54,16 +58,14 @@ func (h *ThemeHTTPHandler) index(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	views := make([]map[string]any, 0, len(records))
-	for _, record := range records {
-		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid", "Path": filepath.Base(record.Path)})
-	}
+	views := themeViews(records)
 	siteName, err := h.siteNamer.SiteName(r.Context())
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
-	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Fallback": h.manager.IsFallback(), "ActiveID": h.manager.Current().ThemeID(), "ActiveVersion": h.manager.Current().ThemeVersion(), "MaxBytes": h.options.MaxBytes / (1 << 20)})
+	notice, message := themeFeedback(r)
+	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Fallback": h.manager.IsFallback(), "ActiveID": h.manager.Current().ThemeID(), "ActiveVersion": h.manager.Current().ThemeVersion(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes", "Notice": notice, "Error": message})
 }
 
 func (h *ThemeHTTPHandler) upload(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +88,7 @@ func (h *ThemeHTTPHandler) upload(w http.ResponseWriter, r *http.Request) {
 		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	h.redirect(w, r)
+	h.redirect(w, r, "uploaded")
 }
 
 func (h *ThemeHTTPHandler) activate(w http.ResponseWriter, r *http.Request) {
@@ -97,7 +99,7 @@ func (h *ThemeHTTPHandler) activate(w http.ResponseWriter, r *http.Request) {
 		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
 		return
 	}
-	h.redirect(w, r)
+	h.redirect(w, r, "activated")
 }
 
 func (h *ThemeHTTPHandler) rollback(w http.ResponseWriter, r *http.Request) {
@@ -108,7 +110,7 @@ func (h *ThemeHTTPHandler) rollback(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	h.redirect(w, r)
+	h.redirect(w, r, "rollback")
 }
 
 func (h *ThemeHTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
@@ -142,6 +144,40 @@ func (h *ThemeHTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *ThemeHTTPHandler) previewImage(w http.ResponseWriter, r *http.Request) {
+	record, err := h.catalog.Resolve(chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	file, name, err := openThemePreview(record.Path)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer file.Close()
+	w.Header().Set("Content-Type", mime.TypeByExtension(filepath.Ext(name)))
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	http.ServeContent(w, r, name, time.Time{}, file)
+}
+
+func openThemePreview(root string) (*os.File, string, error) {
+	for _, name := range []string{"preview.webp", "preview.png", "preview.jpg", "preview.jpeg"} {
+		path := filepath.Join(root, name)
+		file, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		info, statErr := file.Stat()
+		if statErr == nil && info.Mode().IsRegular() {
+			return file, name, nil
+		}
+		_ = file.Close()
+	}
+	return nil, "", os.ErrNotExist
+}
+
 func (h *ThemeHTTPHandler) verifyAction(w http.ResponseWriter, r *http.Request) bool {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid theme action", http.StatusBadRequest)
@@ -165,16 +201,38 @@ func (h *ThemeHTTPHandler) render(w http.ResponseWriter, r *http.Request, data m
 
 func (h *ThemeHTTPHandler) renderError(w http.ResponseWriter, r *http.Request, message string, status int) {
 	records, _ := h.catalog.List(r.Context())
-	views := make([]map[string]any, 0, len(records))
-	for _, record := range records {
-		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid"})
-	}
+	views := themeViews(records)
 	siteName, _ := h.siteNamer.SiteName(r.Context())
-	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20)}, status)
+	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes"}, status)
 }
 
-func (h *ThemeHTTPHandler) redirect(w http.ResponseWriter, r *http.Request) {
-	http.Redirect(w, r, "/admin/themes", http.StatusSeeOther)
+func themeViews(records []ThemeRecord) []map[string]any {
+	views := make([]map[string]any, 0, len(records))
+	for _, record := range records {
+		file, _, err := openThemePreview(record.Path)
+		if err == nil {
+			_ = file.Close()
+		}
+		preview := "/admin/themes/" + record.Manifest.ID + "/" + record.Manifest.Version + "/preview-image"
+		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid", "Path": filepath.Base(record.Path), "PreviewURL": preview, "PreviewAvailable": err == nil})
+	}
+	return views
+}
+
+func (h *ThemeHTTPHandler) redirect(w http.ResponseWriter, r *http.Request, notice string) {
+	http.Redirect(w, r, "/admin/themes?notice="+notice, http.StatusSeeOther)
+}
+
+func themeFeedback(r *http.Request) (string, string) {
+	switch r.URL.Query().Get("notice") {
+	case "uploaded":
+		return "主题已上传并通过验证。", ""
+	case "activated":
+		return "主题已启用。", ""
+	case "rollback":
+		return "已回退到默认主题。", ""
+	}
+	return "", ""
 }
 func (h *ThemeHTTPHandler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {

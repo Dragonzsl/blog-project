@@ -6,8 +6,10 @@
   <meta name="color-scheme" content="light dark">
   <title>初始化 · 个人博客</title>
   <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
+  {{template "admin_assets" .}}
 </head>
 <body class="auth-page">
+  {{template "admin_theme_toggle" .}}
   <main class="auth-shell">
     <section class="auth-intro" aria-labelledby="setup-title">
       <div class="wordmark"><span aria-hidden="true">✦</span> Personal Press</div>
@@ -26,7 +28,7 @@
         <h2>创建站主</h2>
         <p class="muted">密码至少 12 个字符；完成后还需要绑定 TOTP 验证器。</p>
       </div>
-      {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+      {{template "admin_feedback" .}}
       <form method="post" action="/admin/setup/start" class="stack">
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         <label>站点名称<input name="site_name" value="{{.SiteName}}" maxlength="100" autocomplete="organization" required autofocus></label>

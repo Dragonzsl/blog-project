@@ -78,7 +78,7 @@ func (h *HTTPHandler) upload(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/admin/media", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/media?notice=uploaded", http.StatusSeeOther)
 }
 func (h *HTTPHandler) delete(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -107,7 +107,7 @@ func (h *HTTPHandler) delete(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	http.Redirect(w, r, "/admin/media", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/media?notice=deleted", http.StatusSeeOther)
 }
 
 func (h *HTTPHandler) asset(w http.ResponseWriter, r *http.Request) {
@@ -162,7 +162,7 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 			srcset = append(srcset, fmt.Sprintf("%s %dw", item.VariantURL(variant.Key), variant.Width))
 		}
 		srcset = append(srcset, fmt.Sprintf("%s %dw", originalURL, item.Width))
-		views = append(views, map[string]any{"ID": item.ID, "Name": item.OriginalName, "MIME": item.MIMEType, "Size": humanBytes(item.SizeBytes), "Width": item.Width, "Height": item.Height, "IsImage": strings.HasPrefix(item.MIMEType, "image/"), "URL": originalURL, "SrcSet": strings.Join(srcset, ", "), "Markdown": markdownFor(item, originalURL)})
+		views = append(views, map[string]any{"ID": item.ID, "Name": item.OriginalName, "MIME": item.MIMEType, "Size": humanBytes(item.SizeBytes), "Width": item.Width, "Height": item.Height, "Alt": item.AltText, "ReferenceCount": item.ReferenceCount, "Kind": mediaKind(item.MIMEType), "IsImage": strings.HasPrefix(item.MIMEType, "image/"), "URL": originalURL, "SrcSet": strings.Join(srcset, ", "), "Markdown": markdownFor(item, originalURL)})
 	}
 	siteName, err := h.siteNamer.SiteName(r.Context())
 	if err != nil {
@@ -172,8 +172,10 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 	data := map[string]any{
 		"SiteName":           siteName,
 		"CSRF":               h.security.CSRFToken(r),
+		"AdminSection":       "media",
 		"Items":              views,
 		"Error":              message,
+		"Notice":             mediaNotice(r),
 		"MaxUploadMiB":       fmt.Sprintf("%.1f", float64(h.service.options.MaxUploadBytes)/(1<<20)),
 		"MaxImageMegapixels": fmt.Sprintf("%.1f", float64(h.service.options.MaxImagePixels)/1_000_000),
 		"JPEGQuality":        h.service.options.JPEGQuality,
@@ -185,6 +187,27 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 		h.logger.ErrorContext(r.Context(), "render media template", "error", err)
 	}
 }
+
+func mediaKind(mimeType string) string {
+	if strings.HasPrefix(mimeType, "image/") {
+		return "image"
+	}
+	if mimeType == "application/pdf" {
+		return "pdf"
+	}
+	return "file"
+}
+
+func mediaNotice(r *http.Request) string {
+	switch r.URL.Query().Get("notice") {
+	case "uploaded":
+		return "媒体已上传并完成处理。"
+	case "deleted":
+		return "媒体已删除。"
+	}
+	return ""
+}
+
 func markdownFor(item Item, url string) string {
 	if strings.HasPrefix(item.MIMEType, "image/") {
 		alt := item.AltText

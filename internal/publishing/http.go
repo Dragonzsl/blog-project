@@ -7,11 +7,15 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/organization"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
 )
 
@@ -42,6 +46,34 @@ type contentDescriptor struct {
 	ListURL         string
 	CreateURL       string
 	PermalinkPrefix string
+}
+
+type adminContentStatusTab struct {
+	Key     string
+	Label   string
+	URL     string
+	Current bool
+}
+
+type adminContentView struct {
+	ID             int64
+	Title          string
+	Slug           string
+	Excerpt        string
+	Status         string
+	StatusKey      string
+	Published      bool
+	UpdatedAt      string
+	PublishedAt    string
+	EditURL        string
+	PreviewURL     string
+	VersionsURL    string
+	PublicURL      string
+	HasPublicURL   bool
+	CategoryName   string
+	Tags           []string
+	WordCount      int
+	ReadingMinutes int
 }
 
 func describeContent(kind string) contentDescriptor {
@@ -88,25 +120,42 @@ func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 }
 
 func (h *HTTPHandler) contentList(w http.ResponseWriter, r *http.Request, kind string) {
-	contents, err := h.contents(r.Context(), kind)
+	descriptor := describeContent(kind)
+	filter, request := parseAdminContentRequest(r)
+	page, err := h.service.AdminContentsPage(r.Context(), kind, filter, request)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
-	descriptor := describeContent(kind)
-	views := make([]map[string]any, 0, len(contents))
-	for _, content := range contents {
-		views = append(views, map[string]any{
-			"ID":        content.ID,
-			"Title":     content.Title,
-			"Slug":      content.Slug,
-			"Status":    statusLabel(content.Status),
-			"Published": content.Status == "published",
-			"UpdatedAt": content.UpdatedAt.Format("2006-01-02 15:04 UTC"),
-			"EditURL":   fmt.Sprintf("%s/%d/edit", descriptor.ListURL, content.ID),
-		})
+	views := make([]adminContentView, 0, len(page.Contents))
+	for _, content := range page.Contents {
+		views = append(views, newAdminContentView(descriptor, content))
 	}
-	h.renderAdmin(w, r, "contents.html", map[string]any{"Contents": views, "Descriptor": descriptor})
+	data := map[string]any{
+		"Contents":     views,
+		"Descriptor":   descriptor,
+		"Pagination":   page.Pagination,
+		"Filter":       filter,
+		"StatusTabs":   adminContentStatusTabs(descriptor, filter),
+		"AdminSection": kind + "s",
+		"PreviousURL":  adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page-1),
+		"NextURL":      adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page+1),
+	}
+	if kind == "article" {
+		categories, err := h.service.Categories(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		tags, err := h.service.Tags(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		data["Categories"] = categories
+		data["Tags"] = tags
+	}
+	h.renderAdmin(w, r, "contents.html", data)
 }
 
 func (h *HTTPHandler) contentNew(w http.ResponseWriter, r *http.Request, kind string) {
@@ -296,7 +345,7 @@ func (h *HTTPHandler) contentTrash(w http.ResponseWriter, r *http.Request, kind 
 		h.renderLifecycleError(w, r, kind, id, err)
 		return
 	}
-	http.Redirect(w, r, "/admin/trash", http.StatusSeeOther)
+	http.Redirect(w, r, "/admin/trash#trash-results", http.StatusSeeOther)
 }
 
 func (h *HTTPHandler) contentVersions(w http.ResponseWriter, r *http.Request, kind string) {
@@ -318,7 +367,7 @@ func (h *HTTPHandler) contentVersions(w http.ResponseWriter, r *http.Request, ki
 			"Current": revision.ID == content.CurrentRevisionID, "CreatedAt": revision.CreatedAt.Format("2006-01-02 15:04 UTC"),
 		})
 	}
-	h.renderAdmin(w, r, "versions.html", map[string]any{"Content": content, "Revisions": views, "Descriptor": describeContent(kind)})
+	h.renderAdmin(w, r, "versions.html", map[string]any{"Content": content, "Revisions": views, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
 }
 
 func (h *HTTPHandler) contentRestoreRevision(w http.ResponseWriter, r *http.Request, kind string) {
@@ -359,7 +408,8 @@ func (h *HTTPHandler) contentVersion(w http.ResponseWriter, r *http.Request, kin
 	h.renderAdmin(w, r, "version.html", map[string]any{
 		"Content": content, "Revision": revision, "Descriptor": describeContent(kind),
 		"Reason": revisionReasonLabel(revision.Reason), "Current": revision.ID == content.CurrentRevisionID,
-		"CreatedAt": revision.CreatedAt.Format("2006-01-02 15:04 UTC"),
+		"CreatedAt":    revision.CreatedAt.Format("2006-01-02 15:04 UTC"),
+		"AdminSection": kind + "s",
 	})
 }
 
@@ -410,7 +460,7 @@ func (h *HTTPHandler) trashList(w http.ResponseWriter, r *http.Request) {
 	for _, content := range contents {
 		views = append(views, map[string]any{"ID": content.ID, "Title": content.Title, "Kind": describeContent(content.Kind).Singular, "TrashedAt": content.TrashedAt.Format("2006-01-02 15:04 UTC")})
 	}
-	h.renderAdmin(w, r, "trash.html", map[string]any{"Contents": views})
+	h.renderAdmin(w, r, "trash.html", map[string]any{"Contents": views, "AdminSection": "trash"})
 }
 
 func (h *HTTPHandler) trashRestore(w http.ResponseWriter, r *http.Request) {
@@ -485,7 +535,7 @@ func (h *HTTPHandler) parseContentForm(w http.ResponseWriter, r *http.Request, k
 		return DraftInput{}, false
 	}
 	input := DraftInput{
-		Title: r.FormValue("title"), Slug: r.FormValue("slug"), Excerpt: r.FormValue("excerpt"),
+		Title: r.FormValue("title"), Slug: r.FormValue("slug"), AutoSlug: r.FormValue("auto_slug") == "1", Excerpt: r.FormValue("excerpt"),
 		SEOTitle: r.FormValue("seo_title"), SEODescription: r.FormValue("seo_description"),
 		BodyMarkdown: r.FormValue("body_markdown"),
 	}
@@ -547,6 +597,9 @@ func (h *HTTPHandler) renderEditor(w http.ResponseWriter, r *http.Request, kind 
 		"SnapshotIntervalMilliseconds": h.service.SnapshotInterval().Milliseconds(),
 		"SnapshotIntervalSeconds":      int(h.service.SnapshotInterval().Seconds()),
 		"SnapshotLoaded":               r.URL.Query().Get("snapshot") == "load",
+		"WordCount":                    editorialWordCount(content.BodyMarkdown),
+		"ReadingMinutes":               editorialReadingMinutes(content.BodyMarkdown),
+		"AdminSection":                 kind + "s",
 	}
 	var siteLocation *time.Location
 	if content.ID > 0 {
@@ -643,8 +696,107 @@ func (h *HTTPHandler) contents(ctx context.Context, kind string) ([]Article, err
 	return h.service.Articles(ctx)
 }
 
+func parseAdminContentRequest(r *http.Request) (AdminContentFilter, pagination.Request) {
+	query := r.URL.Query()
+	filter := AdminContentFilter{
+		Query:    strings.TrimSpace(query.Get("q")),
+		Status:   normalizeAdminContentStatus(query.Get("status")),
+		Category: strings.TrimSpace(query.Get("category")),
+		Tag:      strings.TrimSpace(query.Get("tag")),
+		Sort:     normalizeAdminContentSort(query.Get("sort")),
+	}
+	page, err := strconv.Atoi(query.Get("page"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	return filter, pagination.Request{Page: page, PerPage: 20}
+}
+
+func adminContentStatusTabs(descriptor contentDescriptor, filter AdminContentFilter) []adminContentStatusTab {
+	tabs := []adminContentStatusTab{
+		{Key: "all", Label: "全部", Current: filter.Status == "all"},
+		{Key: "draft", Label: "草稿", Current: filter.Status == "draft"},
+		{Key: "scheduled", Label: "定时发布", Current: filter.Status == "scheduled"},
+		{Key: "published", Label: "已发布", Current: filter.Status == "published"},
+	}
+	for index := range tabs {
+		tabs[index].URL = adminContentURL(descriptor.ListURL, filter, tabs[index].Key, 1)
+	}
+	return tabs
+}
+
+func adminContentURL(base string, filter AdminContentFilter, status string, page int) string {
+	values := url.Values{}
+	if filter.Query != "" {
+		values.Set("q", filter.Query)
+	}
+	if status != "" && status != "all" {
+		values.Set("status", status)
+	}
+	if filter.Category != "" {
+		values.Set("category", filter.Category)
+	}
+	if filter.Tag != "" {
+		values.Set("tag", filter.Tag)
+	}
+	if filter.Sort != "" && filter.Sort != "updated" {
+		values.Set("sort", filter.Sort)
+	}
+	if page > 1 {
+		values.Set("page", strconv.Itoa(page))
+	}
+	if encoded := values.Encode(); encoded != "" {
+		return base + "?" + encoded
+	}
+	return base
+}
+
+func newAdminContentView(descriptor contentDescriptor, content Article) adminContentView {
+	view := adminContentView{
+		ID:             content.ID,
+		Title:          content.Title,
+		Slug:           content.Slug,
+		Excerpt:        content.Excerpt,
+		Status:         statusLabel(content.Status),
+		StatusKey:      content.Status,
+		Published:      content.Status == "published",
+		UpdatedAt:      content.UpdatedAt.Format("2006-01-02 15:04 UTC"),
+		EditURL:        fmt.Sprintf("%s/%d/edit", descriptor.ListURL, content.ID),
+		PreviewURL:     fmt.Sprintf("%s/%d/preview", descriptor.ListURL, content.ID),
+		VersionsURL:    fmt.Sprintf("%s/%d/versions", descriptor.ListURL, content.ID),
+		WordCount:      editorialWordCount(content.BodyMarkdown),
+		ReadingMinutes: editorialReadingMinutes(content.BodyMarkdown),
+	}
+	if content.Category != nil {
+		view.CategoryName = content.Category.Name
+	}
+	for _, tag := range content.Tags {
+		view.Tags = append(view.Tags, tag.Name)
+	}
+	if content.PublishedAt != nil {
+		view.PublishedAt = content.PublishedAt.Format("2006-01-02 15:04 UTC")
+	}
+	if view.Published {
+		view.PublicURL = publicURL(content)
+		view.HasPublicURL = content.Slug != ""
+	}
+	return view
+}
+
+func editorialWordCount(markdown string) int {
+	return utf8.RuneCountInString(strings.TrimSpace(markdown))
+}
+
+func editorialReadingMinutes(markdown string) int {
+	count := editorialWordCount(markdown)
+	if count == 0 {
+		return 0
+	}
+	return (count + 399) / 400
+}
+
 func (h *HTTPHandler) redirectToEditor(w http.ResponseWriter, r *http.Request, kind string, id int64) {
-	http.Redirect(w, r, fmt.Sprintf("%s/%d/edit", describeContent(kind).ListURL, id), http.StatusSeeOther)
+	http.Redirect(w, r, fmt.Sprintf("%s/%d/edit#content-form", describeContent(kind).ListURL, id), http.StatusSeeOther)
 }
 func publicURL(content Article) string {
 	slug := content.PublishedSlug

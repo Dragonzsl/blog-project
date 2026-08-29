@@ -1,6 +1,58 @@
 (() => {
+  const slugFromTitle = (value, fallback) => {
+    let normalized = value;
+    try {
+      normalized = value.normalize("NFC");
+    } catch (_) {
+      // Older browsers can still use the unnormalized input.
+    }
+    let result = "";
+    let pendingHyphen = false;
+    for (const character of normalized.trim()) {
+      if (/[\p{L}\p{N}]/u.test(character)) {
+        result += character.toLowerCase();
+        pendingHyphen = false;
+      } else if (result && !pendingHyphen) {
+        result += "-";
+        pendingHyphen = true;
+      }
+    }
+    return result.replace(/-+$/, "") || fallback;
+  };
+
+  const setupAutoSlug = () => {
+    const form = document.querySelector("#content-form");
+    const title = form?.querySelector('input[name="title"]');
+    const slug = form?.querySelector("[data-slug-input]");
+    const mode = form?.querySelector('input[name="auto_slug"]');
+    if (!title || !slug || !mode) return;
+
+    const initialTitle = title.value;
+    const initialSlug = slug.value;
+    const initialAuto = mode.value === "1";
+    const fallback = slug.dataset.slugFallback === "page" ? "page" : "article";
+    const refresh = () => {
+      if (!title.value.trim()) {
+        slug.value = "";
+        return;
+      }
+      slug.value = slugFromTitle(title.value, fallback);
+    };
+    title.addEventListener("input", () => {
+      if (!initialAuto && title.value === initialTitle) {
+        mode.value = "0";
+        slug.value = initialSlug;
+        return;
+      }
+      mode.value = "1";
+      refresh();
+    });
+    if (initialAuto && title.value.trim()) refresh();
+  };
+
   const form = document.querySelector("[data-snapshot-url]");
   const status = document.querySelector("[data-snapshot-status]");
+  setupAutoSlug();
   if (!form || !status) return;
 
   const interval = Number(form.dataset.snapshotInterval || 15000);

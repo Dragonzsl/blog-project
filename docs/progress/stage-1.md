@@ -47,7 +47,7 @@
 - 密码使用带独立随机盐的 Argon2id（64 MiB、3 次、单并行），认证内存并发固定为 1，并在低频认证操作后主动归还内存页。
 - TOTP 强制绑定，密钥由运行时认证秘密通过 AES-GCM 加密；未配置环境秘密时原子生成权限为 `0600` 的本地秘密文件。
 - 生成 10 枚约 80 bit 的单次恢复码，只保存带服务端秘密的 HMAC；恢复码登录在创建会话的同一事务内消费。
-- 会话只保存随机令牌摘要并绑定认证版本；Cookie 使用 `__Host-`、Secure、HttpOnly、SameSite=Strict，密码/TOTP 恢复会使所有旧会话失效。
+- 会话只保存随机令牌摘要并绑定认证版本；HTTPS 部署的 Cookie 使用 `__Host-`、Secure、HttpOnly、SameSite=Strict，HTTP 本地开发按公开基址关闭 Secure；密码/TOTP 恢复会使所有旧会话失效。
 - 初始化、登录和退出全部验证 CSRF 与 Origin；登录失败采用有界限速表，Argon2 并发为 1，未知用户名执行同参数假哈希。
 - `blog auth recover` 从标准输入或权限受限文件读取新密码，轮换密码、TOTP、恢复码与认证版本，不依赖邮件或外部服务。
 - 管理入口提供无 JavaScript的现代编辑式初始化、TOTP、恢复码、登录和概览页面，并设置严格 CSP、Permissions-Policy 与禁止缓存。

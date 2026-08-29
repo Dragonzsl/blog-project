@@ -1,19 +1,10 @@
 <!doctype html>
 <html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>媒体 · {{.SiteName}}</title>
-  <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
-</head>
-<body class="admin-page">
-  <header class="admin-header"><a class="wordmark" href="/admin/"><span aria-hidden="true">✦</span> {{.SiteName}}</a><nav aria-label="内容管理"><a class="nav-link" href="/admin/articles">文章</a><a class="nav-link" href="/admin/pages">页面</a><a class="nav-link" href="/admin/organization">内容组织</a><a class="nav-link active" href="/admin/media">媒体</a></nav></header>
-  <main class="content-shell media-shell">
-    <div class="page-heading"><div><p class="eyebrow">Media</p><h1>媒体库。</h1></div><p class="heading-note">原件按原始字节保存；JPEG 以质量 {{.JPEGQuality}}、PNG 以无损方式串行生成响应式预览，引用中的媒体不可误删。</p></div>
-    {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
-    <form method="post" action="/admin/media" enctype="multipart/form-data" class="upload-card"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><label>选择文件<input type="file" name="file" accept="image/jpeg,image/png,application/pdf,text/plain,application/zip" required></label><label>图片替代文字<input name="alt_text" maxlength="500" placeholder="准确描述图片内容；附件可留空"></label><button type="submit">上传并处理 →</button><p>单文件上限 {{.MaxUploadMiB}} MiB，图片不超过 {{.MaxImageMegapixels}} 百万像素；SVG 默认拒绝。</p></form>
-    {{if .Items}}<section class="media-grid" aria-label="已上传媒体">{{range .Items}}<article class="media-card">{{if .IsImage}}<img src="{{.URL}}" {{if .SrcSet}}srcset="{{.SrcSet}}" sizes="(max-width: 720px) 100vw, 320px"{{end}} alt="" loading="lazy">{{else}}<div class="file-tile" aria-hidden="true">{{.MIME}}</div>{{end}}<div class="media-details"><h2>{{.Name}}</h2><p>{{.MIME}} · {{.Size}}{{if .Width}} · {{.Width}}×{{.Height}}{{end}}</p><label>Markdown<textarea rows="3" readonly>{{.Markdown}}</textarea></label><label>公开地址<input value="{{.URL}}" readonly></label><form method="post" action="/admin/media/{{.ID}}/delete"><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button type="submit" class="danger-button">删除媒体</button></form></div></article>{{end}}</section>{{else}}<section class="empty-state"><span aria-hidden="true">◇</span><h2>媒体库还是空的。</h2><p>上传图片或附件后，将 Markdown 片段粘贴到正文即可。</p></section>{{end}}
-  </main>
-</body>
-</html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>媒体 · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}<main class="content-shell media-shell">
+  <div class="page-heading"><div><p class="eyebrow">Media</p><h1>媒体库。</h1></div><p class="heading-note">原件按原始字节保存；图片会生成响应式预览，引用中的媒体不可误删。</p></div>
+  {{template "admin_feedback" .}}
+  <form method="post" action="/admin/media" enctype="multipart/form-data" class="upload-card" data-submit-feedback><input type="hidden" name="csrf_token" value="{{.CSRF}}"><label for="media-file">选择文件<input id="media-file" type="file" name="file" accept="image/jpeg,image/png,application/pdf,text/plain,application/zip" required data-file-input><small data-file-name>未选择文件</small></label><label for="media-alt">图片替代文字<input id="media-alt" name="alt_text" maxlength="500" placeholder="准确描述图片内容；附件可留空"></label><button type="submit">上传并处理 →</button><p>单文件上限 {{.MaxUploadMiB}} MiB，图片不超过 {{.MaxImageMegapixels}} 百万像素；SVG 默认拒绝。</p></form>
+  <div class="media-toolbar"><label for="media-filter">筛选格式<select id="media-filter" data-media-filter><option value="all">全部格式</option><option value="image">图片</option><option value="pdf">PDF</option><option value="file">其他附件</option></select></label><div class="media-view-switch" role="group" aria-label="媒体展示方式"><button type="button" data-media-view="grid" aria-pressed="true">网格</button><button type="button" data-media-view="list" aria-pressed="false">列表</button></div></div>
+  {{if .Items}}<section class="media-grid" data-media-library aria-label="已上传媒体">{{range .Items}}<article class="media-card" data-media-kind="{{.Kind}}">{{if .IsImage}}<img src="{{.URL}}" {{if .SrcSet}}srcset="{{.SrcSet}}" sizes="(max-width: 720px) 100vw, 320px"{{end}} alt="{{if .Alt}}{{.Alt}}{{else}}{{.Name}}{{end}}" loading="lazy">{{else}}<div class="file-tile" aria-label="{{.MIME}} 文件">{{.MIME}}</div>{{end}}<div class="media-details"><div class="media-card-heading"><h2>{{.Name}}</h2><span>{{.MIME}}</span></div><p>{{.Size}}{{if .Width}} · {{.Width}}×{{.Height}}{{end}}</p>{{if .Alt}}<p class="media-alt">替代文字：{{.Alt}}</p>{{else if .IsImage}}<p class="media-alt missing">待补充替代文字</p>{{end}}<label for="media-markdown-{{.ID}}">Markdown<textarea id="media-markdown-{{.ID}}" rows="3" readonly>{{.Markdown}}</textarea></label><div class="media-card-actions"><button type="button" class="button-link small" data-copy-value="{{.Markdown}}" data-copy-label="复制 Markdown">复制 Markdown</button><span>引用 {{.ReferenceCount}} 处</span></div><form method="post" action="/admin/media/{{.ID}}/delete" data-submit-feedback><input type="hidden" name="csrf_token" value="{{$.CSRF}}"><button type="submit" class="danger-button">删除媒体</button></form></div></article>{{end}}</section>{{else}}<section class="empty-state"><h2>媒体库还是空的。</h2><p>上传图片或附件后，将 Markdown 片段粘贴到正文即可。</p></section>{{end}}
+</main>{{template "admin_footer" .}}</body></html>

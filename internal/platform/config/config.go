@@ -273,6 +273,7 @@ func Load(path string) (Config, error) {
 }
 
 func applyEnvironment(cfg *Config) error {
+	baseURL, baseURLFromEnvironment := os.LookupEnv("BLOG_BASE_URL")
 	stringOverrides := []struct {
 		name   string
 		target *string
@@ -385,6 +386,13 @@ func applyEnvironment(cfg *Config) error {
 			return fmt.Errorf("parse BLOG_COOKIE_SECURE: %w", err)
 		}
 		cfg.Security.CookieSecure = parsed
+	} else if baseURLFromEnvironment && strings.TrimSpace(baseURL) != "" {
+		// The public base URL is the source of truth for Compose/local runs.
+		// In particular, an HTTP development URL must not receive Secure
+		// cookies or the browser will omit the setup/session cookie entirely.
+		if parsed, err := url.Parse(strings.TrimSpace(baseURL)); err == nil {
+			cfg.Security.CookieSecure = strings.EqualFold(parsed.Scheme, "https")
+		}
 	}
 	if value, ok := os.LookupEnv("BLOG_S3_FORCE_PATH_STYLE"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(value))

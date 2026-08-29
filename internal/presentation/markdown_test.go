@@ -44,3 +44,23 @@ func TestMarkdownAllowsRelativeImages(t *testing.T) {
 		t.Fatalf("relative image was removed: %s", html)
 	}
 }
+
+func TestMarkdownEnhancesCodeBlocksWithLanguageAndCopyControl(t *testing.T) {
+	rendered, err := NewMarkdown().Render("```go\nfmt.Println(\"hello\")\n```")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(rendered)
+	for _, expected := range []string{
+		`class="code-block"`,
+		`data-code-language="go"`,
+		">Go</span>",
+		`data-copy-code`,
+		`复制代码`,
+		`fmt.Println(&#34;hello&#34;)`,
+	} {
+		if !strings.Contains(html, expected) {
+			t.Fatalf("enhanced code block missing %q: %s", expected, html)
+		}
+	}
+}

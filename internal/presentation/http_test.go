@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -48,6 +49,16 @@ func TestPublicThemeCacheETagAndPreviewIsolation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unicodeDraft, err := publishingService.CreateDraft(ctx, publishing.DraftInput{
+		Title: "测试文章01", Slug: "测试文章01", BodyMarkdown: "中文固定链接正文",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unicodePublished, err := publishingService.Publish(ctx, unicodeDraft.ID, unicodeDraft.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
 	theme, err := NewDefaultTheme(NewMarkdown())
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +84,7 @@ func TestPublicThemeCacheETagAndPreviewIsolation(t *testing.T) {
 	if first.Code != http.StatusOK || first.Header().Get("X-Page-Cache") != "MISS" {
 		t.Fatalf("first response status=%d cache=%q body=%s", first.Code, first.Header().Get("X-Page-Cache"), first.Body.String())
 	}
-	if !strings.Contains(first.Body.String(), "<strong>安全</strong>") || strings.Contains(first.Body.String(), "<script") {
+	if !strings.Contains(first.Body.String(), "<strong>安全</strong>") || strings.Contains(first.Body.String(), "<script>alert") {
 		t.Fatalf("unsafe or unrendered Markdown: %s", first.Body.String())
 	}
 	if first.Header().Get("Last-Modified") == "" {
@@ -111,6 +122,15 @@ func TestPublicThemeCacheETagAndPreviewIsolation(t *testing.T) {
 	router.ServeHTTP(preview, httptest.NewRequest(http.MethodGet, "/admin/articles/1/preview", nil))
 	if !strings.Contains(preview.Body.String(), "尚未发布的第二版") || preview.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("preview response = %s", preview.Body.String())
+	}
+	if !strings.Contains(preview.Header().Get("Content-Security-Policy"), "script-src 'self'") {
+		t.Fatalf("preview CSP does not allow the theme script: %q", preview.Header().Get("Content-Security-Policy"))
+	}
+	escapedUnicodePath := "/posts/" + url.PathEscape(unicodePublished.PublishedSlug)
+	escapedUnicode := httptest.NewRecorder()
+	router.ServeHTTP(escapedUnicode, httptest.NewRequest(http.MethodGet, escapedUnicodePath, nil))
+	if escapedUnicode.Code != http.StatusOK || !strings.Contains(escapedUnicode.Body.String(), "测试文章01") {
+		t.Fatalf("escaped Unicode article status=%d path=%q body=%s", escapedUnicode.Code, escapedUnicodePath, escapedUnicode.Body.String())
 	}
 	stillPublic := httptest.NewRecorder()
 	router.ServeHTTP(stillPublic, httptest.NewRequest(http.MethodGet, "/posts/cached-article", nil))

@@ -6,8 +6,10 @@
   <meta name="color-scheme" content="light dark">
   <title>绑定验证器 · {{.SiteName}}</title>
   <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
+  {{template "admin_assets" .}}
 </head>
 <body class="auth-page">
+  {{template "admin_theme_toggle" .}}
   <main class="auth-shell">
     <section class="auth-intro" aria-labelledby="totp-title">
       <div class="wordmark"><span aria-hidden="true">✦</span> Personal Press</div>
@@ -26,7 +28,7 @@
         <h2>扫描并确认</h2>
         <p class="muted">无法扫码时，可手动输入下方密钥。</p>
       </div>
-      {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+      {{template "admin_feedback" .}}
       <div class="totp-grid">
         <img class="qr" src="{{.QRCode}}" width="220" height="220" alt="TOTP 设置二维码">
         <div class="secret-panel"><span>手动密钥</span><code id="totp-secret">{{.Secret}}</code></div>

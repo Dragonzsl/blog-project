@@ -59,6 +59,8 @@ type PluginState struct {
 	Enabled        bool
 	LastInitResult string
 	UpdatedAt      time.Time
+	Scope          string
+	Surface        string
 }
 
 type Event struct {
@@ -406,9 +408,42 @@ func (r *Registry) States(ctx context.Context) ([]PluginState, error) {
 		if err := rows.Scan(&id, &name, &version, &api, &kind, &enabled, &initResult, &updated); err != nil {
 			return nil, err
 		}
-		result = append(result, PluginState{Manifest: Manifest{ID: id, Name: name, Version: version, APIVersion: int(api), Kind: kind}, Enabled: enabled == 1, LastInitResult: initResult, UpdatedAt: time.UnixMilli(updated).UTC()})
+		state := PluginState{Manifest: Manifest{ID: id, Name: name, Version: version, APIVersion: int(api), Kind: kind}, Enabled: enabled == 1, LastInitResult: initResult, UpdatedAt: time.UnixMilli(updated).UTC()}
+		r.mu.RLock()
+		registered := r.plugins[id]
+		r.mu.RUnlock()
+		if registered != nil {
+			state.Manifest.Capabilities = append([]string(nil), registered.Manifest().Capabilities...)
+		}
+		state.Scope, state.Surface = pluginPresentation(state.Manifest)
+		result = append(result, state)
 	}
 	return result, rows.Err()
+}
+
+func pluginPresentation(manifest Manifest) (string, string) {
+	capabilities := make(map[string]struct{}, len(manifest.Capabilities))
+	for _, capability := range manifest.Capabilities {
+		capabilities[capability] = struct{}{}
+	}
+	var scope []string
+	if _, ok := capabilities["public_route"]; ok {
+		scope = append(scope, "公开端")
+	}
+	if _, ok := capabilities["admin_menu"]; ok {
+		scope = append(scope, "管理端")
+	}
+	if _, ok := capabilities["persistent_task"]; ok {
+		scope = append(scope, "后台任务")
+	}
+	if len(scope) == 0 {
+		scope = append(scope, "基础能力")
+	}
+	surface := map[string]string{"analytics": "访问统计", "comment_provider": "评论", "newsletter": "Newsletter", "content_api": "内容 API", "webhook": "Webhook"}[manifest.Kind]
+	if surface == "" {
+		surface = manifest.Kind
+	}
+	return strings.Join(scope, " · "), surface
 }
 func (r *Registry) Menus() []MenuItem {
 	r.mu.RLock()

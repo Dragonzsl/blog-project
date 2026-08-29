@@ -3,12 +3,15 @@ package publishing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 func TestArticleDraftPreviewPublishAndStablePermalink(t *testing.T) {
@@ -138,6 +141,35 @@ func TestArticleSlugIsUniqueAndReserved(t *testing.T) {
 	}
 }
 
+func TestSlugIsGeneratedFromTitleWhenRequested(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+
+	first, err := service.CreateDraft(ctx, DraftInput{Title: "测试文章 01：新入口", BodyMarkdown: "正文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Slug != "测试文章-01-新入口" {
+		t.Fatalf("generated slug=%q", first.Slug)
+	}
+
+	second, err := service.CreateDraft(ctx, DraftInput{Title: "测试文章 01：新入口", BodyMarkdown: "正文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Slug != "测试文章-01-新入口-2" {
+		t.Fatalf("collision slug=%q", second.Slug)
+	}
+
+	page, err := service.CreatePageDraft(ctx, DraftInput{Title: "关于这个地方", BodyMarkdown: "正文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Slug != "关于这个地方" {
+		t.Fatalf("generated page slug=%q", page.Slug)
+	}
+}
+
 func TestPageUsesRootPermalinkAndSystemPathsStayReserved(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newPublishingTestService(t)
@@ -161,6 +193,182 @@ func TestPageUsesRootPermalinkAndSystemPathsStayReserved(t *testing.T) {
 	}
 	if _, err := service.CreatePageDraft(ctx, DraftInput{Title: "后台", Slug: "admin", BodyMarkdown: "reserved"}); !errors.Is(err, ErrSlugUnavailable) {
 		t.Fatalf("reserved page slug error=%v", err)
+	}
+}
+
+func TestPublicArticlePagesAndNavigation(t *testing.T) {
+	ctx := context.Background()
+	service, db := newPublishingTestService(t)
+	service.now = func() time.Time { return time.Date(2026, time.August, 28, 8, 0, 0, 0, time.UTC) }
+	organizations := organization.NewService(db)
+	category, err := organizations.CreateCategory(ctx, organization.TermInput{Name: "设计", Slug: "design"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := organizations.CreateTag(ctx, organization.TermInput{Name: "博客", Slug: "blog"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	articles := make([]Article, 0, 21)
+	for number := 1; number <= 21; number++ {
+		draft, err := service.CreateDraft(ctx, DraftInput{
+			Title: "文章 " + fmt.Sprintf("%02d", number), Slug: fmt.Sprintf("article-%02d", number),
+			Excerpt: "列表摘要", BodyMarkdown: "## 目录标题\n\n正文内容。", CategoryID: category.ID, TagIDs: []int64{tag.ID},
+		})
+		if err != nil {
+			t.Fatalf("create article %d: %v", number, err)
+		}
+		published, err := service.Publish(ctx, draft.ID, draft.LockVersion)
+		if err != nil {
+			t.Fatalf("publish article %d: %v", number, err)
+		}
+		articles = append(articles, published)
+	}
+	if _, err := service.CreateDraft(ctx, DraftInput{Title: "只存在于草稿箱", Slug: "draft-only"}); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := service.PublicArticlesPage(ctx, pagination.Request{Page: 2, PerPage: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Pagination.Total != 21 || page.Pagination.PageCount != 2 || page.Pagination.Page != 2 || len(page.Articles) != 1 || page.Articles[0].Title != "文章 01" {
+		t.Fatalf("public page = %+v articles=%+v", page.Pagination, page.Articles)
+	}
+	for _, article := range page.Articles {
+		if article.Title == "只存在于草稿箱" {
+			t.Fatal("draft leaked into public article page")
+		}
+	}
+
+	navigation, err := service.PublicArticleNavigation(ctx, articles[10].ID, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if navigation.Previous == nil || navigation.Previous.Title != "文章 10" || navigation.Next == nil || navigation.Next.Title != "文章 12" {
+		t.Fatalf("article navigation = %+v", navigation)
+	}
+	if len(navigation.Related) == 0 || len(navigation.Related) > 3 {
+		t.Fatalf("related articles = %+v", navigation.Related)
+	}
+	for _, related := range navigation.Related {
+		if related.ID == articles[10].ID {
+			t.Fatal("current article appeared in related articles")
+		}
+	}
+
+	firstNavigation, err := service.PublicArticleNavigation(ctx, articles[0].ID, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstNavigation.Previous != nil || firstNavigation.Next == nil {
+		t.Fatalf("boundary navigation = %+v", firstNavigation)
+	}
+}
+
+func TestAdminContentsPageFiltersTaxonomyStatusAndPagination(t *testing.T) {
+	ctx := context.Background()
+	service, db := newPublishingTestService(t)
+	service.now = func() time.Time { return time.Date(2026, time.August, 29, 8, 0, 0, 0, time.UTC) }
+	organizations := organization.NewService(db)
+	category, err := organizations.CreateCategory(ctx, organization.TermInput{Name: "设计系统", Slug: "design-system"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := organizations.CreateTag(ctx, organization.TermInput{Name: "工作流", Slug: "workflow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := service.CreateDraft(ctx, DraftInput{Title: "草稿 Alpha", Slug: "draft-alpha", Excerpt: "有摘要", BodyMarkdown: "草稿正文", CategoryID: category.ID, TagIDs: []int64{tag.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	publishedDraft, err := service.CreateDraft(ctx, DraftInput{Title: "已发布 Beta", Slug: "published-beta", BodyMarkdown: "已发布正文", CategoryID: category.ID, TagIDs: []int64{tag.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Publish(ctx, publishedDraft.ID, publishedDraft.LockVersion); err != nil {
+		t.Fatal(err)
+	}
+	scheduled, err := service.CreateDraft(ctx, DraftInput{Title: "定时 Gamma", Slug: "scheduled-gamma", BodyMarkdown: "定时正文", CategoryID: category.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Schedule(ctx, "article", scheduled.ID, scheduled.LockVersion, service.now().Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	drafts, err := service.AdminContentsPage(ctx, "article", AdminContentFilter{Status: "draft"}, pagination.Request{Page: 1, PerPage: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drafts.Pagination.Total != 1 || len(drafts.Contents) != 1 || drafts.Contents[0].Title != "草稿 Alpha" {
+		t.Fatalf("draft filter = %+v contents=%+v", drafts.Pagination, drafts.Contents)
+	}
+
+	byCategory, err := service.AdminContentsPage(ctx, "article", AdminContentFilter{Category: category.Slug}, pagination.Request{Page: 1, PerPage: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byCategory.Pagination.Total != 3 {
+		t.Fatalf("category filter total = %d, want 3", byCategory.Pagination.Total)
+	}
+	byTag, err := service.AdminContentsPage(ctx, "article", AdminContentFilter{Tag: tag.Slug, Query: "已发布"}, pagination.Request{Page: 1, PerPage: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byTag.Pagination.Total != 1 || byTag.Contents[0].Title != "已发布 Beta" {
+		t.Fatalf("tag/query filter = %+v contents=%+v", byTag.Pagination, byTag.Contents)
+	}
+
+	firstPage, err := service.AdminContentsPage(ctx, "article", AdminContentFilter{Sort: "title"}, pagination.Request{Page: 1, PerPage: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPage.Pagination.Total != 3 || firstPage.Pagination.PageCount != 3 || !firstPage.Pagination.HasNext || firstPage.Contents[0].Title != "定时 Gamma" {
+		t.Fatalf("title pagination = %+v contents=%+v", firstPage.Pagination, firstPage.Contents)
+	}
+}
+
+func TestDashboardSummaryUsesEditorialState(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+	fixedTime := time.Date(2026, time.August, 29, 8, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return fixedTime }
+	if _, err := service.CreateDraft(ctx, DraftInput{Title: "需要继续", Slug: "continue", Excerpt: "已写摘要", BodyMarkdown: "正文"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := service.CreateDraft(ctx, DraftInput{Title: "刚刚发布", Slug: "fresh", BodyMarkdown: "正文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Publish(ctx, published.ID, published.LockVersion); err != nil {
+		t.Fatal(err)
+	}
+	scheduled, err := service.CreateDraft(ctx, DraftInput{Title: "稍后公开", Slug: "later", BodyMarkdown: "正文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Schedule(ctx, "article", scheduled.ID, scheduled.LockVersion, fixedTime.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := service.Dashboard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.DraftCount != 1 || summary.ScheduledCount != 1 || summary.PublishedCount != 1 || summary.TrashedCount != 0 {
+		t.Fatalf("summary counts = %+v", summary)
+	}
+	if summary.PublishedThisWeek != 1 || summary.WithoutExcerptCount != 2 {
+		t.Fatalf("summary health = %+v", summary)
+	}
+	if len(summary.RecentEdits) != 3 || summary.RecentEdits[0].Title != "稍后公开" {
+		t.Fatalf("recent edits = %+v", summary.RecentEdits)
+	}
+	if len(summary.RecentPublished) != 1 || summary.RecentPublished[0].Title != "刚刚发布" {
+		t.Fatalf("recent published = %+v", summary.RecentPublished)
 	}
 }
 

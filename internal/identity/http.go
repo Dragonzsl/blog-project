@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/pquerna/otp"
 	"github.com/zhushilin/blog-project/internal/platform/config"
+	"github.com/zhushilin/blog-project/internal/publishing"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
 )
 
@@ -26,15 +27,27 @@ const maxAuthFormBytes = 32 << 10
 
 type sessionContextKey struct{}
 
+type DashboardQueries interface {
+	Dashboard(context.Context) (publishing.DashboardSummary, error)
+}
+
+type PendingCommentQueries interface {
+	PendingCount(context.Context) (int, error)
+}
+
 type HTTPHandler struct {
-	service   *Service
-	security  config.Security
-	logger    *slog.Logger
-	templates *template.Template
-	css       []byte
-	cssETag   string
-	js        []byte
-	jsETag    string
+	service          *Service
+	security         config.Security
+	logger           *slog.Logger
+	templates        *template.Template
+	dashboardQueries DashboardQueries
+	pendingComments  PendingCommentQueries
+	css              []byte
+	cssETag          string
+	adminJS          []byte
+	adminJSETag      string
+	js               []byte
+	jsETag           string
 }
 
 func NewHTTPHandler(service *Service, security config.Security, logger *slog.Logger) (*HTTPHandler, error) {
@@ -47,25 +60,41 @@ func NewHTTPHandler(service *Service, security config.Security, logger *slog.Log
 		return nil, fmt.Errorf("read admin stylesheet: %w", err)
 	}
 	hash := sha256.Sum256(css)
+	adminJS, err := adminweb.Files.ReadFile("static/admin.js")
+	if err != nil {
+		return nil, fmt.Errorf("read admin interface script: %w", err)
+	}
+	adminJSHash := sha256.Sum256(adminJS)
 	js, err := adminweb.Files.ReadFile("static/editor.js")
 	if err != nil {
 		return nil, fmt.Errorf("read admin editor script: %w", err)
 	}
 	jsHash := sha256.Sum256(js)
 	return &HTTPHandler{
-		service:   service,
-		security:  security,
-		logger:    logger,
-		templates: templates,
-		css:       css,
-		cssETag:   `"` + base64.RawURLEncoding.EncodeToString(hash[:12]) + `"`,
-		js:        js,
-		jsETag:    `"` + base64.RawURLEncoding.EncodeToString(jsHash[:12]) + `"`,
+		service:     service,
+		security:    security,
+		logger:      logger,
+		templates:   templates,
+		css:         css,
+		cssETag:     `"` + base64.RawURLEncoding.EncodeToString(hash[:12]) + `"`,
+		adminJS:     adminJS,
+		adminJSETag: `"` + base64.RawURLEncoding.EncodeToString(adminJSHash[:12]) + `"`,
+		js:          js,
+		jsETag:      `"` + base64.RawURLEncoding.EncodeToString(jsHash[:12]) + `"`,
 	}, nil
+}
+
+func (h *HTTPHandler) SetDashboardQueries(queries DashboardQueries) {
+	h.dashboardQueries = queries
+}
+
+func (h *HTTPHandler) SetPendingCommentQueries(queries PendingCommentQueries) {
+	h.pendingComments = queries
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Get("/assets/admin.css", h.stylesheet)
+	router.Get("/assets/admin.js", h.adminScript)
 	router.Get("/assets/editor.js", h.editorScript)
 	router.Get("/setup", h.setupPage)
 	router.Post("/setup/start", h.setupStart)
@@ -136,6 +165,17 @@ func (h *HTTPHandler) editorScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
 	w.Header().Set("ETag", h.jsETag)
 	_, _ = w.Write(h.js)
+}
+
+func (h *HTTPHandler) adminScript(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("If-None-Match") == h.adminJSETag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=0, must-revalidate")
+	w.Header().Set("ETag", h.adminJSETag)
+	_, _ = w.Write(h.adminJS)
 }
 
 func (h *HTTPHandler) setupPage(w http.ResponseWriter, r *http.Request) {
@@ -269,11 +309,106 @@ func (h *HTTPHandler) dashboard(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	dashboard := dashboardView{}
+	if h.dashboardQueries != nil {
+		summary, err := h.dashboardQueries.Dashboard(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		dashboard = newDashboardView(summary)
+	}
+	if h.pendingComments != nil {
+		pending, err := h.pendingComments.PendingCount(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		dashboard.PendingCommentCount = pending
+	}
 	h.render(w, r, "dashboard.html", map[string]any{
-		"SiteName": siteName,
-		"Username": session.Username,
-		"CSRF":     h.service.SessionCSRF(session.Token),
+		"SiteName":     siteName,
+		"Username":     session.Username,
+		"CSRF":         h.service.SessionCSRF(session.Token),
+		"AdminSection": "overview",
+		"Dashboard":    dashboard,
 	})
+}
+
+type dashboardView struct {
+	DraftCount          int
+	ScheduledCount      int
+	PublishedCount      int
+	TrashedCount        int
+	PublishedThisWeek   int
+	PendingCommentCount int
+	WithoutExcerptCount int
+	RecentEdits         []dashboardContentView
+	RecentPublished     []dashboardContentView
+}
+
+type dashboardContentView struct {
+	Title        string
+	Kind         string
+	Status       string
+	UpdatedAt    string
+	PublishedAt  string
+	EditURL      string
+	PublicURL    string
+	HasPublicURL bool
+}
+
+func newDashboardView(summary publishing.DashboardSummary) dashboardView {
+	view := dashboardView{
+		DraftCount:          summary.DraftCount,
+		ScheduledCount:      summary.ScheduledCount,
+		PublishedCount:      summary.PublishedCount,
+		TrashedCount:        summary.TrashedCount,
+		PublishedThisWeek:   summary.PublishedThisWeek,
+		WithoutExcerptCount: summary.WithoutExcerptCount,
+	}
+	for _, content := range summary.RecentEdits {
+		view.RecentEdits = append(view.RecentEdits, dashboardContent(content))
+	}
+	for _, content := range summary.RecentPublished {
+		view.RecentPublished = append(view.RecentPublished, dashboardContent(content))
+	}
+	return view
+}
+
+func dashboardContent(content publishing.AdminContentSummary) dashboardContentView {
+	descriptor := "articles"
+	kind := "文章"
+	publicURL := "/posts/" + content.Slug
+	if content.Kind == "page" {
+		descriptor = "pages"
+		kind = "页面"
+		publicURL = "/" + content.Slug
+	}
+	view := dashboardContentView{
+		Title:        content.Title,
+		Kind:         kind,
+		Status:       dashboardStatusLabel(content.Status),
+		UpdatedAt:    content.UpdatedAt.Format("2006-01-02 15:04"),
+		EditURL:      fmt.Sprintf("/admin/%s/%d/edit", descriptor, content.ID),
+		PublicURL:    publicURL,
+		HasPublicURL: content.Status == "published" && content.Slug != "",
+	}
+	if content.PublishedAt != nil {
+		view.PublishedAt = content.PublishedAt.Format("2006-01-02 15:04")
+	}
+	return view
+}
+
+func dashboardStatusLabel(status string) string {
+	switch status {
+	case "published":
+		return "已发布"
+	case "scheduled":
+		return "定时发布"
+	default:
+		return "草稿"
+	}
 }
 
 func (h *HTTPHandler) logout(w http.ResponseWriter, r *http.Request) {

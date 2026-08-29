@@ -11,20 +11,21 @@ var (
 )
 
 type Item struct {
-	ID           int64
-	PublicID     []byte
-	PublicIDText string
-	OriginalName string
-	MIMEType     string
-	SizeBytes    int64
-	Width        int
-	Height       int
-	ContentHash  []byte
-	AltText      string
-	ObjectKey    string
-	Version      int
-	CreatedAt    time.Time
-	Variants     []Variant
+	ID             int64
+	PublicID       []byte
+	PublicIDText   string
+	OriginalName   string
+	MIMEType       string
+	SizeBytes      int64
+	Width          int
+	Height         int
+	ContentHash    []byte
+	AltText        string
+	ObjectKey      string
+	Version        int
+	ReferenceCount int
+	CreatedAt      time.Time
+	Variants       []Variant
 }
 
 type Variant struct {

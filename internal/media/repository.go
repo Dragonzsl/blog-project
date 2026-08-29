@@ -147,7 +147,7 @@ func (r *Repository) variants(ctx context.Context, mediaID int64) ([]Variant, er
 	return result, rows.Err()
 }
 
-const mediaSelect = `SELECT m.id,m.public_id,m.original_name,m.mime_type,m.size_bytes,m.width,m.height,m.content_hash,m.alt_text,m.object_key,m.version,m.created_at FROM media m`
+const mediaSelect = `SELECT m.id,m.public_id,m.original_name,m.mime_type,m.size_bytes,m.width,m.height,m.content_hash,m.alt_text,m.object_key,m.version,(SELECT COUNT(*) FROM media_references mr WHERE mr.media_id=m.id),m.created_at FROM media m`
 
 type scanner interface{ Scan(dest ...any) error }
 
@@ -155,7 +155,7 @@ func scanItem(row scanner) (Item, error) {
 	var item Item
 	var width, height sql.NullInt64
 	var created int64
-	err := row.Scan(&item.ID, &item.PublicID, &item.OriginalName, &item.MIMEType, &item.SizeBytes, &width, &height, &item.ContentHash, &item.AltText, &item.ObjectKey, &item.Version, &created)
+	err := row.Scan(&item.ID, &item.PublicID, &item.OriginalName, &item.MIMEType, &item.SizeBytes, &width, &height, &item.ContentHash, &item.AltText, &item.ObjectKey, &item.Version, &item.ReferenceCount, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Item{}, ErrNotFound
 	}

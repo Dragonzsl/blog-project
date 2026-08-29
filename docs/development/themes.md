@@ -1,6 +1,6 @@
 # 主题开发手册
 
-主题是受限的 Go `html/template` 资源包，不是服务端代码。分发包至少包含 `theme.json`、`templates/*.html`、`assets/theme.css` 和许可证；建议同时提供 `preview.webp` 与一组固定夹具。
+主题是受限的 Go `html/template` 资源包，不是服务端代码。分发包至少包含 `theme.json`、`templates/*.html`、`assets/theme.css` 和许可证；可选提供 `assets/theme.js`，建议同时提供 `preview.webp` 与一组固定夹具。
 
 ## 清单
 
@@ -19,11 +19,11 @@
 
 ## 可用视图
 
-模板只接收版本化的公开 `SiteView`、`ContentView`、`CollectionView`、`NavigationView`、`MediaView` 和 `PageContext`。正文已经由核心清洗为安全 HTML；不要在主题内引入 `safeHTML` 或读取环境变量、文件、数据库。
+模板只接收版本化的公开 `SiteView`、`ContentView`、`CollectionView`、`HomePageData`、`DirectoryView`、`SearchPageData`、`StatusView`、`NavigationView`、`MediaView` 和 `PageContext`。正文已经由核心清洗为安全 HTML；不要在主题内引入 `safeHTML` 或读取环境变量、文件、数据库。旧主题缺少新增目录/状态模板时，核心会提供内嵌的默认回退模板。
 
 ## 插槽与性能
 
-标准插槽为 `head.metadata`、`body.start`、`article.before`、`article.after`、`article.comments`、`body.end`。主题自行决定位置，但声明支持某个能力后必须渲染相应插槽。默认主题 CSS 压缩后不超过 40 KiB，阅读必需 JavaScript 不超过 15 KiB；不要默认请求外部字体、分析脚本或图标 CDN。
+标准插槽为 `head.metadata`、`body.start`、`article.before`、`article.after`、`article.comments`、`body.end`。主题自行决定位置，但声明支持某个能力后必须渲染相应插槽。默认主题 CSS 压缩后不超过 40 KiB，阅读必需 JavaScript 不超过 15 KiB；脚本资源必须同源并使用指纹 URL。不要默认请求外部字体、分析脚本或图标 CDN。
 
 ## 本地验证
 

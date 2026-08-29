@@ -3,6 +3,8 @@ package organization
 import (
 	"errors"
 	"time"
+
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 var (
@@ -30,6 +32,22 @@ type Tag struct {
 	Description string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+}
+
+type PublicCategorySummary struct {
+	Category      Category
+	ArticleCount  int
+	LatestTitle   string
+	LatestPath    string
+	LatestPublish time.Time
+}
+
+type PublicTagSummary struct {
+	Tag           Tag
+	ArticleCount  int
+	LatestTitle   string
+	LatestPath    string
+	LatestPublish time.Time
 }
 
 type NavigationItem struct {
@@ -69,6 +87,18 @@ type ContentOption struct {
 type Taxonomy struct {
 	Category *Category
 	Tags     []Tag
+}
+
+type PublicCategoryPage struct {
+	Category   Category
+	ArticleIDs []int64
+	Pagination pagination.Info
+}
+
+type PublicTagPage struct {
+	Tag        Tag
+	ArticleIDs []int64
+	Pagination pagination.Info
 }
 
 type TermInput struct {

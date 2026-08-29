@@ -413,13 +413,30 @@ func NewThemeFromDirectory(root string, manifest ThemeManifest) (*Theme, error) 
 	if err != nil {
 		return nil, fmt.Errorf("parse theme templates: %w", err)
 	}
+	// New public page templates are additive to the theme API. Older themes
+	// keep working with their existing templates while the core supplies the
+	// default directory and status presentation when they do not override it.
+	if templates, err = templates.ParseFS(defaulttheme.Files, "templates/directory.html", "templates/status.html"); err != nil {
+		return nil, fmt.Errorf("add default public templates: %w", err)
+	}
 	css, err := os.ReadFile(filepath.Join(root, "assets", "theme.css"))
 	if err != nil {
 		return nil, fmt.Errorf("read theme stylesheet: %w", err)
 	}
+	js, err := os.ReadFile(filepath.Join(root, "assets", "theme.js"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read theme script: %w", err)
+	}
 	hash := sha256.Sum256(css)
 	assetHash := hex.EncodeToString(hash[:8])
-	return &Theme{templates: templates, markdown: NewMarkdown(), css: css, assetHash: assetHash, assetURL: "/assets/theme/" + manifest.ID + "/" + assetHash + "/theme.css", id: manifest.ID, version: manifest.Version, assetRoot: filepath.Join(root, "assets")}, nil
+	scriptHash := ""
+	scriptURL := ""
+	if len(js) > 0 {
+		digest := sha256.Sum256(js)
+		scriptHash = hex.EncodeToString(digest[:8])
+		scriptURL = "/assets/theme/" + manifest.ID + "/" + scriptHash + "/theme.js"
+	}
+	return &Theme{templates: templates, markdown: NewMarkdown(), css: css, js: js, assetHash: assetHash, scriptHash: scriptHash, assetURL: "/assets/theme/" + manifest.ID + "/" + assetHash + "/theme.css", scriptURL: scriptURL, id: manifest.ID, version: manifest.Version, assetRoot: filepath.Join(root, "assets")}, nil
 }
 
 type ThemeManager struct {

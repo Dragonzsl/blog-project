@@ -103,6 +103,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		RevisionLimit:      cfg.Publishing.RevisionLimit,
 		TrashRetention:     time.Duration(cfg.Publishing.TrashRetentionDays) * 24 * time.Hour,
 	})
+	identityHTTP.SetDashboardQueries(publishingService)
 	publishingHTTP, err := publishing.NewHTTPHandler(publishingService, identityHTTP, identityService, logger)
 	if err != nil {
 		db.Close()
@@ -205,6 +206,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	presentationHTTP.SetDiscovery(discoveryService)
 	presentationHTTP.SetThemeManager(themeManager)
 	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration)
+	identityHTTP.SetPendingCommentQueries(commentService)
 	if cfg.Mail.Enabled {
 		commentService.SetNotifier(outbox, cfg.Mail.From)
 	}
@@ -251,6 +253,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	presentationHTTP.RegisterPublic(router)
 	extensionRegistry := extensions.NewRegistry(db, router, logger)
 	presentationHTTP.SetAnalyticsRecorder(gatedAnalyticsRecorder{registry: extensionRegistry, service: analyticsService})
+	presentationHTTP.SetFeatureProvider(extensionRegistry)
 	publishingService.SetEventSink(extensionRegistry)
 	commentService.SetEventSink(extensionRegistry)
 	extensionHTTP, err := extensions.NewHTTPHandler(extensionRegistry, identityHTTP, logger)

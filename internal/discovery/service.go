@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 var ErrInvalidQuery = errors.New("search query is invalid")
@@ -86,23 +88,34 @@ func (s *Service) SyncAllDirty(ctx context.Context) (int, error) {
 }
 
 func (s *Service) Search(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
-	query.Text = strings.TrimSpace(query.Text)
-	if len([]rune(query.Text)) < 2 || len([]rune(query.Text)) > 100 {
-		return nil, ErrInvalidQuery
-	}
-	if query.Kind != "" && query.Kind != "article" && query.Kind != "page" {
-		return nil, ErrInvalidQuery
-	}
-	if query.Sort != "" && query.Sort != "relevance" && query.Sort != "newest" {
-		return nil, ErrInvalidQuery
-	}
-	if query.Limit < 1 || query.Limit > s.options.MaxResults {
-		query.Limit = s.options.MaxResults
-	}
-	if _, err := s.SyncAllDirty(ctx); err != nil {
+	page, err := s.SearchPage(ctx, query)
+	if err != nil {
 		return nil, err
 	}
-	return s.repository.Search(ctx, query)
+	return page.Results, nil
+}
+
+func (s *Service) SearchPage(ctx context.Context, query SearchQuery) (SearchPage, error) {
+	query.Text = strings.TrimSpace(query.Text)
+	if len([]rune(query.Text)) < 2 || len([]rune(query.Text)) > 100 {
+		return SearchPage{}, ErrInvalidQuery
+	}
+	if query.Kind != "" && query.Kind != "article" && query.Kind != "page" {
+		return SearchPage{}, ErrInvalidQuery
+	}
+	if query.Sort != "" && query.Sort != "relevance" && query.Sort != "newest" {
+		return SearchPage{}, ErrInvalidQuery
+	}
+	perPage := query.PerPage
+	if perPage < 1 {
+		perPage = query.Limit
+	}
+	request := pagination.Normalize(pagination.Request{Page: query.Page, PerPage: perPage}, s.options.MaxResults, s.options.MaxResults)
+	query.Page, query.PerPage, query.Limit = request.Page, request.PerPage, request.PerPage
+	if _, err := s.SyncAllDirty(ctx); err != nil {
+		return SearchPage{}, err
+	}
+	return s.repository.SearchPage(ctx, query)
 }
 
 func (s *Service) Feed(ctx context.Context) ([]FeedItem, error) {
@@ -111,6 +124,18 @@ func (s *Service) Feed(ctx context.Context) ([]FeedItem, error) {
 
 func (s *Service) Sitemap(ctx context.Context) ([]SitemapEntry, error) {
 	return s.repository.Sitemap(ctx, s.options.SitemapLimit)
+}
+
+func (s *Service) ArchiveIndex(ctx context.Context) ([]ArchiveYear, error) {
+	return s.repository.ArchiveIndex(ctx)
+}
+
+func (s *Service) ArchiveMonthPage(ctx context.Context, year, month int, request pagination.Request) (ArchivePage, error) {
+	if year < 1970 || year > 9999 || month < 1 || month > 12 {
+		return ArchivePage{}, ErrNotFound
+	}
+	request = pagination.Normalize(request, 20, 50)
+	return s.repository.ArchiveMonthPage(ctx, year, month, request)
 }
 
 func (s *Service) ResolveRedirect(ctx context.Context, pathKey string) (Redirect, error) {

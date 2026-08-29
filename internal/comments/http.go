@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,7 +68,7 @@ func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 }
 
 func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
-	article, err := h.lookup.PublicArticle(r.Context(), chi.URLParam(r, "slug"))
+	article, err := h.lookup.PublicArticle(r.Context(), publicSlug(r))
 	if err != nil {
 		http.NotFound(w, r)
 		return
@@ -98,7 +99,7 @@ func (h *HTTPHandler) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many comments", http.StatusTooManyRequests)
 		return
 	}
-	comment, err := h.service.Create(r.Context(), chi.URLParam(r, "slug"), Input{DisplayName: r.FormValue("display_name"), Email: r.FormValue("email"), Website: r.FormValue("website"), Body: r.FormValue("body"), ParentID: parseID(r.FormValue("parent_id"))})
+	comment, err := h.service.Create(r.Context(), publicSlug(r), Input{DisplayName: r.FormValue("display_name"), Email: r.FormValue("email"), Website: r.FormValue("website"), Body: r.FormValue("body"), ParentID: parseID(r.FormValue("parent_id"))})
 	if err != nil {
 		status := http.StatusUnprocessableEntity
 		if errors.Is(err, ErrNotFound) {
@@ -139,7 +140,8 @@ func (h *HTTPHandler) pending(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = h.templates.ExecuteTemplate(w, "comments.html", map[string]any{"Comments": comments, "CSRF": h.security.CSRFToken(r)})
+	notice, message := commentFeedback(r)
+	_ = h.templates.ExecuteTemplate(w, "comments.html", map[string]any{"Comments": comments, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins", "Notice": notice, "Error": message})
 }
 func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
@@ -155,16 +157,52 @@ func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		h.error(w, r, err)
+		query := url.Values{"error": []string{"moderate"}}
+		if errors.Is(err, ErrInvalid) {
+			query.Set("error", "invalid")
+		}
+		http.Redirect(w, r, "/admin/plugins/comments.local/comments?"+query.Encode(), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/admin/plugins/comments.local/comments", http.StatusSeeOther)
+	status := r.FormValue("status")
+	if status == "spam" {
+		status = "spam"
+	} else {
+		status = "approved"
+	}
+	http.Redirect(w, r, "/admin/plugins/comments.local/comments?notice="+url.QueryEscape(status), http.StatusSeeOther)
 }
 func parseID(value string) int64 { id, _ := strconv.ParseInt(value, 10, 64); return id }
 func (h *HTTPHandler) error(w http.ResponseWriter, r *http.Request, err error) {
 	h.logger.ErrorContext(r.Context(), "comment request failed", "error", err)
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
+
+func commentFeedback(r *http.Request) (string, string) {
+	switch r.URL.Query().Get("notice") {
+	case "approved":
+		return "评论已通过并公开。", ""
+	case "spam":
+		return "评论已标记为垃圾。", ""
+	}
+	switch r.URL.Query().Get("error") {
+	case "invalid":
+		return "", "评论操作无效，请刷新后重试。"
+	case "moderate":
+		return "", "评论状态更新失败，请稍后重试。"
+	}
+	return "", ""
+}
+
+func publicSlug(r *http.Request) string {
+	raw := chi.URLParam(r, "slug")
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -188,7 +226,7 @@ func (h ExternalHTTPHandler) show(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	location := endpoint + "/" + chi.URLParam(r, "slug")
+	location := endpoint + "/" + url.PathEscape(publicSlug(r))
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = fmt.Fprintf(w, `<p>评论由外部服务托管：<a rel="nofollow" href="%s">打开评论</a></p>`, template.HTMLEscapeString(location))

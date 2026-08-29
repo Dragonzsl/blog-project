@@ -10,10 +10,14 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	htmlstd "html"
 	"html/template"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +26,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/discovery"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	platformslug "github.com/zhushilin/blog-project/internal/platform/slug"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
@@ -31,7 +36,9 @@ type ContentQueries interface {
 	Page(context.Context, int64) (publishing.Article, error)
 	PublicArticle(context.Context, string) (publishing.Article, error)
 	PublishedArticles(context.Context, int) ([]publishing.Article, error)
+	PublicArticlesPage(context.Context, pagination.Request) (publishing.PublicArticlePage, error)
 	PublicArticleByID(context.Context, int64) (publishing.Article, error)
+	PublicArticleNavigation(context.Context, int64, int) (publishing.PublicArticleNavigation, error)
 	PublicPage(context.Context, string) (publishing.Article, error)
 }
 
@@ -39,6 +46,10 @@ type OrganizationQueries interface {
 	PublicNavigation(context.Context, string) ([]organization.NavigationItem, error)
 	PublicCategory(context.Context, string, int) (organization.Category, []int64, error)
 	PublicTag(context.Context, string, int) (organization.Tag, []int64, error)
+	PublicCategoryPage(context.Context, string, pagination.Request) (organization.PublicCategoryPage, error)
+	PublicTagPage(context.Context, string, pagination.Request) (organization.PublicTagPage, error)
+	PublicCategories(context.Context) ([]organization.PublicCategorySummary, error)
+	PublicTags(context.Context) ([]organization.PublicTagSummary, error)
 }
 
 type SiteNamer interface {
@@ -49,13 +60,20 @@ type DiscoveryQueries interface {
 	BaseURL() string
 	AbsoluteURL(string) string
 	Search(context.Context, discovery.SearchQuery) ([]discovery.SearchResult, error)
+	SearchPage(context.Context, discovery.SearchQuery) (discovery.SearchPage, error)
 	Feed(context.Context) ([]discovery.FeedItem, error)
 	Sitemap(context.Context) ([]discovery.SitemapEntry, error)
+	ArchiveIndex(context.Context) ([]discovery.ArchiveYear, error)
+	ArchiveMonthPage(context.Context, int, int, pagination.Request) (discovery.ArchivePage, error)
 	ResolveRedirect(context.Context, string) (discovery.Redirect, error)
 }
 
 type AnalyticsRecorder interface {
 	Record(context.Context, string, string) error
+}
+
+type FeatureProvider interface {
+	Enabled(string) bool
 }
 
 type StateRepository struct {
@@ -85,6 +103,7 @@ type HTTPHandler struct {
 	organization OrganizationQueries
 	discovery    DiscoveryQueries
 	analytics    AnalyticsRecorder
+	features     FeatureProvider
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
@@ -92,6 +111,8 @@ func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = ser
 func (h *HTTPHandler) SetThemeManager(manager *ThemeManager) { h.themeManager = manager }
 
 func (h *HTTPHandler) SetAnalyticsRecorder(recorder AnalyticsRecorder) { h.analytics = recorder }
+
+func (h *HTTPHandler) SetFeatureProvider(provider FeatureProvider) { h.features = provider }
 
 func (h *HTTPHandler) currentTheme() *Theme {
 	if h.themeManager != nil {
@@ -109,12 +130,24 @@ func NewHTTPHandler(content ContentQueries, siteNamer SiteNamer, state *StateRep
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
+	router.NotFound(h.notFound)
+	router.MethodNotAllowed(h.methodNotAllowed)
 	router.Get("/", h.home)
 	router.Head("/", h.home)
+	router.Get("/articles", h.articles)
+	router.Head("/articles", h.articles)
+	router.Get("/archive", h.archiveIndex)
+	router.Head("/archive", h.archiveIndex)
+	router.Get("/archive/{year}/{month}", h.archiveMonth)
+	router.Head("/archive/{year}/{month}", h.archiveMonth)
+	router.Get("/categories", h.categoriesIndex)
+	router.Head("/categories", h.categoriesIndex)
 	router.Get("/posts/{slug}", h.article)
 	router.Head("/posts/{slug}", h.article)
 	router.Get("/categories/{slug}", h.category)
 	router.Head("/categories/{slug}", h.category)
+	router.Get("/tags", h.tagsIndex)
+	router.Head("/tags", h.tagsIndex)
 	router.Get("/tags/{slug}", h.tag)
 	router.Head("/tags/{slug}", h.tag)
 	router.Get("/search", h.search)
@@ -125,8 +158,12 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Head("/sitemap.xml", h.sitemap)
 	router.Get("/robots.txt", h.robots)
 	router.Head("/robots.txt", h.robots)
+	router.Get("/llms.txt", h.llms)
+	router.Head("/llms.txt", h.llms)
 	router.Get("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
 	router.Head("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
+	router.Get("/assets/theme/{themeID}/{fingerprint}/theme.js", h.scriptAsset)
+	router.Head("/assets/theme/{themeID}/{fingerprint}/theme.js", h.scriptAsset)
 	router.Get("/{slug}", h.page)
 	router.Head("/{slug}", h.page)
 }
@@ -142,11 +179,41 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
+		cards := articleCards(articleDataList(articles))
+		homeView := HomePageData{}
+		if len(cards) > 0 {
+			homeView.Featured = &cards[0]
+			if len(cards) > 1 {
+				homeView.Recent = cards[1:]
+			}
+		}
+		if h.organization != nil {
+			categories, err := h.organization.PublicCategories(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			homeView.Categories = termSummariesFromCategories(categories)
+		}
+		if h.discovery != nil {
+			archive, err := h.discovery.ArchiveIndex(ctx)
+			if err != nil {
+				return nil, "", err
+			}
+			homeView.Archive = archiveMonthViews(archive, 6)
+		}
+		if h.content != nil {
+			about, aboutErr := h.content.PublicPage(ctx, "about")
+			if aboutErr == nil {
+				homeView.About = toArticleCard(articleData(about))
+			} else if !errors.Is(aboutErr, publishing.ErrNotFound) {
+				return nil, "", aboutErr
+			}
+		}
 		siteName, err := h.siteNamer.SiteName(ctx)
 		if err != nil {
 			return nil, "", err
 		}
-		navigation, err := h.navigation(ctx)
+		navigation, err := h.navigation(ctx, "/")
 		if err != nil {
 			return nil, "", err
 		}
@@ -158,7 +225,7 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 		theme := h.currentTheme()
-		body, err := theme.RenderHomePage(siteName, articleDataList(articles), navigation, metadata)
+		body, err := theme.RenderHomePageWithView(siteName, homeView, navigation, metadata, cards)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
 			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -167,8 +234,177 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (h *HTTPHandler) articles(w http.ResponseWriter, r *http.Request) {
+	pageNumber := requestedPage(r)
+	request := pagination.Request{Page: pageNumber, PerPage: 20}
+	cacheKey := fmt.Sprintf("articles:%d", pageNumber)
+	h.serveCached(w, r, cacheKey, func(ctx context.Context) ([]byte, string, error) {
+		page, err := h.content.PublicArticlesPage(ctx, request)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		basePath := "/articles"
+		navigation, err := h.navigation(ctx, basePath)
+		if err != nil {
+			return nil, "", err
+		}
+		metadata := h.metadata(siteName, "文章 · "+siteName, "浏览"+siteName+"的全部公开文章。", basePath, "website", nil)
+		collection := CollectionView{
+			Title: "文章", Description: "按发布时间浏览所有公开文章。", Items: articleCards(articleDataList(page.Articles)),
+			Pagination:   paginationView(page.Pagination, func(number int) string { return pagePath("/articles", number) }),
+			CanonicalURL: h.absoluteURL("/articles"),
+		}
+		body, err := h.currentTheme().RenderCollectionPage(siteName, collection, navigation, metadata)
+		lastModified := ""
+		if len(page.Articles) > 0 && page.Articles[0].PublishedRevisionAt != nil {
+			lastModified = page.Articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
+		}
+		return body, lastModified, err
+	})
+}
+
+func (h *HTTPHandler) categoriesIndex(w http.ResponseWriter, r *http.Request) {
+	if h.organization == nil {
+		h.renderStatus(w, r, http.StatusNotFound, "分类暂不可用", "站点还没有启用内容组织能力。")
+		return
+	}
+	h.serveCached(w, r, "categories-index", func(ctx context.Context) ([]byte, string, error) {
+		categories, err := h.organization.PublicCategories(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx, "/categories")
+		if err != nil {
+			return nil, "", err
+		}
+		metadata := h.metadata(siteName, "分类 · "+siteName, "按主题浏览"+siteName+"的公开文章。", "/categories", "website", nil)
+		directory := DirectoryView{
+			Title:       "分类",
+			Description: "按主题浏览公开文章，找到一组值得连续阅读的内容。",
+			Categories:  termSummariesFromCategories(categories),
+		}
+		body, err := h.currentTheme().RenderDirectoryPage(siteName, directory, navigation, metadata)
+		return body, "", err
+	})
+}
+
+func (h *HTTPHandler) tagsIndex(w http.ResponseWriter, r *http.Request) {
+	if h.organization == nil {
+		h.renderStatus(w, r, http.StatusNotFound, "标签暂不可用", "站点还没有启用内容组织能力。")
+		return
+	}
+	h.serveCached(w, r, "tags-index", func(ctx context.Context) ([]byte, string, error) {
+		tags, err := h.organization.PublicTags(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx, "/tags")
+		if err != nil {
+			return nil, "", err
+		}
+		metadata := h.metadata(siteName, "标签 · "+siteName, "按关键词浏览"+siteName+"的公开文章。", "/tags", "website", nil)
+		directory := DirectoryView{
+			Title:       "标签",
+			Description: "用关键词穿行于公开文章，发现相互连接的想法。",
+			Tags:        termSummariesFromTags(tags),
+		}
+		body, err := h.currentTheme().RenderDirectoryPage(siteName, directory, navigation, metadata)
+		return body, "", err
+	})
+}
+
+func (h *HTTPHandler) archiveIndex(w http.ResponseWriter, r *http.Request) {
+	if h.discovery == nil {
+		h.renderStatus(w, r, http.StatusNotFound, "归档暂不可用", "站点还没有启用公开内容发现能力。")
+		return
+	}
+	h.serveCached(w, r, "archive-index", func(ctx context.Context) ([]byte, string, error) {
+		archive, err := h.discovery.ArchiveIndex(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx, "/archive")
+		if err != nil {
+			return nil, "", err
+		}
+		metadata := h.metadata(siteName, "归档 · "+siteName, "按年份和月份浏览"+siteName+"的公开文章。", "/archive", "website", nil)
+		directory := DirectoryView{
+			Title:        "归档",
+			Description:  "按年份和月份回看写作轨迹。",
+			ArchiveYears: archiveYearViews(archive),
+		}
+		body, err := h.currentTheme().RenderDirectoryPage(siteName, directory, navigation, metadata)
+		return body, "", err
+	})
+}
+
+func (h *HTTPHandler) archiveMonth(w http.ResponseWriter, r *http.Request) {
+	if h.discovery == nil {
+		h.renderStatus(w, r, http.StatusNotFound, "归档暂不可用", "站点还没有启用公开内容发现能力。")
+		return
+	}
+	year, yearErr := strconv.Atoi(chi.URLParam(r, "year"))
+	month, monthErr := strconv.Atoi(chi.URLParam(r, "month"))
+	if yearErr != nil || monthErr != nil {
+		h.renderStatus(w, r, http.StatusNotFound, "归档不存在", "这个时间段没有可浏览的公开文章。")
+		return
+	}
+	pageNumber := requestedPage(r)
+	request := pagination.Request{Page: pageNumber, PerPage: 20}
+	basePath := archiveMonthPath(year, month)
+	h.serveCached(w, r, fmt.Sprintf("archive:%d:%02d:%d", year, month, pageNumber), func(ctx context.Context) ([]byte, string, error) {
+		page, err := h.discovery.ArchiveMonthPage(ctx, year, month, request)
+		if err != nil {
+			return nil, "", err
+		}
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx, basePath)
+		if err != nil {
+			return nil, "", err
+		}
+		title := fmt.Sprintf("%d 年 %02d 月", page.Year, page.Month)
+		metadata := h.metadata(siteName, title+" · "+siteName, "浏览"+title+"发布的公开文章。", basePath, "website", nil)
+		items := make([]ArticleCard, 0, len(page.Results))
+		for _, result := range page.Results {
+			items = append(items, articleCardFromSearchResult(result))
+		}
+		collection := CollectionView{
+			Title:        title,
+			Description:  fmt.Sprintf("这一时间段共发布 %d 篇文章。", page.Pagination.Total),
+			Items:        items,
+			Pagination:   paginationView(page.Pagination, func(number int) string { return pagePath(basePath, number) }),
+			CanonicalURL: h.absoluteURL(basePath),
+		}
+		body, err := h.currentTheme().RenderCollectionPage(siteName, collection, navigation, metadata)
+		lastModified := ""
+		if len(page.Results) > 0 {
+			lastModified = page.Results[0].PublishedAt.Format(http.TimeFormat)
+		}
+		return body, lastModified, err
+	})
+}
+
 func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
-	slug := chi.URLParam(r, "slug")
+	slug := publicSlugParam(r)
 	h.serveCached(w, r, "article:"+slug, func(ctx context.Context) ([]byte, string, error) {
 		article, err := h.content.PublicArticle(ctx, slug)
 		if err != nil {
@@ -178,14 +414,22 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		navigation, err := h.navigation(ctx)
+		path := "/posts/" + article.Slug
+		navigation, err := h.navigation(ctx, path)
 		if err != nil {
 			return nil, "", err
 		}
-		path := "/posts/" + article.Slug
 		metadata := h.articleMetadata(siteName, article, path)
+		view := articleData(article)
+		if article.Kind == "article" {
+			articleNavigation, err := h.content.PublicArticleNavigation(ctx, article.ID, 3)
+			if err != nil {
+				return nil, "", err
+			}
+			view = withArticleNavigation(view, articleNavigation)
+		}
 		theme := h.currentTheme()
-		body, err := theme.RenderArticlePage(siteName, articleData(article), false, "", navigation, metadata)
+		body, err := theme.RenderArticlePage(siteName, view, false, "", navigation, metadata)
 		lastModified := ""
 		if article.PublishedRevisionAt != nil {
 			lastModified = article.PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -195,7 +439,7 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
-	slug := chi.URLParam(r, "slug")
+	slug := publicSlugParam(r)
 	h.serveCached(w, r, "page:"+slug, func(ctx context.Context) ([]byte, string, error) {
 		page, err := h.content.PublicPage(ctx, slug)
 		if err != nil {
@@ -205,7 +449,7 @@ func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		navigation, err := h.navigation(ctx)
+		navigation, err := h.navigation(ctx, "/"+page.Slug)
 		if err != nil {
 			return nil, "", err
 		}
@@ -231,21 +475,26 @@ func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, ki
 		http.NotFound(w, r)
 		return
 	}
-	slug := chi.URLParam(r, "slug")
-	h.serveCached(w, r, kind+":"+slug, func(ctx context.Context) ([]byte, string, error) {
+	slug := publicSlugParam(r)
+	pageNumber := requestedPage(r)
+	request := pagination.Request{Page: pageNumber, PerPage: 20}
+	h.serveCached(w, r, fmt.Sprintf("%s:%s:%d", kind, slug, pageNumber), func(ctx context.Context) ([]byte, string, error) {
 		var title, description, canonicalSlug string
 		var ids []int64
+		var pageInfo pagination.Info
 		var err error
 		if kind == "category" {
-			var term organization.Category
-			term, ids, err = h.organization.PublicCategory(ctx, slug, 50)
-			title, description = term.Name, term.Description
-			canonicalSlug = term.Slug
+			page, pageErr := h.organization.PublicCategoryPage(ctx, slug, request)
+			err = pageErr
+			ids, pageInfo = page.ArticleIDs, page.Pagination
+			title, description = page.Category.Name, page.Category.Description
+			canonicalSlug = page.Category.Slug
 		} else {
-			var term organization.Tag
-			term, ids, err = h.organization.PublicTag(ctx, slug, 50)
-			title, description = "# "+term.Name, term.Description
-			canonicalSlug = term.Slug
+			page, pageErr := h.organization.PublicTagPage(ctx, slug, request)
+			err = pageErr
+			ids, pageInfo = page.ArticleIDs, page.Pagination
+			title, description = "# "+page.Tag.Name, page.Tag.Description
+			canonicalSlug = page.Tag.Slug
 		}
 		if err != nil {
 			return nil, "", err
@@ -262,17 +511,18 @@ func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, ki
 		if err != nil {
 			return nil, "", err
 		}
-		navigation, err := h.navigation(ctx)
+		basePath := taxonomyPath(kind, canonicalSlug)
+		navigation, err := h.navigation(ctx, basePath)
 		if err != nil {
 			return nil, "", err
 		}
-		path := "/" + kind + "s/" + canonicalSlug
-		metadata := h.metadata(siteName, title+" · "+siteName, description, path, "website", map[string]any{
+		metadata := h.metadata(siteName, title+" · "+siteName, description, basePath, "website", map[string]any{
 			"@context": "https://schema.org", "@type": "CollectionPage", "name": title,
-			"url": h.absoluteURL(path), "description": description,
+			"url": h.absoluteURL(basePath), "description": description,
 		})
 		theme := h.currentTheme()
-		body, err := theme.RenderListingPage(siteName, title, description, articleDataList(articles), navigation, metadata)
+		collection := CollectionView{Title: title, Description: description, Items: articleCards(articleDataList(articles)), Pagination: paginationView(pageInfo, func(number int) string { return pagePath(basePath, number) }), CanonicalURL: h.absoluteURL(basePath)}
+		body, err := theme.RenderCollectionPage(siteName, collection, navigation, metadata)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
 			lastModified = articles[0].PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -294,15 +544,30 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 	if sortOrder == "" {
 		sortOrder = "relevance"
 	}
+	pageNumber := requestedPage(r)
 	category, categoryValid := normalizedFilter(categoryRaw)
 	tag, tagValid := normalizedFilter(tagRaw)
 	page := SearchPageData{Query: query, Kind: kind, Category: categoryRaw, Tag: tagRaw, Sort: sortOrder}
+	if h.organization != nil {
+		categories, err := h.organization.PublicCategories(r.Context())
+		if err != nil {
+			h.handleRenderError(w, r, err)
+			return
+		}
+		tags, err := h.organization.PublicTags(r.Context())
+		if err != nil {
+			h.handleRenderError(w, r, err)
+			return
+		}
+		page.CategoryOptions = filterOptionsFromCategories(categories)
+		page.TagOptions = filterOptionsFromTags(tags)
+	}
 	if query != "" {
 		if !categoryValid || !tagValid {
 			page.Invalid = true
 		} else {
-			results, err := h.discovery.Search(r.Context(), discovery.SearchQuery{
-				Text: query, Kind: kind, CategorySlug: category, TagSlug: tag, Sort: sortOrder, Limit: 50,
+			results, err := h.discovery.SearchPage(r.Context(), discovery.SearchQuery{
+				Text: query, Kind: kind, CategorySlug: category, TagSlug: tag, Sort: sortOrder, Page: pageNumber, PerPage: 20,
 			})
 			if errors.Is(err, discovery.ErrInvalidQuery) {
 				page.Invalid = true
@@ -311,11 +576,13 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 				return
 			} else {
 				page.Searched = true
-				for _, result := range results {
-					page.Results = append(page.Results, ArticleCard{
-						Kind: result.Kind, Path: result.Path, Title: result.Title, Excerpt: result.Excerpt,
-						PublishedAt: result.PublishedAt.Format("2006年01月02日"), PublishedISO: result.PublishedAt.Format(time.RFC3339),
-					})
+				page.Total = results.Pagination.Total
+				page.Pagination = paginationView(results.Pagination, func(number int) string { return searchPageURL(query, kind, categoryRaw, tagRaw, sortOrder, number) })
+				for _, result := range results.Results {
+					card := articleCardFromSearchResult(result)
+					card.HighlightedTitle = highlightText(result.Title, query)
+					card.HighlightedExcerpt = highlightText(result.Excerpt, query)
+					page.Results = append(page.Results, card)
 				}
 			}
 		}
@@ -325,7 +592,7 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	navigation, err := h.navigation(r.Context())
+	navigation, err := h.navigation(r.Context(), "/search")
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -462,6 +729,76 @@ func (h *HTTPHandler) robots(w http.ResponseWriter, r *http.Request) {
 	h.writeGenerated(w, r, "text/plain; charset=utf-8", body, "")
 }
 
+func (h *HTTPHandler) llms(w http.ResponseWriter, r *http.Request) {
+	if h.discovery == nil {
+		http.NotFound(w, r)
+		return
+	}
+	h.serveCachedDocument(w, r, "llms", "text/plain; charset=utf-8", func(ctx context.Context) ([]byte, string, error) {
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		items, err := h.discovery.Feed(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+
+		var document strings.Builder
+		document.WriteString("# ")
+		document.WriteString(llmsText(siteName))
+		document.WriteString("\n\n> 这是一个安静发布文章与思考的个人博客。\n\n")
+		document.WriteString("## 内容\n\n")
+		lastModified := ""
+		var latest time.Time
+		written := 0
+		for _, item := range items {
+			if strings.TrimSpace(item.Path) == "" || strings.TrimSpace(item.Title) == "" {
+				continue
+			}
+			document.WriteString("- [")
+			document.WriteString(llmsLinkText(item.Title))
+			document.WriteString("](<")
+			document.WriteString(h.absoluteURL(item.Path))
+			document.WriteString(">)")
+			if excerpt := llmsText(item.Excerpt); excerpt != "" {
+				document.WriteString(": ")
+				document.WriteString(excerpt)
+			}
+			document.WriteByte('\n')
+			written++
+			if item.UpdatedAt.After(latest) {
+				latest = item.UpdatedAt
+			}
+		}
+		if written == 0 {
+			document.WriteString("- 暂无已发布文章。\n")
+		}
+		document.WriteString("\n## 机器可读资源\n\n")
+		document.WriteString("- [RSS](<")
+		document.WriteString(h.absoluteURL("/rss.xml"))
+		document.WriteString(">)\n")
+		document.WriteString("- [Sitemap](<")
+		document.WriteString(h.absoluteURL("/sitemap.xml"))
+		document.WriteString(">)\n")
+		if !latest.IsZero() {
+			lastModified = latest.Format(http.TimeFormat)
+		}
+		return []byte(document.String()), lastModified, nil
+	})
+}
+
+func llmsText(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
+}
+
+func llmsLinkText(value string) string {
+	value = llmsText(value)
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "[", `\[`)
+	return strings.ReplaceAll(value, "]", `\]`)
+}
+
 func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 	id, kind, err := publishingContentID(r)
 	if err != nil {
@@ -481,21 +818,21 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	navigation, err := h.navigation(r.Context())
-	if err != nil {
-		h.handleRenderError(w, r, err)
-		return
-	}
 	backURL := fmt.Sprintf("/admin/articles/%d/edit", article.ID)
 	if kind == "page" {
 		backURL = fmt.Sprintf("/admin/pages/%d/edit", article.ID)
+	}
+	navigation, err := h.navigation(r.Context(), "")
+	if err != nil {
+		h.handleRenderError(w, r, err)
+		return
 	}
 	body, err := h.currentTheme().RenderArticlePage(siteName, articleData(article), true, backURL, navigation, PageMetadata{NoIndex: true})
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	setPublicSecurityHeaders(w)
+	setPublicSecurityHeaders(w, body)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -507,7 +844,7 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) asset(w http.ResponseWriter, r *http.Request) {
 	theme := h.currentTheme()
-	if chi.URLParam(r, "themeID") != theme.ThemeID() || chi.URLParam(r, "fingerprint") != theme.AssetHash() {
+	if theme == nil || chi.URLParam(r, "themeID") != theme.ThemeID() || chi.URLParam(r, "fingerprint") != theme.AssetHash() {
 		http.NotFound(w, r)
 		return
 	}
@@ -522,6 +859,26 @@ func (h *HTTPHandler) asset(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(theme.CSS())
+	}
+}
+
+func (h *HTTPHandler) scriptAsset(w http.ResponseWriter, r *http.Request) {
+	theme := h.currentTheme()
+	if theme == nil || theme.ScriptHash() == "" || chi.URLParam(r, "themeID") != theme.ThemeID() || chi.URLParam(r, "fingerprint") != theme.ScriptHash() {
+		http.NotFound(w, r)
+		return
+	}
+	etag := `"` + theme.ScriptHash() + `"`
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(theme.JS())
 	}
 }
 
@@ -631,36 +988,130 @@ func (h *HTTPHandler) handleRenderError(w http.ResponseWriter, r *http.Request, 
 		if h.tryRedirect(w, r) {
 			return
 		}
-		http.NotFound(w, r)
+		h.renderStatus(w, r, http.StatusNotFound, "页面不存在", "这篇内容可能已被移动、下线，或者地址还没有发布。")
 		return
 	}
 	if errors.Is(err, organization.ErrNotFound) {
 		if h.tryRedirect(w, r) {
 			return
 		}
-		http.NotFound(w, r)
+		h.renderStatus(w, r, http.StatusNotFound, "页面不存在", "这个分类、标签或导航地址暂时没有可公开浏览的内容。")
+		return
+	}
+	if errors.Is(err, discovery.ErrNotFound) {
+		if h.tryRedirect(w, r) {
+			return
+		}
+		h.renderStatus(w, r, http.StatusNotFound, "归档不存在", "这个时间段没有可浏览的公开文章。")
 		return
 	}
 	h.logger.ErrorContext(r.Context(), "render public page", "error", err)
-	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+	h.renderStatus(w, r, http.StatusInternalServerError, "页面暂时无法打开", "站点遇到了一点问题，请稍后再试。")
+}
+
+func (h *HTTPHandler) notFound(w http.ResponseWriter, r *http.Request) {
+	if h.tryRedirect(w, r) {
+		return
+	}
+	h.renderStatus(w, r, http.StatusNotFound, "页面不存在", "这篇内容可能已被移动、下线，或者地址还没有发布。")
+}
+
+func (h *HTTPHandler) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
+	h.renderStatus(w, r, http.StatusMethodNotAllowed, "暂不支持此操作", "这个地址不支持当前请求方式。")
+}
+
+func (h *HTTPHandler) renderStatus(w http.ResponseWriter, r *http.Request, statusCode int, title, message string) {
+	siteName := "个人博客"
+	if h.siteNamer != nil {
+		if value, err := h.siteNamer.SiteName(r.Context()); err == nil && strings.TrimSpace(value) != "" {
+			siteName = value
+		}
+	}
+	navigation := Navigation{CurrentPath: r.URL.Path, Features: h.featureFlags()}
+	if h.organization != nil {
+		if value, err := h.navigation(r.Context(), r.URL.Path); err == nil {
+			navigation = value
+		}
+	}
+	metadata := h.metadata(siteName, fmt.Sprintf("%d · %s", statusCode, title), message, r.URL.Path, "website", nil)
+	metadata.NoIndex = true
+	theme := h.currentTheme()
+	if theme == nil {
+		http.Error(w, http.StatusText(statusCode), statusCode)
+		return
+	}
+	body, err := theme.RenderStatusPage(siteName, StatusView{Code: statusCode, Title: title, Message: message}, navigation, metadata)
+	if err != nil {
+		http.Error(w, http.StatusText(statusCode), statusCode)
+		return
+	}
+	setPublicSecurityHeaders(w, body)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(statusCode)
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(body)
+	}
 }
 
 func setPublicSecurityHeaders(w http.ResponseWriter, bodies ...[]byte) {
-	scriptPolicy := "script-src 'none'; "
+	scriptSources := make([]string, 0, 2)
 	if len(bodies) > 0 {
-		const startMarker = `<script type="application/ld+json">`
-		if start := strings.Index(string(bodies[0]), startMarker); start >= 0 {
-			scriptStart := start + len(startMarker)
-			if end := strings.Index(string(bodies[0][scriptStart:]), "</script>"); end >= 0 {
-				digest := sha256.Sum256(bodies[0][scriptStart : scriptStart+end])
-				scriptPolicy = "script-src 'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'; "
-			}
+		body := string(bodies[0])
+		if strings.Contains(body, `<script src="`) {
+			scriptSources = append(scriptSources, "'self'")
 		}
+		scriptSources = appendInlineScriptHashes(scriptSources, bodies[0])
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; "+scriptPolicy+"style-src 'self'; img-src 'self' data: https:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	if len(scriptSources) == 0 {
+		scriptSources = append(scriptSources, "'none'")
+	}
+	scriptPolicy := "script-src " + strings.Join(scriptSources, " ") + "; "
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; "+scriptPolicy+"style-src 'self'; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+}
+
+func appendInlineScriptHashes(sources []string, body []byte) []string {
+	markup := string(body)
+	for cursor := 0; cursor < len(markup); {
+		startOffset := strings.Index(markup[cursor:], "<script")
+		if startOffset < 0 {
+			break
+		}
+		start := cursor + startOffset
+		endTagOffset := strings.Index(markup[start:], ">")
+		if endTagOffset < 0 {
+			break
+		}
+		contentStart := start + endTagOffset + 1
+		closeOffset := strings.Index(markup[contentStart:], "</script>")
+		if closeOffset < 0 {
+			break
+		}
+		closeStart := contentStart + closeOffset
+		tag := strings.ToLower(markup[start:contentStart])
+		if !strings.Contains(tag, "src=") {
+			digest := sha256.Sum256(body[contentStart:closeStart])
+			source := "'sha256-" + base64.StdEncoding.EncodeToString(digest[:]) + "'"
+			if !containsString(sources, source) {
+				sources = append(sources, source)
+			}
+		}
+		cursor = closeStart + len("</script>")
+	}
+	return sources
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *HTTPHandler) absoluteURL(path string) string {
@@ -745,7 +1196,11 @@ func (h *HTTPHandler) tryRedirect(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func normalizedPathKey(path string) (string, bool) {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
+	decoded, err := url.PathUnescape(path)
+	if err != nil {
+		return "", false
+	}
+	parts := strings.Split(strings.Trim(decoded, "/"), "/")
 	if len(parts) == 1 && parts[0] != "" {
 		_, key, err := platformslug.Normalize(parts[0])
 		return "/" + key, err == nil
@@ -755,6 +1210,15 @@ func normalizedPathKey(path string) (string, bool) {
 		return "/" + parts[0] + "/" + key, err == nil
 	}
 	return "", false
+}
+
+func publicSlugParam(r *http.Request) string {
+	raw := chi.URLParam(r, "slug")
+	decoded, err := url.PathUnescape(raw)
+	if err != nil {
+		return raw
+	}
+	return decoded
 }
 
 func matchesETag(header, etag string) bool {
@@ -768,13 +1232,19 @@ func matchesETag(header, etag string) bool {
 }
 
 func articleData(article publishing.Article) ArticleData {
+	slug := article.Slug
+	if article.PublishedSlug != "" {
+		slug = article.PublishedSlug
+	}
 	data := ArticleData{
 		Kind:         article.Kind,
 		Title:        article.Title,
-		Slug:         article.Slug,
+		Slug:         slug,
 		Excerpt:      article.Excerpt,
 		BodyMarkdown: article.BodyMarkdown,
 		PublishedAt:  article.PublishedAt,
+		UpdatedAt:    article.PublishedRevisionAt,
+		ReadingTime:  readingMinutes(article.BodyMarkdown),
 	}
 	if article.Category != nil {
 		data.Category = &TermData{Name: article.Category.Name, URL: "/categories/" + article.Category.Slug}
@@ -807,9 +1277,10 @@ func publishingContentID(r *http.Request) (int64, string, error) {
 	return id, kind, nil
 }
 
-func (h *HTTPHandler) navigation(ctx context.Context) (Navigation, error) {
+func (h *HTTPHandler) navigation(ctx context.Context, currentPath string) (Navigation, error) {
+	navigation := Navigation{CurrentPath: currentPath, Features: h.featureFlags()}
 	if h.organization == nil {
-		return Navigation{}, nil
+		return navigation, nil
 	}
 	primary, err := h.organization.PublicNavigation(ctx, "primary")
 	if err != nil {
@@ -819,7 +1290,259 @@ func (h *HTTPHandler) navigation(ctx context.Context) (Navigation, error) {
 	if err != nil {
 		return Navigation{}, err
 	}
-	return Navigation{Primary: navigationLinks(primary), Footer: navigationLinks(footer)}, nil
+	navigation.Primary = navigationLinks(primary)
+	navigation.Footer = navigationLinks(footer)
+	navigation.Sidebar = sidebarView(currentPath, navigation.Primary, navigation.Footer)
+	return navigation, nil
+}
+
+func (h *HTTPHandler) featureFlags() FeatureFlags {
+	if h.features == nil {
+		return FeatureFlags{}
+	}
+	commentsMode := ""
+	if h.features.Enabled("comments.local") {
+		commentsMode = "local"
+	} else if h.features.Enabled("comments.external") {
+		commentsMode = "external"
+	}
+	return FeatureFlags{
+		Comments:     commentsMode != "",
+		CommentsMode: commentsMode,
+		Newsletter:   h.features.Enabled("newsletter.local") || h.features.Enabled("newsletter.external"),
+		Analytics:    h.features.Enabled("analytics.local"),
+	}
+}
+
+func requestedPage(r *http.Request) int {
+	page, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page")))
+	if err != nil || page < 1 {
+		return 1
+	}
+	if page > 100_000 {
+		return 100_000
+	}
+	return page
+}
+
+func pagePath(base string, page int) string {
+	if page <= 1 {
+		return base
+	}
+	return base + "?page=" + strconv.Itoa(page) + "#main-content"
+}
+
+func taxonomyPath(kind, slug string) string {
+	if kind == "category" {
+		return "/categories/" + slug
+	}
+	return "/tags/" + slug
+}
+
+func archiveMonthPath(year, month int) string {
+	return fmt.Sprintf("/archive/%04d/%02d", year, month)
+}
+
+func termSummariesFromCategories(values []organization.PublicCategorySummary) []TermSummary {
+	result := make([]TermSummary, 0, len(values))
+	for _, value := range values {
+		result = append(result, TermSummary{
+			Name:          value.Category.Name,
+			Slug:          value.Category.Slug,
+			Description:   value.Category.Description,
+			URL:           "/categories/" + value.Category.Slug,
+			ArticleCount:  value.ArticleCount,
+			LatestTitle:   value.LatestTitle,
+			LatestPath:    value.LatestPath,
+			LatestPublish: formatDate(value.LatestPublish),
+		})
+	}
+	return result
+}
+
+func termSummariesFromTags(values []organization.PublicTagSummary) []TermSummary {
+	result := make([]TermSummary, 0, len(values))
+	for _, value := range values {
+		result = append(result, TermSummary{
+			Name:          value.Tag.Name,
+			Slug:          value.Tag.Slug,
+			Description:   value.Tag.Description,
+			URL:           "/tags/" + value.Tag.Slug,
+			ArticleCount:  value.ArticleCount,
+			LatestTitle:   value.LatestTitle,
+			LatestPath:    value.LatestPath,
+			LatestPublish: formatDate(value.LatestPublish),
+		})
+	}
+	return result
+}
+
+func filterOptionsFromCategories(values []organization.PublicCategorySummary) []FilterOption {
+	result := make([]FilterOption, 0, len(values))
+	for _, value := range values {
+		result = append(result, FilterOption{Slug: value.Category.Slug, Name: value.Category.Name})
+	}
+	return result
+}
+
+func filterOptionsFromTags(values []organization.PublicTagSummary) []FilterOption {
+	result := make([]FilterOption, 0, len(values))
+	for _, value := range values {
+		result = append(result, FilterOption{Slug: value.Tag.Slug, Name: value.Tag.Name})
+	}
+	return result
+}
+
+func archiveMonthViews(values []discovery.ArchiveYear, limit int) []ArchiveMonthView {
+	result := make([]ArchiveMonthView, 0)
+	for _, year := range values {
+		for _, month := range year.Months {
+			result = append(result, ArchiveMonthView{
+				Year: year.Year, Month: month.Month, Label: fmt.Sprintf("%d 年 %02d 月", year.Year, month.Month),
+				Count: month.Count, URL: archiveMonthPath(year.Year, month.Month),
+			})
+			if limit > 0 && len(result) >= limit {
+				return result
+			}
+		}
+	}
+	return result
+}
+
+func archiveYearViews(values []discovery.ArchiveYear) []ArchiveYearView {
+	result := make([]ArchiveYearView, 0, len(values))
+	for _, year := range values {
+		view := ArchiveYearView{Year: year.Year, Total: year.Total, Months: make([]ArchiveMonthView, 0, len(year.Months))}
+		for _, month := range year.Months {
+			view.Months = append(view.Months, ArchiveMonthView{
+				Year: year.Year, Month: month.Month, Label: fmt.Sprintf("%02d 月", month.Month),
+				Count: month.Count, URL: archiveMonthPath(year.Year, month.Month),
+			})
+		}
+		result = append(result, view)
+	}
+	return result
+}
+
+func articleCardFromSearchResult(result discovery.SearchResult) ArticleCard {
+	card := ArticleCard{
+		Kind: result.Kind, Path: result.Path, Title: result.Title, Excerpt: result.Excerpt,
+		PublishedAt: result.PublishedAt.Format("2006年01月02日"), PublishedISO: result.PublishedAt.Format(time.RFC3339),
+	}
+	return card
+}
+
+func formatDate(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format("2006年01月02日")
+}
+
+func highlightText(value, query string) template.HTML {
+	if value == "" {
+		return ""
+	}
+	terms := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	for _, term := range strings.Fields(query) {
+		term = strings.TrimSpace(term)
+		if term == "" {
+			continue
+		}
+		if _, ok := seen[term]; ok {
+			continue
+		}
+		seen[term] = struct{}{}
+		terms = append(terms, regexp.QuoteMeta(term))
+		if len(terms) >= 8 {
+			break
+		}
+	}
+	if len(terms) == 0 {
+		return template.HTML(htmlstd.EscapeString(value))
+	}
+	re, err := regexp.Compile("(?i)(" + strings.Join(terms, "|") + ")")
+	if err != nil {
+		return template.HTML(htmlstd.EscapeString(value))
+	}
+	locations := re.FindAllStringIndex(value, -1)
+	if len(locations) == 0 {
+		return template.HTML(htmlstd.EscapeString(value))
+	}
+	var output strings.Builder
+	last := 0
+	for _, location := range locations {
+		output.WriteString(htmlstd.EscapeString(value[last:location[0]]))
+		output.WriteString("<mark>")
+		output.WriteString(htmlstd.EscapeString(value[location[0]:location[1]]))
+		output.WriteString("</mark>")
+		last = location[1]
+	}
+	output.WriteString(htmlstd.EscapeString(value[last:]))
+	return template.HTML(output.String())
+}
+
+func searchPageURL(query, kind, category, tag, sortOrder string, page int) string {
+	values := url.Values{}
+	values.Set("q", query)
+	if kind != "" {
+		values.Set("type", kind)
+	}
+	if category != "" {
+		values.Set("category", category)
+	}
+	if tag != "" {
+		values.Set("tag", tag)
+	}
+	if sortOrder != "" && sortOrder != "relevance" {
+		values.Set("sort", sortOrder)
+	}
+	if page > 1 {
+		values.Set("page", strconv.Itoa(page))
+	}
+	return "/search?" + values.Encode() + "#search-results"
+}
+
+func paginationView(info pagination.Info, makeURL func(int) string) PaginationView {
+	view := PaginationView{Page: info.Page, PerPage: info.PerPage, Total: info.Total, PageCount: info.PageCount, HasPrevious: info.HasPrevious, HasNext: info.HasNext}
+	if info.HasPrevious {
+		view.PreviousURL = makeURL(info.Page - 1)
+	}
+	if info.HasNext {
+		view.NextURL = makeURL(info.Page + 1)
+	}
+	if info.PageCount < 1 {
+		return view
+	}
+	numbers := map[int]struct{}{1: {}, info.PageCount: {}}
+	for number := info.Page - 2; number <= info.Page+2; number++ {
+		if number > 0 && number <= info.PageCount {
+			numbers[number] = struct{}{}
+		}
+	}
+	ordered := make([]int, 0, len(numbers))
+	for number := range numbers {
+		ordered = append(ordered, number)
+	}
+	sort.Ints(ordered)
+	for _, number := range ordered {
+		view.Pages = append(view.Pages, PageLink{Number: number, URL: makeURL(number), Current: number == info.Page})
+	}
+	return view
+}
+
+func withArticleNavigation(data ArticleData, navigation publishing.PublicArticleNavigation) ArticleData {
+	if navigation.Previous != nil {
+		data.Previous = toArticleCard(articleData(*navigation.Previous))
+	}
+	if navigation.Next != nil {
+		data.Next = toArticleCard(articleData(*navigation.Next))
+	}
+	if len(navigation.Related) > 0 {
+		data.Related = articleCards(articleDataList(navigation.Related))
+	}
+	return data
 }
 
 func navigationLinks(items []organization.NavigationItem) []NavigationLink {

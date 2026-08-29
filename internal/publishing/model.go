@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/organization"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 var (
@@ -42,6 +43,55 @@ type Article struct {
 	publishedTagPublicIDsJSON string
 }
 
+type PublicArticlePage struct {
+	Articles   []Article
+	Pagination pagination.Info
+}
+
+type PublicArticleNavigation struct {
+	Previous *Article
+	Next     *Article
+	Related  []Article
+}
+
+// AdminContentFilter contains the bounded, user-controlled filters supported
+// by the content workspace. The repository normalizes Status and Sort before
+// using them in SQL so callers can never inject an ORDER BY fragment.
+type AdminContentFilter struct {
+	Query    string
+	Status   string
+	Category string
+	Tag      string
+	Sort     string
+}
+
+type AdminContentPage struct {
+	Contents   []Article
+	Pagination pagination.Info
+}
+
+type AdminContentSummary struct {
+	ID          int64
+	Kind        string
+	Status      string
+	Slug        string
+	Title       string
+	UpdatedAt   time.Time
+	PublishedAt *time.Time
+}
+
+type DashboardSummary struct {
+	DraftCount          int
+	ScheduledCount      int
+	PublishedCount      int
+	TrashedCount        int
+	PublishedThisWeek   int
+	PendingCommentCount int
+	WithoutExcerptCount int
+	RecentEdits         []AdminContentSummary
+	RecentPublished     []AdminContentSummary
+}
+
 type Revision struct {
 	ID                      int64
 	PublicID                []byte
@@ -71,6 +121,7 @@ type EditingSnapshot struct {
 type DraftInput struct {
 	Title          string
 	Slug           string
+	AutoSlug       bool
 	Excerpt        string
 	SEOTitle       string
 	SEODescription string

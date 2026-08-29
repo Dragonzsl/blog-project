@@ -139,7 +139,7 @@ official plugin    -> narrow Host capabilities
 ## 安全基线
 
 - 管理后台与公开写接口均使用同站会话 cookie、CSRF 防护和 Origin 校验。
-- Cookie 设置 Secure、HttpOnly、SameSite；登录后轮换会话 ID。
+- HTTPS 部署的 Cookie 设置 Secure、HttpOnly、SameSite；HTTP 本地开发会按公开基址关闭 Secure，登录后轮换会话 ID。
 - 登录、TOTP、恢复码、评论和预览链接分别限速。
 - Markdown 原始 HTML 默认关闭，文章和评论使用不同清洗策略。
 - 主题解包防止路径穿越、符号链接和压缩炸弹，并限制文件数与总大小。

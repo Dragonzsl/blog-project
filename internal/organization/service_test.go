@@ -10,6 +10,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
@@ -62,6 +63,10 @@ func TestTaxonomyNavigationAndRenderInvalidation(t *testing.T) {
 	}
 	if publicCategory.ID != category.ID || len(categoryIDs) != 1 || categoryIDs[0] != article.ID {
 		t.Fatalf("category=%+v ids=%v", publicCategory, categoryIDs)
+	}
+	categoryPage, err := service.PublicCategoryPage(ctx, category.Slug, pagination.Request{Page: 1, PerPage: 1})
+	if err != nil || categoryPage.Pagination.Total != 1 || len(categoryPage.ArticleIDs) != 1 {
+		t.Fatalf("category page=%+v err=%v", categoryPage, err)
 	}
 	_, tagIDs, err := service.PublicTag(ctx, "花园", 20)
 	if err != nil || len(tagIDs) != 1 {

@@ -1,0 +1,1119 @@
+/* Stage six: adaptive navigation and compact reading layout. */
+:root {
+  --site-sidebar-expanded: 248px;
+  --site-sidebar-collapsed: 76px;
+  --site-sidebar-width: var(--site-sidebar-expanded);
+  --admin-sidebar-expanded: 224px;
+  --admin-sidebar-collapsed: 76px;
+  --article-toc-width: 232px;
+  --article-layout-gap: clamp(32px, 4.2vw, 64px);
+  --content-offset: 24px;
+}
+
+html[data-site-sidebar="collapsed"] {
+  --site-sidebar-width: var(--site-sidebar-collapsed);
+}
+
+html[data-admin-sidebar="collapsed"] {
+  --admin-sidebar-width: var(--admin-sidebar-collapsed);
+}
+
+html:not([data-admin-sidebar="collapsed"]) {
+  --admin-sidebar-width: var(--admin-sidebar-expanded);
+}
+
+html[data-toc-collapsed="true"] .article-toc-trigger {
+  display: inline-flex;
+}
+
+.sidebar-collapse,
+.admin-sidebar-collapse {
+  display: none;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  transition: var(--interactive, color 180ms ease, background-color 180ms ease, transform 180ms ease);
+}
+
+.sidebar-collapse svg,
+.admin-sidebar-collapse svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.sidebar-collapse:hover,
+.sidebar-collapse:focus-visible,
+.admin-sidebar-collapse:hover,
+.admin-sidebar-collapse:focus-visible {
+  border-color: var(--line);
+  color: var(--accent);
+  background: var(--accent-soft, var(--surface-muted));
+}
+
+.sidebar-collapse[aria-expanded="false"] svg,
+.admin-sidebar-collapse[aria-expanded="false"] svg {
+  transform: rotate(180deg);
+}
+
+.sidebar-scrim,
+.admin-sidebar-scrim {
+  touch-action: none;
+}
+
+.back-to-top {
+  position: fixed;
+  right: max(16px, env(safe-area-inset-right));
+  bottom: max(18px, env(safe-area-inset-bottom));
+  z-index: 30;
+  display: grid;
+  width: 46px;
+  height: 46px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--line), var(--accent) 18%);
+  border-radius: 50%;
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface), transparent 8%);
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+  cursor: pointer;
+  opacity: .84;
+  backdrop-filter: blur(10px);
+  transition: opacity var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+
+.back-to-top[hidden] {
+  display: none !important;
+}
+
+.article-card .article-meta a {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  color: var(--accent);
+  text-decoration: none;
+  transition: var(--interactive);
+}
+
+.article-card .article-meta a:hover,
+.article-card .article-meta a:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+
+.site-footer nav a {
+  min-width: 44px;
+  justify-content: center;
+  padding-inline: 4px;
+  overflow-wrap: anywhere;
+}
+
+/* Keep the comment honeypot from inheriting the visible input sizing. */
+.comment-trap > input {
+  position: absolute !important;
+  width: 1px !important;
+  min-width: 1px !important;
+  height: 1px !important;
+  min-height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.back-to-top:hover,
+.back-to-top:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent-strong);
+  opacity: 1;
+  transform: translateY(-2px);
+}
+
+.back-to-top svg {
+  width: 25px;
+  height: 25px;
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.65;
+}
+
+.back-to-top circle {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent), transparent 72%);
+  stroke-dasharray: 44;
+  stroke-dashoffset: 44;
+  transform: rotate(-90deg);
+  transform-origin: 12px 12px;
+}
+
+.back-to-top path {
+  stroke-width: 1.9;
+}
+
+html[data-sidebar-open] .back-to-top {
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(6px);
+}
+
+/* Keep the two navigation affordances reachable after the header has scrolled away. */
+@media (max-width: 1439px) {
+  .skip-link {
+    z-index: 100;
+  }
+
+  .site-header {
+    padding-left: 60px;
+  }
+
+  .site-header .sidebar-toggle {
+    position: fixed;
+    inset: max(12px, env(safe-area-inset-top)) auto auto max(12px, env(safe-area-inset-left));
+    z-index: 80;
+    display: inline-flex !important;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 50%;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--surface), transparent 8%);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    backdrop-filter: blur(10px);
+  }
+
+  .site-header .sidebar-toggle:hover,
+  .site-header .sidebar-toggle:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    transform: translateY(-1px);
+  }
+
+  html[data-sidebar-open="site"] .site-header .sidebar-toggle {
+    opacity: 0;
+    pointer-events: none;
+    transform: translateX(-8px);
+  }
+
+  .article-toc-trigger {
+    position: fixed;
+    inset: 50% max(12px, env(safe-area-inset-right)) auto auto;
+    z-index: 80;
+    display: grid;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    max-width: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-top: 0;
+    padding: 0;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(10px);
+  }
+
+  .article-toc-trigger svg {
+    width: 23px;
+    height: 23px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+  }
+
+  .article-toc-trigger:hover,
+  .article-toc-trigger:focus-visible {
+    transform: translateY(calc(-50% - 1px));
+  }
+
+  html[data-sidebar-open="toc"] .article-toc-trigger {
+    opacity: 1;
+    pointer-events: auto;
+    color: var(--accent-strong);
+    background: var(--surface);
+    transform: translateY(-50%);
+  }
+}
+
+@media (min-width: 1440px) {
+  /* The full right rail is sticky by default; this is the persistent handle after collapse. */
+  html[data-toc-collapsed="true"] .article-toc-trigger {
+    position: fixed;
+    inset: 50% max(20px, env(safe-area-inset-right)) auto auto;
+    z-index: 80;
+    display: grid !important;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    max-width: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-top: 0;
+    padding: 0;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 14px;
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(10px);
+  }
+
+  html[data-toc-collapsed="true"] .article-toc-trigger svg {
+    width: 23px;
+    height: 23px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+  }
+
+  html[data-toc-collapsed="true"] .article-toc-trigger:hover,
+  html[data-toc-collapsed="true"] .article-toc-trigger:focus-visible {
+    transform: translateY(calc(-50% - 1px));
+  }
+
+  .article-toc-trigger {
+    position: fixed;
+    inset: 50% max(20px, env(safe-area-inset-right)) auto auto;
+    z-index: 80;
+    display: grid !important;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    max-width: none;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-top: 0;
+    padding: 0;
+    border-radius: 14px;
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(10px);
+  }
+
+  .article-toc-trigger svg {
+    width: 23px;
+    height: 23px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+  }
+
+  .article-toc {
+    align-self: start;
+    max-height: calc(100vh - 48px);
+    max-height: calc(100dvh - 48px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-color: color-mix(in srgb, var(--accent), transparent 35%) transparent;
+    scrollbar-width: thin;
+  }
+
+  .article-toc .toc-heading {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--paper);
+  }
+
+  .article-toc-trigger:hover,
+  .article-toc-trigger:focus-visible {
+    transform: translateY(calc(-50% - 1px));
+  }
+}
+
+/* The public rail is permanent only when it can coexist with a readable article. */
+@media (min-width: 1101px) and (max-width: 1439px) {
+  body {
+    padding-left: 0 !important;
+  }
+
+  .site-header {
+    justify-content: space-between !important;
+  }
+
+  .site-header > .brand,
+  .site-header .sidebar-toggle,
+  .site-header-tools .theme-toggle {
+    display: inline-flex !important;
+  }
+
+  .public-sidebar {
+    width: min(86vw, 336px);
+    transform: translateX(-102%);
+    visibility: hidden;
+  }
+
+  .public-sidebar .sidebar-close {
+    display: inline-flex;
+  }
+
+  .public-sidebar .sidebar-collapse {
+    display: none;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .sidebar-scrim {
+    display: block;
+  }
+}
+
+@media (max-width: 1439px) {
+  .site-header > .brand,
+  .site-header .sidebar-toggle,
+  .site-header-tools .theme-toggle {
+    display: inline-flex;
+  }
+
+  .sidebar-toggle {
+    display: inline-flex;
+  }
+
+  .public-sidebar .sidebar-collapse {
+    display: none;
+  }
+
+  .public-sidebar .sidebar-close {
+    display: inline-flex;
+  }
+
+  /* The server emits aria-hidden=false for the no-script/static case. */
+  html.js:not([data-sidebar-open="site"]) .public-sidebar[aria-hidden="false"] {
+    transform: translateX(-102%);
+    visibility: hidden;
+  }
+
+  html.js[data-sidebar-open="site"] .public-sidebar[aria-hidden="false"] {
+    transform: translateX(0);
+    visibility: visible;
+  }
+}
+
+@media (min-width: 1440px) {
+  body {
+    padding-left: var(--site-sidebar-width);
+    transition: padding-left var(--motion-base) var(--ease-out);
+  }
+
+  .site-header {
+    justify-content: flex-end;
+    border-bottom: 0;
+  }
+
+  .site-header > .brand,
+  .site-header .sidebar-toggle,
+  .site-header-tools .theme-toggle {
+    display: none !important;
+  }
+
+  .public-sidebar {
+    width: var(--site-sidebar-width);
+    transform: none;
+    visibility: visible;
+    box-shadow: 8px 0 32px color-mix(in srgb, var(--ink), transparent 93%);
+    transition: width var(--motion-base) var(--ease-out), background-color var(--motion-base) var(--ease-out);
+  }
+
+  .public-sidebar .sidebar-close {
+    display: none;
+  }
+
+  .public-sidebar .sidebar-collapse {
+    display: inline-flex;
+  }
+
+  .sidebar-scrim {
+    display: none !important;
+  }
+
+  html:not(.js) .public-sidebar {
+    transform: none;
+    visibility: visible;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-heading {
+    justify-content: center;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-brand {
+    gap: 0;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-brand strong,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-section-label,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-footer > p,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-tools [data-theme-toggle-label],
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-rss > span:last-child {
+    display: none;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-nav {
+    padding-inline: 0;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-section-links {
+    gap: 7px;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-link {
+    justify-content: center;
+    gap: 0;
+    padding-inline: 0;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-link-chevron,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-link-external,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-children {
+    display: none;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-footer {
+    align-items: center;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-tools .theme-toggle,
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-rss {
+    width: 44px;
+    justify-content: center;
+    padding-inline: 0;
+  }
+
+  html[data-site-sidebar="collapsed"] .public-sidebar .sidebar-rss {
+    gap: 0;
+  }
+}
+
+/* One article DOM, with the TOC promoted to the right rail on wide screens. */
+.article-with-toc .article-layout {
+  display: block;
+}
+
+.article-with-toc .article-header,
+.article-reading-column {
+  width: min(var(--reading), 100%);
+  margin-inline: auto;
+}
+
+.article-with-toc .article-header {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.article-toc {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 70;
+  width: min(88vw, 340px);
+  max-height: none;
+  margin: 0;
+  padding: max(20px, env(safe-area-inset-top)) 22px max(20px, env(safe-area-inset-bottom));
+  border: 0;
+  border-left: 1px solid var(--line);
+  background: var(--surface);
+  box-shadow: -18px 0 60px color-mix(in srgb, var(--ink), transparent 86%);
+  overflow: auto;
+  overscroll-behavior: contain;
+  transform: translateX(102%);
+  visibility: hidden;
+  transition: transform var(--motion-base) var(--ease-out), visibility var(--motion-base);
+}
+
+.article-toc[aria-hidden="false"] {
+  transform: translateX(0);
+  visibility: visible;
+}
+
+.article-toc .toc-heading {
+  min-height: 52px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.article-toc .toc-close {
+  display: inline-flex;
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 1.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.article-toc .toc-close:hover,
+.article-toc .toc-close:focus-visible {
+  border-color: var(--line);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.article-toc ol {
+  margin-top: 24px;
+}
+
+.article-toc a {
+  min-height: 40px;
+}
+
+.article-toc-trigger {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  margin-top: 24px;
+  padding: 10px 13px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  font-size: .76rem;
+  font-weight: 760;
+  cursor: pointer;
+  transition: var(--interactive);
+}
+
+.article-toc-trigger:hover,
+.article-toc-trigger:focus-visible {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.article-toc-trigger span:nth-child(2) {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.article-toc-trigger span:last-child {
+  margin-left: auto;
+  font-size: 1rem;
+}
+
+@media (min-width: 1440px) {
+  .article-with-toc .article-layout {
+    display: grid;
+    grid-template-columns: minmax(0, var(--reading)) var(--article-toc-width);
+    gap: 0 var(--article-layout-gap);
+    align-items: start;
+    justify-content: center;
+  }
+
+  .article-with-toc .article-header {
+    margin-left: max(0px, calc((100% - (var(--reading) + var(--article-toc-width) + var(--article-layout-gap))) / 2));
+    margin-right: 0;
+  }
+
+  .article-toc {
+    position: sticky;
+    inset: auto;
+    top: var(--content-offset);
+    width: auto;
+    max-height: calc(100dvh - 48px);
+    padding: 16px 0 18px;
+    border: 0;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    box-shadow: none;
+    background: var(--paper);
+    transform: none;
+    visibility: visible;
+  }
+
+  .article-toc .toc-close {
+    display: inline-flex;
+    width: 44px;
+    height: 44px;
+    font-size: 1.45rem;
+  }
+
+  .article-toc-trigger {
+    display: none;
+  }
+
+  html[data-toc-collapsed="true"] .article-with-toc .article-layout {
+    grid-template-columns: minmax(0, var(--reading));
+  }
+
+  html[data-toc-collapsed="true"] .article-with-toc .article-header {
+    margin-inline: auto;
+  }
+
+  html[data-toc-collapsed="true"] .article-toc {
+    display: none;
+  }
+
+  html[data-toc-collapsed="true"] .article-toc-trigger {
+    display: inline-flex;
+  }
+}
+
+.prose,
+.article-header h1,
+.deck,
+.hero h1,
+.listing-hero h1,
+.search-page .search-hero h1 {
+  overflow-wrap: anywhere;
+}
+
+.prose {
+  max-width: 68ch;
+  font-size: clamp(1rem, 1.18vw, 1.08rem);
+  line-height: 1.8;
+}
+
+.prose h2,
+.prose h3,
+.prose h4 {
+  scroll-margin-top: 32px;
+}
+
+.prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.prose pre {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+
+.prose img {
+  max-width: 100%;
+  height: auto;
+}
+
+@media (max-width: 767px) {
+  :root {
+    --gutter: clamp(16px, 5vw, 24px);
+  }
+
+  body {
+    min-height: 100dvh;
+    font-size: 16px;
+    padding-bottom: max(24px, env(safe-area-inset-bottom));
+  }
+
+  .site-header {
+    min-height: 64px;
+    padding-block: 10px;
+  }
+
+  .site-header .theme-toggle {
+    max-width: 132px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .article {
+    margin-top: 48px;
+  }
+
+  .article-nav {
+    margin-bottom: 20px;
+  }
+
+  .article-header {
+    padding-bottom: 34px;
+  }
+
+  .article-header h1 {
+    font-size: clamp(2.25rem, 9.5vw, 3.15rem);
+    line-height: 1.04;
+  }
+
+  .deck {
+    margin-top: 20px;
+    font-size: 1rem;
+    line-height: 1.72;
+  }
+
+  .article-header .article-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 18px;
+  }
+
+  .taxonomy {
+    gap: 6px;
+  }
+
+  .taxonomy a {
+    min-height: 32px;
+    padding-inline: 9px;
+    font-size: .7rem;
+  }
+
+  .article-toc-trigger {
+    display: flex;
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .article-reading-column,
+  .article-with-toc .article-header {
+    width: 100%;
+  }
+
+  .prose {
+    max-width: 100%;
+    padding-top: 32px;
+    font-size: 1rem;
+    line-height: 1.82;
+  }
+
+  .prose h2 {
+    font-size: 1.58em;
+  }
+
+  .prose h3 {
+    font-size: 1.3em;
+  }
+
+  .prose > * + * {
+    margin-top: 1.35em;
+  }
+
+  .article-actions {
+    gap: 6px;
+    margin-top: 42px;
+  }
+
+  .action-button {
+    min-height: 44px;
+    padding-inline: 12px;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.7rem, 13vw, 4.2rem);
+    line-height: 1;
+  }
+
+  .hero-copy > p:last-child,
+  .listing-hero > p:last-child,
+  .search-page .search-hero > p:last-child {
+    font-size: 1rem;
+  }
+
+  .listing-hero h1 {
+    font-size: clamp(2.5rem, 12vw, 4rem);
+  }
+
+  .section-heading h2,
+  .home-about h2,
+  .home-archive h2,
+  .related-articles h2 {
+    font-size: 1.75rem;
+  }
+
+  .back-to-top {
+    right: max(14px, env(safe-area-inset-right));
+    bottom: max(16px, env(safe-area-inset-bottom));
+  }
+}
+
+@media (max-width: 380px) {
+  .site-header .theme-toggle {
+    max-width: 108px;
+    padding-inline: 9px;
+  }
+
+  .site-header .theme-toggle svg {
+    flex: 0 0 14px;
+  }
+}
+
+@media (max-width: 767px) {
+  .article-toc-trigger {
+    display: grid;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    flex: 0 0 48px;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin-top: 0;
+    padding: 0;
+  }
+
+  .article-toc-trigger svg {
+    width: 23px;
+    height: 23px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+  }
+}
+
+/* Keep long navigation usable without making the fixed rail itself lose its controls. */
+.public-sidebar {
+  overflow: hidden;
+}
+
+.public-sidebar .sidebar-heading {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: 0 0 auto;
+  background: var(--surface);
+}
+
+.public-sidebar .sidebar-nav {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: color-mix(in srgb, var(--accent), transparent 35%) transparent;
+  scrollbar-width: thin;
+}
+
+.public-sidebar .sidebar-footer {
+  flex: 0 0 auto;
+  margin-top: 0;
+  background: var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .back-to-top,
+  .public-sidebar,
+  .article-toc {
+    transition: none;
+  }
+
+  .back-to-top circle {
+    transition: none;
+  }
+}
+
+@media print {
+  .back-to-top,
+  .sidebar-toggle,
+  .article-toc-trigger,
+  .sidebar-collapse,
+  .admin-sidebar-collapse {
+    display: none !important;
+  }
+}
+
+/* Responsive navigation refinement: fixed handles stay reachable while the document scrolls. */
+@media screen {
+  html {
+    scroll-padding-top: 84px;
+  }
+
+  .sidebar-toggle-icon {
+    display: block;
+  }
+
+  .sidebar-toggle-icon-close {
+    display: none;
+  }
+
+  .sidebar-toggle[aria-expanded="true"] .sidebar-toggle-icon-menu {
+    display: none;
+  }
+
+  .sidebar-toggle[aria-expanded="true"] .sidebar-toggle-icon-close {
+    display: block;
+  }
+
+  .sidebar-toggle,
+  .article-toc-trigger {
+    touch-action: manipulation;
+  }
+}
+
+@media screen and (max-width: 1439px) {
+  /* Keep the global navigation handle independent from the header/document flow. */
+  .site-header .sidebar-toggle {
+    position: fixed;
+    inset: max(12px, env(safe-area-inset-top)) auto auto max(12px, env(safe-area-inset-left));
+    z-index: 90;
+    display: grid !important;
+    width: 44px;
+    height: 44px;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 50%;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--surface), transparent 8%);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    backdrop-filter: blur(10px);
+    transform: none;
+  }
+
+  .site-header .sidebar-toggle:hover,
+  .site-header .sidebar-toggle:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    transform: translateY(-1px);
+  }
+
+  /* Once open, the same control sits on the drawer edge and becomes the close affordance. */
+  html[data-sidebar-open="site"] .site-header .sidebar-toggle {
+    left: calc(min(86vw, 336px) - 56px);
+    color: var(--accent-strong);
+    background: var(--surface);
+    transform: none;
+  }
+
+  .article-toc-trigger {
+    position: fixed;
+    inset: 50% max(12px, env(safe-area-inset-right)) auto auto;
+    z-index: 90;
+    display: grid !important;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 14px;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--surface), transparent 8%);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 88%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(10px);
+  }
+
+  .article-toc-trigger svg {
+    width: 23px;
+    height: 23px;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.8;
+  }
+
+  .article-toc-trigger:hover,
+  .article-toc-trigger:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    transform: translateY(calc(-50% - 1px));
+  }
+
+  /* The open control moves into the drawer header so it cannot cover a chapter link. */
+  html[data-sidebar-open="toc"] .article-toc-trigger {
+    inset: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) auto auto;
+    color: var(--accent-strong);
+    background: var(--surface);
+    transform: none;
+    transition: color var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), background-color var(--motion-fast) var(--ease-out);
+  }
+
+  html[data-sidebar-open="toc"] .article-toc {
+    padding-top: max(76px, calc(env(safe-area-inset-top) + 64px));
+  }
+
+  .public-sidebar,
+  .article-toc {
+    scrollbar-gutter: stable;
+  }
+
+  /* The persistent edge buttons are the single close affordance on compact layouts. */
+  .public-sidebar .sidebar-close,
+  .article-toc .toc-close {
+    display: none !important;
+  }
+
+  html:not(.js) .site-header .sidebar-toggle {
+    display: none !important;
+  }
+}
+
+@media screen and (min-width: 1440px) {
+  /* Wide screens keep both rails resident; these controls never leave the viewport. */
+  .article-toc-trigger {
+    position: fixed;
+    inset: 50% max(20px, env(safe-area-inset-right)) auto auto;
+    z-index: 90;
+    display: grid !important;
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+    align-items: center;
+    justify-content: center;
+    margin: 0;
+    padding: 0;
+    border-color: color-mix(in srgb, var(--line), var(--accent) 18%);
+    border-radius: 14px;
+    color: var(--muted);
+    background: color-mix(in srgb, var(--paper), transparent 8%);
+    box-shadow: 0 8px 24px color-mix(in srgb, var(--ink), transparent 90%);
+    transform: translateY(-50%);
+    backdrop-filter: blur(10px);
+  }
+
+  .article-toc-trigger:hover,
+  .article-toc-trigger:focus-visible {
+    border-color: var(--accent);
+    color: var(--accent-strong);
+    background: var(--accent-soft);
+    transform: translateY(calc(-50% - 1px));
+  }
+
+  html[data-toc-collapsed="true"] .article-toc-trigger {
+    color: var(--accent-strong);
+    background: var(--surface);
+  }
+
+  .article-toc {
+    scrollbar-gutter: stable;
+  }
+}
+
+@media screen and (prefers-reduced-motion: reduce) {
+  .sidebar-toggle,
+  .article-toc-trigger {
+    transition: none;
+  }
+}

@@ -242,6 +242,14 @@ func (s *Service) Pending(ctx context.Context, limit int) ([]Comment, error) {
 	return result, rows.Err()
 }
 
+func (s *Service) PendingCount(ctx context.Context) (int, error) {
+	var count int
+	if err := s.db.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM comments WHERE status='pending'").Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 	if status != "approved" && status != "spam" && status != "trash" && status != "pending" {
 		return ErrInvalid

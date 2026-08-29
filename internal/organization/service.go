@@ -13,6 +13,7 @@ import (
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	platformslug "github.com/zhushilin/blog-project/internal/platform/slug"
 )
 
@@ -29,6 +30,14 @@ func (s *Service) Categories(ctx context.Context) ([]Category, error) {
 	return s.repository.Categories(ctx)
 }
 func (s *Service) Tags(ctx context.Context) ([]Tag, error) { return s.repository.Tags(ctx) }
+
+func (s *Service) PublicCategories(ctx context.Context) ([]PublicCategorySummary, error) {
+	return s.repository.PublicCategories(ctx)
+}
+
+func (s *Service) PublicTags(ctx context.Context) ([]PublicTagSummary, error) {
+	return s.repository.PublicTags(ctx)
+}
 
 func (s *Service) CreateCategory(ctx context.Context, input TermInput) (Category, error) {
 	input, slugKey, err := validateTerm(input, true)
@@ -209,19 +218,37 @@ func (s *Service) ReplaceArticleTaxonomyTx(ctx context.Context, tx *sql.Tx, cont
 }
 
 func (s *Service) PublicCategory(ctx context.Context, slug string, limit int) (Category, []int64, error) {
+	page, err := s.PublicCategoryPage(ctx, slug, pagination.Request{PerPage: boundedLimit(limit)})
+	if err != nil {
+		return Category{}, nil, err
+	}
+	return page.Category, page.ArticleIDs, nil
+}
+
+func (s *Service) PublicCategoryPage(ctx context.Context, slug string, request pagination.Request) (PublicCategoryPage, error) {
 	_, key, err := platformslug.Normalize(slug)
 	if err != nil {
-		return Category{}, nil, ErrNotFound
+		return PublicCategoryPage{}, ErrNotFound
 	}
-	return s.repository.PublicCategory(ctx, key, boundedLimit(limit))
+	request = pagination.Normalize(request, 20, 50)
+	return s.repository.PublicCategoryPage(ctx, key, request)
 }
 
 func (s *Service) PublicTag(ctx context.Context, slug string, limit int) (Tag, []int64, error) {
+	page, err := s.PublicTagPage(ctx, slug, pagination.Request{PerPage: boundedLimit(limit)})
+	if err != nil {
+		return Tag{}, nil, err
+	}
+	return page.Tag, page.ArticleIDs, nil
+}
+
+func (s *Service) PublicTagPage(ctx context.Context, slug string, request pagination.Request) (PublicTagPage, error) {
 	_, key, err := platformslug.Normalize(slug)
 	if err != nil {
-		return Tag{}, nil, ErrNotFound
+		return PublicTagPage{}, ErrNotFound
 	}
-	return s.repository.PublicTag(ctx, key, boundedLimit(limit))
+	request = pagination.Normalize(request, 20, 50)
+	return s.repository.PublicTagPage(ctx, key, request)
 }
 
 func validateTerm(input TermInput, category bool) (TermInput, string, error) {

@@ -17,6 +17,8 @@
 - [事件版本策略](./docs/reference/events.md)
 - [功能范围与交付路线](./docs/product-and-roadmap.md)
 - [主流博客系统对照](./docs/research/popular-systems.md)
+- [博客界面重构计划](./docs/ui-refactor-plan.md)
+- [公开阅读端阶段二实施记录](./docs/progress/ui-stage-2.md)
 - [架构决策索引](./docs/adr/README.md)
 
 ## 一句话架构
@@ -25,7 +27,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、llms.txt、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -42,7 +44,9 @@ curl --insecure https://localhost/readyz
 docker compose down
 ```
 
-`BLOG_SITE_ADDRESS` 同时作为 canonical、Open Graph、RSS、Sitemap 和 robots 的公开基址，正式部署前必须设置为访问者实际使用的地址。内容编辑器可单独覆盖 SEO 标题和描述；留空时自动回退到内容标题、摘要与站点名。
+`BLOG_SITE_ADDRESS` 同时作为 canonical、Open Graph、RSS、Sitemap、robots 和 llms.txt 的公开基址，正式部署前必须设置为访问者实际使用的地址。内容编辑器可单独覆盖 SEO 标题和描述；留空时自动回退到内容标题、摘要与站点名。
+
+Cookie 的 Secure 属性默认跟随 `BLOG_SITE_ADDRESS` 的协议：HTTPS 自动启用，HTTP 本地开发自动关闭；如有特殊部署需求，可通过 `BLOG_COOKIE_SECURE` 显式覆盖。
 
 ### 阶段二可选能力
 

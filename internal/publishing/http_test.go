@@ -50,7 +50,7 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	})
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, create)
-	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/articles/1/edit" {
+	if response.Code != http.StatusSeeOther || response.Header().Get("Location") != "/admin/articles/1/edit#content-form" {
 		t.Fatalf("create status=%d location=%q body=%s", response.Code, response.Header().Get("Location"), response.Body.String())
 	}
 
@@ -65,7 +65,7 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 
 	pageCreate := httptest.NewRecorder()
 	router.ServeHTTP(pageCreate, formRequest(http.MethodPost, "/admin/pages", url.Values{"csrf_token": {"test-csrf"}, "title": {"关于"}, "slug": {"about"}, "body_markdown": {"关于页面"}}))
-	if pageCreate.Code != http.StatusSeeOther || pageCreate.Header().Get("Location") != "/admin/pages/2/edit" {
+	if pageCreate.Code != http.StatusSeeOther || pageCreate.Header().Get("Location") != "/admin/pages/2/edit#content-form" {
 		t.Fatalf("page create status=%d location=%q", pageCreate.Code, pageCreate.Header().Get("Location"))
 	}
 	pagePublish := httptest.NewRecorder()
@@ -82,6 +82,14 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	router.ServeHTTP(pageEditor, httptest.NewRequest(http.MethodGet, "/admin/pages/new", nil))
 	if strings.Contains(pageEditor.Body.String(), "tag_ids") {
 		t.Fatal("page editor exposed article tags")
+	}
+	articleList := httptest.NewRecorder()
+	router.ServeHTTP(articleList, httptest.NewRequest(http.MethodGet, "/admin/articles?status=published&q=%E5%AE%89%E5%85%A8", nil))
+	if articleList.Code != http.StatusOK || !strings.Contains(articleList.Body.String(), "内容状态") || !strings.Contains(articleList.Body.String(), "安全发布") || strings.Contains(articleList.Body.String(), "关于") {
+		t.Fatalf("article list status=%d body=%s", articleList.Code, articleList.Body.String())
+	}
+	if !strings.Contains(articleEditor.Body.String(), "editor-rail") || !strings.Contains(articleEditor.Body.String(), "editor-panel") || !strings.Contains(articleEditor.Body.String(), "字数") {
+		t.Fatalf("editor workspace missing phase three structure: %s", articleEditor.Body.String())
 	}
 
 	versions := httptest.NewRecorder()
@@ -126,7 +134,7 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	}
 	trash := httptest.NewRecorder()
 	router.ServeHTTP(trash, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"4"}}))
-	if trash.Code != http.StatusSeeOther || trash.Header().Get("Location") != "/admin/trash" {
+	if trash.Code != http.StatusSeeOther || trash.Header().Get("Location") != "/admin/trash#trash-results" {
 		t.Fatalf("trash status=%d location=%q", trash.Code, trash.Header().Get("Location"))
 	}
 	trashPage := httptest.NewRecorder()
@@ -136,7 +144,7 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 	}
 	restoreTrash := httptest.NewRecorder()
 	router.ServeHTTP(restoreTrash, formRequest(http.MethodPost, "/admin/trash/1/restore", url.Values{"csrf_token": {"test-csrf"}}))
-	if restoreTrash.Code != http.StatusSeeOther || restoreTrash.Header().Get("Location") != "/admin/articles/1/edit" {
+	if restoreTrash.Code != http.StatusSeeOther || restoreTrash.Header().Get("Location") != "/admin/articles/1/edit#content-form" {
 		t.Fatalf("restore trash status=%d location=%q", restoreTrash.Code, restoreTrash.Header().Get("Location"))
 	}
 

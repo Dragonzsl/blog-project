@@ -6,8 +6,10 @@
   <meta name="color-scheme" content="light dark">
   <title>登录 · {{.SiteName}}</title>
   <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
+  {{template "admin_assets" .}}
 </head>
 <body class="auth-page">
+  {{template "admin_theme_toggle" .}}
   <main class="login-shell">
     <section class="auth-card login-card" aria-labelledby="login-title">
       <div class="wordmark"><span aria-hidden="true">✦</span> {{.SiteName}}</div>
@@ -16,7 +18,7 @@
         <h1 id="login-title">欢迎回来。</h1>
         <p class="muted">使用密码与验证器代码，或使用一枚尚未用过的恢复码。</p>
       </div>
-      {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+      {{template "admin_feedback" .}}
       <form method="post" action="/admin/login" class="stack">
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         <label>用户名<input name="username" value="{{.Username}}" autocomplete="username" required autofocus></label>

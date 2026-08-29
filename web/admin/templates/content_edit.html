@@ -5,23 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{{if .IsNew}}新{{.Descriptor.Singular}}{{else}}编辑 · {{.Content.Title}}{{end}} · {{.SiteName}}</title>
-  <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=8">
 </head>
 <body class="admin-page editor-page">
-  <header class="admin-header">
-    <a class="wordmark" href="/admin/"><span aria-hidden="true">✦</span> {{.SiteName}}</a>
-    <nav aria-label="内容操作"><a class="nav-link" href="/admin/articles">文章</a><a class="nav-link" href="/admin/pages">页面</a>{{if not .IsNew}}<a class="nav-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/preview">预览</a>{{end}}</nav>
-  </header>
+  {{template "admin_header" .}}
   <main class="editor-shell">
-    <div class="editor-heading"><div><p class="eyebrow">{{if .IsNew}}新{{.Descriptor.Singular}}草稿{{else}}{{.Status}}{{end}}</p><h1>{{if .IsNew}}创建{{.Descriptor.Singular}}。{{else}}继续打磨。{{end}}</h1></div>{{if .Published}}<a class="text-link" href="{{.PublicURL}}">查看公开{{.Descriptor.Singular}} ↗</a>{{end}}</div>
-    {{if .Error}}<div class="notice error" role="alert">{{.Error}}</div>{{end}}
+    <div class="editor-heading"><div><p class="eyebrow">{{if .IsNew}}新{{.Descriptor.Singular}}草稿{{else}}{{.Status}}{{end}}</p><h1>{{if .IsNew}}创建{{.Descriptor.Singular}}。{{else}}继续打磨。{{end}}</h1></div>{{if .Published}}<a class="text-link" href="{{.PublicURL}}" target="_blank" rel="noreferrer">查看公开{{.Descriptor.Singular}} ↗</a>{{end}}</div>
+    <div class="editor-topbar"><a class="editor-back-link" href="{{.Descriptor.ListURL}}">← 返回{{.Descriptor.Plural}}</a><span>Markdown 写作区 · 支持 Ctrl/⌘ + B、I、K</span></div>
+    {{template "admin_feedback" .}}
     {{if .SnapshotAvailable}}<div class="notice snapshot-notice"><span>检测到 {{.SnapshotUpdatedAt}} 的编辑快照。</span><a href="{{.Descriptor.ListURL}}/{{.Content.ID}}/edit?snapshot=load">载入快照 →</a></div>{{end}}
     <div class="editor-grid">
-      <form method="post" action="{{.Action}}" class="editor-form" id="content-form" {{if not .IsNew}}data-snapshot-url="{{.Descriptor.ListURL}}/{{.Content.ID}}/snapshot" data-snapshot-interval="{{.SnapshotIntervalMilliseconds}}"{{end}}>
+      <aside class="editor-rail" aria-label="编辑工作区">
+        <a class="editor-back-link" href="{{.Descriptor.ListURL}}">← 返回{{.Descriptor.Plural}}</a>
+        <div class="editor-rail-section"><p class="aside-label">Workspace</p><nav class="editor-rail-nav" aria-label="编辑器页面">{{if not .IsNew}}<a href="{{.Descriptor.ListURL}}/{{.Content.ID}}/preview">预览当前内容</a><a href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">浏览版本</a>{{else}}<span>保存后可预览与回溯</span>{{end}}</nav></div>
+        <div class="editor-rail-stats"><div><span>字数</span><strong>{{.WordCount}}</strong></div><div><span>阅读时间</span><strong>{{if .ReadingMinutes}}{{.ReadingMinutes}} 分钟{{else}}—{{end}}</strong></div></div>
+        <p class="editor-rail-note">Markdown 编辑器会保留纯文本结构，预览时再交给当前主题渲染。</p>
+      </aside>
+      <form method="post" action="{{.Action}}" class="editor-form" id="content-form" tabindex="-1" {{if not .IsNew}}data-snapshot-url="{{.Descriptor.ListURL}}/{{.Content.ID}}/snapshot" data-snapshot-interval="{{.SnapshotIntervalMilliseconds}}"{{end}}>
         <input type="hidden" name="csrf_token" value="{{.CSRF}}">
         {{if not .IsNew}}<input type="hidden" name="lock_version" value="{{.Content.LockVersion}}">{{end}}
+        <input type="hidden" name="auto_slug" value="{{if .IsNew}}1{{else}}0{{end}}">
         <label>标题<input class="title-input" name="title" value="{{.Content.Title}}" maxlength="200" placeholder="{{.Descriptor.Singular}}标题" required autofocus></label>
-        <label>固定链接<div class="slug-input"><span>{{.Descriptor.PermalinkPrefix}}</span><input name="slug" value="{{.Content.Slug}}" maxlength="120" placeholder="about-or-随笔" required></div>{{if .Published}}<small>修改会先作为草稿保存；再次发布时切换地址，并自动将旧地址永久重定向到新地址。</small>{{end}}</label>
+        <label>固定链接<div class="slug-input"><span>{{.Descriptor.PermalinkPrefix}}</span><input name="slug" value="{{.Content.Slug}}" maxlength="120" placeholder="保存标题后自动生成" readonly data-slug-input data-slug-fallback="{{.Descriptor.Kind}}" aria-describedby="slug-help"></div><small id="slug-help">固定链接根据标题自动生成，不需要手动填写。{{if .Published}}修改标题后再次发布会切换地址，并自动将旧地址永久重定向到新地址。{{end}}</small></label>
         <label>摘要<textarea name="excerpt" rows="3" maxlength="500" placeholder="用一两句话说明这项内容。">{{.Content.Excerpt}}</textarea></label>
         <details class="seo-panel" {{if or .Content.SEOTitle .Content.SEODescription}}open{{end}}><summary>搜索与分享元数据</summary><div><label>SEO 标题<input name="seo_title" value="{{.Content.SEOTitle}}" maxlength="200" placeholder="留空则使用内容标题与站点名"></label><label>SEO 描述<textarea name="seo_description" rows="3" maxlength="500" placeholder="留空则使用摘要；建议准确概括页面。">{{.Content.SEODescription}}</textarea></label></div></details>
         {{if eq .Descriptor.Kind "article"}}
@@ -30,28 +35,48 @@
           <fieldset class="tag-picker"><legend>标签</legend>{{if .Tags}}<div>{{range .Tags}}<label><input type="checkbox" name="tag_ids" value="{{.ID}}" {{if index $.SelectedTags .ID}}checked{{end}}><span># {{.Name}}</span></label>{{end}}</div>{{else}}<p>尚无标签，可先到内容组织中创建。</p>{{end}}</fieldset>
         </div>
         {{end}}
-        <label>Markdown 正文<textarea class="markdown-editor" name="body_markdown" rows="22" maxlength="2097152" spellcheck="true" placeholder="# 从这里开始写作…">{{.Content.BodyMarkdown}}</textarea></label>
+        <div class="markdown-field">
+          <div class="markdown-toolbar" role="toolbar" aria-label="Markdown 编辑工具">
+            <button type="button" data-md-action="bold" aria-label="加粗" title="加粗（Ctrl/⌘ + B）"><strong>B</strong></button>
+            <button type="button" data-md-action="italic" aria-label="斜体" title="斜体（Ctrl/⌘ + I）"><em>I</em></button>
+            <button type="button" data-md-action="strike" aria-label="删除线" title="删除线">S</button>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <button type="button" data-md-action="heading" aria-label="二级标题" title="二级标题">H2</button>
+            <button type="button" data-md-action="quote" aria-label="引用" title="引用">❯</button>
+            <button type="button" data-md-action="unordered-list" aria-label="无序列表" title="无序列表">• 列表</button>
+            <button type="button" data-md-action="ordered-list" aria-label="有序列表" title="有序列表">1. 列表</button>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <button type="button" data-md-action="inline-code" aria-label="行内代码" title="行内代码">&lt;/&gt;</button>
+            <button type="button" data-md-action="code-block" aria-label="代码块" title="代码块">代码块</button>
+            <button type="button" data-md-action="link" aria-label="链接" title="链接（Ctrl/⌘ + K）">链</button>
+            <button type="button" data-md-action="image" aria-label="图片" title="图片">图</button>
+            <button type="button" data-md-action="rule" aria-label="分隔线" title="分隔线">—</button>
+            <span class="toolbar-divider" aria-hidden="true"></span>
+            <button type="button" data-md-action="undo" aria-label="撤销" title="撤销">↶</button>
+            <button type="button" data-md-action="redo" aria-label="重做" title="重做">↷</button>
+          </div>
+          <label>Markdown 正文<textarea class="markdown-editor" name="body_markdown" rows="22" maxlength="2097152" spellcheck="true" placeholder="# 从这里开始写作…">{{.Content.BodyMarkdown}}</textarea></label>
+        </div>
         <div class="form-actions"><button type="submit">{{if .IsNew}}创建草稿{{else}}保存新版本{{end}} <span aria-hidden="true">→</span></button>{{if not .IsNew}}<a class="text-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/preview">预览当前编辑</a>{{end}}</div>
       </form>
-      <aside class="editor-aside">
-        <div><p class="aside-label">状态</p><strong>{{if .IsNew}}尚未保存{{else}}{{.Status}}{{end}}</strong></div>
-        {{if .ScheduledAtDisplay}}<div><p class="aside-label">计划公开</p><strong>{{.ScheduledAtDisplay}}</strong></div>{{end}}
-        <div><p class="aside-label">编辑格式</p><strong>Markdown</strong><small>支持安全源码编辑和主题化私密预览。</small></div>
-        {{if not .IsNew}}
-        <div><p class="aside-label">版本</p><strong>#{{.Content.LockVersion}}</strong><small>发布只会公开最近保存的版本。</small><a class="text-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">浏览全部版本 →</a></div>
-        <div><p class="aside-label">意外恢复</p><strong data-snapshot-status role="status" aria-live="polite">等待编辑</strong><small>发生修改后约每 {{.SnapshotIntervalSeconds}} 秒覆盖一份编辑快照，不产生正式版本。</small></div>
-        {{if .SnapshotLoaded}}<div><p class="aside-label">先正式保存</p><small>当前表单来自编辑快照。正式保存后才可发布、定时或移入回收站。</small></div>{{else}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/publish" class="publish-form">
-          <input type="hidden" name="csrf_token" value="{{.CSRF}}">
-          <input type="hidden" name="lock_version" value="{{.Content.LockVersion}}">
-          <button type="submit" class="publish-button">{{if .Published}}发布当前修订{{else}}发布{{.Descriptor.Singular}}{{end}} <span aria-hidden="true">↗</span></button>
-        </form>
-        {{if .Published}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/unpublish" class="publish-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="quiet-button">撤回为草稿</button></form>{{else}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/schedule" class="schedule-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><label>定时发布 · {{.Timezone}}<input type="datetime-local" name="scheduled_at" value="{{.ScheduledAt}}" required></label><button type="submit" class="quiet-button">{{if .Scheduled}}更新计划{{else}}设置计划{{end}}</button></form>{{if .Scheduled}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/schedule/cancel" class="publish-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="quiet-button">取消定时，保留草稿</button></form>{{end}}{{end}}
-        <form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/trash" class="trash-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="danger-button">移入回收站</button></form>
-        {{end}}
-        {{end}}
+      <aside class="editor-aside" aria-label="发布与恢复">
+        <details class="editor-panel" open>
+          <summary>发布设置</summary>
+          <div class="editor-panel-body"><div class="editor-status"><p class="aside-label">状态</p><strong>{{if .IsNew}}尚未保存{{else}}{{.Status}}{{end}}</strong>{{if .ScheduledAtDisplay}}<small>计划公开 · {{.ScheduledAtDisplay}}</small>{{end}}</div><div class="editor-format"><p class="aside-label">编辑格式</p><strong>Markdown</strong><small>支持安全源码编辑和主题化私密预览。</small></div></div>
+        </details>
+        {{if not .IsNew}}<details class="editor-panel" open>
+          <summary>版本与恢复</summary>
+          <div class="editor-panel-body"><div class="editor-version"><p class="aside-label">当前版本</p><strong>#{{.Content.LockVersion}}</strong><small>发布只会公开最近保存的版本。</small><a class="text-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">浏览全部版本 →</a></div><div class="editor-snapshot"><p class="aside-label">意外恢复</p><strong data-snapshot-status role="status" aria-live="polite">等待编辑</strong><small>发生修改后约每 {{.SnapshotIntervalSeconds}} 秒覆盖一份编辑快照，不产生正式版本。</small></div></div>
+        </details>
+        <div class="editor-actions-panel">
+          {{if .SnapshotLoaded}}<div class="editor-action-note"><p class="aside-label">先正式保存</p><small>当前表单来自编辑快照。正式保存后才可发布、定时或移入回收站。</small></div>{{else}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/publish" class="publish-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="publish-button">{{if .Published}}发布当前修订{{else}}发布{{.Descriptor.Singular}}{{end}} <span aria-hidden="true">↗</span></button></form>
+          {{if .Published}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/unpublish" class="publish-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="quiet-button">撤回为草稿</button></form>{{else}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/schedule" class="schedule-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><label>定时发布 · {{.Timezone}}<input type="datetime-local" name="scheduled_at" value="{{.ScheduledAt}}" required></label><button type="submit" class="quiet-button">{{if .Scheduled}}更新计划{{else}}设置计划{{end}}</button></form>{{if .Scheduled}}<form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/schedule/cancel" class="publish-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="quiet-button">取消定时，保留草稿</button></form>{{end}}{{end}}
+          <form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/trash" class="trash-form"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button type="submit" class="danger-button">移入回收站</button></form>{{end}}
+        </div>{{end}}
       </aside>
     </div>
   </main>
-  {{if not .IsNew}}<script src="/admin/assets/editor.js?v=1" defer></script>{{end}}
+  {{template "admin_footer" .}}
+  <script src="/admin/assets/editor.js?v=2" defer></script>
 </body>
 </html>

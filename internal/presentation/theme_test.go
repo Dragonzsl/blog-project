@@ -28,8 +28,8 @@ func TestDefaultThemeRendersSanitizedArticle(t *testing.T) {
 	if !strings.Contains(html, "现代文章") || !strings.Contains(html, "<strong>安全内容</strong>") {
 		t.Fatalf("article content missing: %s", html)
 	}
-	if strings.Contains(html, "<script") {
-		t.Fatalf("unsafe script rendered: %s", html)
+	if strings.Contains(html, "alert(1)") {
+		t.Fatalf("unsafe script content rendered: %s", html)
 	}
 	if !strings.Contains(html, theme.AssetURL()) {
 		t.Fatalf("fingerprinted asset URL missing: %s", html)

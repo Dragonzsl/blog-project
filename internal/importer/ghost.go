@@ -3,6 +3,7 @@ package importer
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -37,7 +38,29 @@ func (ghostParser) Parse(data []byte, source string) ([]Item, []string, error) {
 func walkJSON(value any, collection string, visit func(map[string]any, string)) {
 	switch current := value.(type) {
 	case map[string]any:
-		for key, child := range current {
+		keys := make([]string, 0, len(current))
+		for key := range current {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			priority := func(key string) int {
+				switch key {
+				case "posts":
+					return 0
+				case "pages":
+					return 1
+				default:
+					return 2
+				}
+			}
+			left, right := priority(keys[i]), priority(keys[j])
+			if left != right {
+				return left < right
+			}
+			return keys[i] < keys[j]
+		})
+		for _, key := range keys {
+			child := current[key]
 			if key == "posts" || key == "pages" {
 				if values, ok := child.([]any); ok {
 					for _, entry := range values {

@@ -12,6 +12,7 @@ import (
 	"unicode"
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 var markdownMarkup = regexp.MustCompile(`(?s)<[^>]*>|!\[[^]]*\]\([^)]*\)|\[([^]]+)\]\([^)]*\)|[` + "`" + `*_>#~|=-]+`)
@@ -131,13 +132,39 @@ func (r *Repository) syncDocument(ctx context.Context, tx *sql.Tx, contentID int
 }
 
 func (r *Repository) Search(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
+	page, err := r.SearchPage(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return page.Results, nil
+}
+
+func (r *Repository) SearchPage(ctx context.Context, query SearchQuery) (SearchPage, error) {
 	grams := chineseBigrams(query.Text, 32)
+	request := pagination.Normalize(pagination.Request{Page: query.Page, PerPage: query.Limit}, query.Limit, query.Limit)
+	if request.PerPage < 1 {
+		request.PerPage = 20
+	}
+	if query.PerPage > 0 {
+		request.PerPage = query.PerPage
+	}
+	if query.Page > 0 {
+		request.Page = query.Page
+	}
+	query.Limit = request.PerPage
+	total, err := r.searchCount(ctx, query, grams)
+	if err != nil {
+		return SearchPage{}, err
+	}
+	info := pagination.NewInfo(total, request)
+	query.Offset = info.Offset()
 	if len(grams) > 0 {
-		return r.searchChinese(ctx, query, grams)
+		results, err := r.searchChinese(ctx, query, grams)
+		return SearchPage{Results: results, Pagination: info}, err
 	}
 	match := ftsQuery(query.Text)
 	if match == "" {
-		return nil, ErrInvalidQuery
+		return SearchPage{}, ErrInvalidQuery
 	}
 	statement := `SELECT d.kind,d.path,d.title,d.excerpt,d.published_at
 		FROM search_documents d WHERE search_documents MATCH ?`
@@ -148,9 +175,44 @@ func (r *Repository) Search(ctx context.Context, query SearchQuery) ([]SearchRes
 	} else {
 		statement += " ORDER BY bm25(search_documents,0,0,0,0,0,12.0,5.0,1.0,3.0),CAST(d.published_at AS INTEGER) DESC"
 	}
-	statement += " LIMIT ?"
-	args = append(args, query.Limit)
-	return scanSearchResults(r.database.Reader.QueryContext(ctx, statement, args...))
+	statement += " LIMIT ? OFFSET ?"
+	args = append(args, query.Limit, query.Offset)
+	results, err := scanSearchResults(r.database.Reader.QueryContext(ctx, statement, args...))
+	return SearchPage{Results: results, Pagination: info}, err
+}
+
+func (r *Repository) searchCount(ctx context.Context, query SearchQuery, grams []string) (int, error) {
+	if len(grams) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(grams)), ",")
+		statement := `SELECT COUNT(*) FROM (
+			SELECT d.rowid
+			FROM search_documents d JOIN search_grams g ON g.content_id=d.rowid
+			WHERE g.gram IN (` + placeholders + `)`
+		args := make([]any, 0, len(grams)+4)
+		for _, gram := range grams {
+			args = append(args, gram)
+		}
+		if match := nonHanFTSQuery(query.Text); match != "" {
+			statement += " AND search_documents MATCH ?"
+			args = append(args, match)
+		}
+		statement, args = addSearchFilters(statement, args, query)
+		statement += " GROUP BY d.rowid HAVING COUNT(DISTINCT g.gram)=?)"
+		args = append(args, len(grams))
+		var total int
+		err := r.database.Reader.QueryRowContext(ctx, statement, args...).Scan(&total)
+		return total, err
+	}
+	match := ftsQuery(query.Text)
+	if match == "" {
+		return 0, ErrInvalidQuery
+	}
+	statement := `SELECT COUNT(*) FROM search_documents d WHERE search_documents MATCH ?`
+	args := []any{match}
+	statement, args = addSearchFilters(statement, args, query)
+	var total int
+	err := r.database.Reader.QueryRowContext(ctx, statement, args...).Scan(&total)
+	return total, err
 }
 
 func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams []string) ([]SearchResult, error) {
@@ -176,8 +238,8 @@ func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams
 		like := "%" + escapeLike(query.Text) + "%"
 		args = append(args, like, like)
 	}
-	statement += " LIMIT ?"
-	args = append(args, query.Limit)
+	statement += " LIMIT ? OFFSET ?"
+	args = append(args, query.Limit, query.Offset)
 	return scanSearchResults(r.database.Reader.QueryContext(ctx, statement, args...))
 }
 
@@ -240,6 +302,78 @@ func (r *Repository) Feed(ctx context.Context, limit int) ([]FeedItem, error) {
 	return items, rows.Err()
 }
 
+func (r *Repository) ArchiveIndex(ctx context.Context) ([]ArchiveYear, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT CAST(strftime('%Y', c.published_at / 1000, 'unixepoch') AS INTEGER) AS archive_year,
+		       CAST(strftime('%m', c.published_at / 1000, 'unixepoch') AS INTEGER) AS archive_month,
+		       COUNT(*)
+		FROM contents c
+		WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		GROUP BY archive_year, archive_month
+		ORDER BY archive_year DESC, archive_month DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("list archive index: %w", err)
+	}
+	defer rows.Close()
+	var result []ArchiveYear
+	for rows.Next() {
+		var month ArchiveMonth
+		if err := rows.Scan(&month.Year, &month.Month, &month.Count); err != nil {
+			return nil, fmt.Errorf("scan archive month: %w", err)
+		}
+		if len(result) == 0 || result[len(result)-1].Year != month.Year {
+			result = append(result, ArchiveYear{Year: month.Year})
+		}
+		result[len(result)-1].Months = append(result[len(result)-1].Months, month)
+		result[len(result)-1].Total += month.Count
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) ArchiveMonthPage(ctx context.Context, year, month int, request pagination.Request) (ArchivePage, error) {
+	start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	end := start.AddDate(0, 1, 0)
+	startMillis, endMillis := start.UnixMilli(), end.UnixMilli()
+	var total int
+	if err := r.database.Reader.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM contents
+		WHERE kind='article' AND status='published' AND trashed_at IS NULL
+		  AND published_at >= ? AND published_at < ?`, startMillis, endMillis).Scan(&total); err != nil {
+		return ArchivePage{}, fmt.Errorf("count archive month: %w", err)
+	}
+	if total == 0 {
+		return ArchivePage{}, ErrNotFound
+	}
+	info := pagination.NewInfo(total, request)
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT '/posts/' || c.published_slug, revision.title, revision.excerpt,
+		       c.published_at
+		FROM contents c
+		JOIN content_revisions revision ON revision.id=c.published_revision_id
+		WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		  AND c.published_at >= ? AND c.published_at < ?
+		ORDER BY c.published_at DESC, c.id DESC LIMIT ? OFFSET ?`, startMillis, endMillis, info.PerPage, info.Offset())
+	if err != nil {
+		return ArchivePage{}, fmt.Errorf("list archive month: %w", err)
+	}
+	defer rows.Close()
+	results := make([]SearchResult, 0, info.PerPage)
+	for rows.Next() {
+		var result SearchResult
+		var publishedAt int64
+		if err := rows.Scan(&result.Path, &result.Title, &result.Excerpt, &publishedAt); err != nil {
+			return ArchivePage{}, fmt.Errorf("scan archive article: %w", err)
+		}
+		result.Kind = "article"
+		result.PublishedAt = time.UnixMilli(publishedAt).UTC()
+		results = append(results, result)
+	}
+	if err := rows.Err(); err != nil {
+		return ArchivePage{}, err
+	}
+	return ArchivePage{Year: year, Month: month, Results: results, Pagination: info}, nil
+}
+
 func (r *Repository) Sitemap(ctx context.Context, limit int) ([]SitemapEntry, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT path,last_modified FROM (
@@ -247,18 +381,26 @@ func (r *Repository) Sitemap(ctx context.Context, limit int) ([]SitemapEntry, er
 			FROM contents c LEFT JOIN content_revisions revision ON revision.id=c.published_revision_id
 			WHERE c.status='published' AND c.trashed_at IS NULL
 			UNION ALL
+			SELECT '/articles',0,1
+			UNION ALL
+			SELECT '/archive',0,1
+			UNION ALL
+			SELECT '/categories',0,1
+			UNION ALL
+			SELECT '/tags',0,1
+			UNION ALL
 			SELECT CASE c.kind WHEN 'page' THEN '/' || c.published_slug ELSE '/posts/' || c.published_slug END,
-			       revision.created_at,1
+			       revision.created_at,2
 			FROM contents c JOIN content_revisions revision ON revision.id=c.published_revision_id
 			WHERE c.status='published' AND c.trashed_at IS NULL
 			UNION ALL
-			SELECT '/categories/' || category.slug,category.updated_at,2
+			SELECT '/categories/' || category.slug,category.updated_at,3
 			FROM categories category WHERE EXISTS(
 				SELECT 1 FROM contents c JOIN content_revisions revision ON revision.id=c.published_revision_id
 				WHERE c.status='published' AND c.trashed_at IS NULL AND revision.category_public_id=category.public_id
 			)
 			UNION ALL
-			SELECT '/tags/' || tag.slug,tag.updated_at,3
+			SELECT '/tags/' || tag.slug,tag.updated_at,4
 			FROM tags tag WHERE EXISTS(
 				SELECT 1 FROM contents c JOIN content_revisions revision ON revision.id=c.published_revision_id
 				WHERE c.status='published' AND c.trashed_at IS NULL AND EXISTS(

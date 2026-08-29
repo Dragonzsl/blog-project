@@ -44,7 +44,7 @@ func (h *RedirectHTTPHandler) index(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := h.templates.ExecuteTemplate(w, "redirects.html", map[string]any{"Redirects": items, "CSRF": h.security.CSRFToken(r)}); err != nil {
+	if err := h.templates.ExecuteTemplate(w, "redirects.html", map[string]any{"Redirects": items, "CSRF": h.security.CSRFToken(r), "AdminSection": "redirects"}); err != nil {
 		h.logger.ErrorContext(r.Context(), "render redirects", "error", err)
 	}
 }
@@ -95,7 +95,7 @@ func (h *RedirectHTTPHandler) renderError(w http.ResponseWriter, r *http.Request
 	items, _ := h.service.Redirects(r.Context(), 200)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusUnprocessableEntity)
-	_ = h.templates.ExecuteTemplate(w, "redirects.html", map[string]any{"Redirects": items, "Error": err.Error(), "CSRF": h.security.CSRFToken(r)})
+	_ = h.templates.ExecuteTemplate(w, "redirects.html", map[string]any{"Redirects": items, "Error": err.Error(), "CSRF": h.security.CSRFToken(r), "AdminSection": "redirects"})
 }
 func (h *RedirectHTTPHandler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	h.logger.ErrorContext(r.Context(), "redirect request failed", "error", err)

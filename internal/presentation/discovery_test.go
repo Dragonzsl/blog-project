@@ -76,6 +76,9 @@ func TestDiscoveryHTTPSEOFeedSitemapSearchAndRedirect(t *testing.T) {
 	if !strings.Contains(articleResponse.Header().Get("Content-Security-Policy"), "sha256-") {
 		t.Fatalf("JSON-LD CSP hash missing: %q", articleResponse.Header().Get("Content-Security-Policy"))
 	}
+	if !strings.Contains(articleResponse.Header().Get("Content-Security-Policy"), "connect-src 'self'") {
+		t.Fatalf("same-origin enhancements are blocked by CSP: %q", articleResponse.Header().Get("Content-Security-Policy"))
+	}
 	redirect := requestPublic(t, router, "/posts/discover")
 	if redirect.Code != http.StatusMovedPermanently || redirect.Header().Get("Location") != "/posts/discover-new" {
 		t.Fatalf("redirect status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
@@ -96,8 +99,12 @@ func TestDiscoveryHTTPSEOFeedSitemapSearchAndRedirect(t *testing.T) {
 		t.Fatalf("sitemap status=%d body=%s", sitemap.Code, sitemap.Body.String())
 	}
 	robots := requestPublic(t, router, "/robots.txt")
-	if !strings.Contains(robots.Body.String(), "Disallow: /admin/") || !strings.Contains(robots.Body.String(), "https://blog.example/sitemap.xml") {
+	if robots.Code != http.StatusOK || !strings.Contains(robots.Header().Get("Content-Type"), "text/plain") || !strings.Contains(robots.Body.String(), "Disallow: /admin/") || !strings.Contains(robots.Body.String(), "https://blog.example/sitemap.xml") {
 		t.Fatalf("robots body=%s", robots.Body.String())
+	}
+	llms := requestPublic(t, router, "/llms.txt")
+	if llms.Code != http.StatusOK || !strings.Contains(llms.Header().Get("Content-Type"), "text/plain") || !strings.Contains(llms.Body.String(), "# 纸上花园") || !strings.Contains(llms.Body.String(), "[发现轻量博客](<https://blog.example/posts/discover-new>)") || !strings.Contains(llms.Body.String(), "[RSS](<https://blog.example/rss.xml>)") {
+		t.Fatalf("llms status=%d content-type=%q body=%s", llms.Code, llms.Header().Get("Content-Type"), llms.Body.String())
 	}
 }
 

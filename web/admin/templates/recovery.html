@@ -6,8 +6,10 @@
   <meta name="color-scheme" content="light dark">
   <title>保存恢复码 · {{.SiteName}}</title>
   <link rel="stylesheet" href="/admin/assets/admin.css?v=6">
+  {{template "admin_assets" .}}
 </head>
 <body class="auth-page">
+  {{template "admin_theme_toggle" .}}
   <main class="auth-shell">
     <section class="auth-intro" aria-labelledby="recovery-title">
       <div class="wordmark"><span aria-hidden="true">✦</span> Personal Press</div>

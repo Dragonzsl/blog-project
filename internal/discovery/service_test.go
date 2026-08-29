@@ -67,6 +67,10 @@ func TestSearchProjectionLifecycleChineseAndFilters(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Path != "/posts/small-blog" {
 		t.Fatalf("mixed-language results=%+v err=%v", results, err)
 	}
+	searchPage, err := service.SearchPage(ctx, SearchQuery{Text: "低开销", PerPage: 1, Page: 2})
+	if err != nil || searchPage.Pagination.Total != 2 || searchPage.Pagination.Page != 2 || len(searchPage.Results) != 1 {
+		t.Fatalf("paginated search=%+v err=%v", searchPage, err)
+	}
 	if _, err := service.Search(ctx, SearchQuery{Text: "低", Limit: 20}); !errors.Is(err, ErrInvalidQuery) {
 		t.Fatalf("one-character query error=%v", err)
 	}

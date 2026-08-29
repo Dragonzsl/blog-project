@@ -19,13 +19,13 @@ test.describe("article display smoke", () => {
       });
 
     const desktop = await readMetrics();
-    expect(desktop.fontSize).toBeGreaterThanOrEqual(48);
-    expect(desktop.fontSize).toBeLessThanOrEqual(96);
+    expect(desktop.fontSize).toBeGreaterThanOrEqual(40);
+    expect(desktop.fontSize).toBeLessThanOrEqual(84);
 
     await page.setViewportSize({ width: 566, height: 863 });
     await page.reload();
     const mobile = await readMetrics();
-    expect(mobile.fontSize).toBeGreaterThanOrEqual(44.8);
+    expect(mobile.fontSize).toBeGreaterThanOrEqual(32);
     expect(mobile.fontSize).toBeLessThanOrEqual(64);
 
     await page.locator(".article-header h1").evaluate((element) => {

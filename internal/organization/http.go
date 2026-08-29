@@ -199,7 +199,7 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 			topLevel = append(topLevel, item)
 		}
 	}
-	data := map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Categories": categories, "Tags": tags, "Navigation": navigation, "TopLevel": topLevel, "ContentOptions": content, "Error": message}
+	data := map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Categories": categories, "Tags": tags, "Navigation": navigation, "TopLevel": topLevel, "ContentOptions": content, "Error": message, "AdminSection": "organization"}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)

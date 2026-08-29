@@ -110,6 +110,37 @@ func TestLoadRejectsInvalidEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadInfersCookieSecurityFromBaseURL(t *testing.T) {
+	t.Setenv("BLOG_COOKIE_SECURE", "")
+	t.Setenv("BLOG_BASE_URL", "http://localhost")
+	httpConfig, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if httpConfig.Security.CookieSecure {
+		t.Fatal("HTTP base URL enabled Secure cookies")
+	}
+
+	t.Setenv("BLOG_BASE_URL", "https://localhost")
+	httpsConfig, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !httpsConfig.Security.CookieSecure {
+		t.Fatal("HTTPS base URL did not enable Secure cookies")
+	}
+
+	t.Setenv("BLOG_BASE_URL", "http://localhost")
+	t.Setenv("BLOG_COOKIE_SECURE", "true")
+	explicitConfig, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !explicitConfig.Security.CookieSecure {
+		t.Fatal("explicit BLOG_COOKIE_SECURE=true was ignored")
+	}
+}
+
 func TestValidateRejectsUnsafeMediaConfiguration(t *testing.T) {
 	cfg := Defaults()
 	cfg.Media.VariantWidths = []int{1280, 640}

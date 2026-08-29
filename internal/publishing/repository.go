@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mattn/go-sqlite3"
 	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 type Repository struct {
@@ -262,6 +264,105 @@ func (r *Repository) Contents(ctx context.Context, kind string) ([]Article, erro
 	return contents, rows.Err()
 }
 
+func (r *Repository) CountAdminContents(ctx context.Context, kind string, filter AdminContentFilter) (int, error) {
+	where, args := adminContentWhere(kind, filter)
+	var total int
+	if err := r.database.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM contents c "+where, args...).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count admin %ss: %w", kind, err)
+	}
+	return total, nil
+}
+
+func (r *Repository) AdminContents(ctx context.Context, kind string, filter AdminContentFilter, info pagination.Info) ([]Article, error) {
+	where, args := adminContentWhere(kind, filter)
+	query := contentSelect + " " + where + " ORDER BY " + adminContentOrder(filter.Sort) + " LIMIT ? OFFSET ?"
+	args = append(args, info.PerPage, info.Offset())
+	rows, err := r.database.Reader.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list admin %ss: %w", kind, err)
+	}
+	defer rows.Close()
+	contents := make([]Article, 0, info.PerPage)
+	for rows.Next() {
+		content, err := scanContent(rows)
+		if err != nil {
+			return nil, err
+		}
+		contents = append(contents, content)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for index := range contents {
+		contents[index], err = r.enrichTaxonomy(ctx, contents[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return contents, nil
+}
+
+func adminContentWhere(kind string, filter AdminContentFilter) (string, []any) {
+	clauses := []string{"c.kind = ?", "c.trashed_at IS NULL"}
+	args := []any{kind}
+	if status := normalizeAdminContentStatus(filter.Status); status != "all" {
+		clauses = append(clauses, "c.status = ?")
+		args = append(args, status)
+	}
+	if filter.Query != "" {
+		pattern := "%" + escapeLikePattern(filter.Query) + "%"
+		clauses = append(clauses, `(
+			c.title LIKE ? COLLATE NOCASE ESCAPE char(92) OR
+			c.slug LIKE ? COLLATE NOCASE ESCAPE char(92) OR
+			c.excerpt LIKE ? COLLATE NOCASE ESCAPE char(92) OR
+			EXISTS (
+				SELECT 1 FROM categories search_category
+				WHERE search_category.id = c.category_id AND (
+					search_category.name LIKE ? COLLATE NOCASE ESCAPE char(92) OR
+					search_category.slug_key LIKE ? COLLATE NOCASE ESCAPE char(92)
+				)
+			) OR
+			EXISTS (
+				SELECT 1 FROM content_tags search_content_tag
+				JOIN tags search_tag ON search_tag.id = search_content_tag.tag_id
+				WHERE search_content_tag.content_id = c.id AND (
+					search_tag.name LIKE ? COLLATE NOCASE ESCAPE char(92) OR
+					search_tag.slug_key LIKE ? COLLATE NOCASE ESCAPE char(92)
+				)
+			)
+		)`)
+		for range 7 {
+			args = append(args, pattern)
+		}
+	}
+	if category := strings.TrimSpace(filter.Category); category != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM categories filter_category WHERE filter_category.id = c.category_id AND filter_category.slug_key = ?)")
+		args = append(args, strings.ToLower(category))
+	}
+	if tag := strings.TrimSpace(filter.Tag); tag != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM content_tags filter_content_tag JOIN tags filter_tag ON filter_tag.id = filter_content_tag.tag_id WHERE filter_content_tag.content_id = c.id AND filter_tag.slug_key = ?)")
+		args = append(args, strings.ToLower(tag))
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func adminContentOrder(sortBy string) string {
+	switch normalizeAdminContentSort(sortBy) {
+	case "published":
+		return "COALESCE(c.published_at, 0) DESC, c.updated_at DESC, c.id DESC"
+	case "title":
+		return "c.title COLLATE NOCASE ASC, c.id ASC"
+	default:
+		return "c.updated_at DESC, c.id DESC"
+	}
+}
+
+func escapeLikePattern(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "%", `\%`)
+	return strings.ReplaceAll(value, "_", `\_`)
+}
+
 func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, contentSelect+" WHERE c.trashed_at IS NOT NULL ORDER BY c.trashed_at DESC, c.id DESC")
 	if err != nil {
@@ -281,6 +382,19 @@ func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
 
 func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
 	return r.publishedContents(ctx, "article", limit)
+}
+
+func (r *Repository) PublicArticlesPage(ctx context.Context, request pagination.Request) (PublicArticlePage, error) {
+	total, err := r.countPublishedContents(ctx, "article")
+	if err != nil {
+		return PublicArticlePage{}, err
+	}
+	info := pagination.NewInfo(total, request)
+	articles, err := r.publishedContentsPage(ctx, "article", info)
+	if err != nil {
+		return PublicArticlePage{}, err
+	}
+	return PublicArticlePage{Articles: articles, Pagination: info}, nil
 }
 
 func (r *Repository) PublishedPages(ctx context.Context, limit int) ([]Article, error) {
@@ -314,6 +428,115 @@ func (r *Repository) publishedContents(ctx context.Context, kind string, limit i
 		}
 	}
 	return articles, rows.Err()
+}
+
+func (r *Repository) publishedContentsPage(ctx context.Context, kind string, info pagination.Info) ([]Article, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ? OFFSET ?`, kind, info.PerPage, info.Offset())
+	if err != nil {
+		return nil, fmt.Errorf("list published %ss page: %w", kind, err)
+	}
+	defer rows.Close()
+	articles := make([]Article, 0, info.PerPage)
+	for rows.Next() {
+		article, err := scanContent(rows)
+		if err != nil {
+			return nil, err
+		}
+		articles = append(articles, article)
+	}
+	for index := range articles {
+		articles[index], err = r.enrichPublishedTaxonomy(ctx, articles[index])
+		if err != nil {
+			return nil, err
+		}
+	}
+	return articles, rows.Err()
+}
+
+func (r *Repository) countPublishedContents(ctx context.Context, kind string) (int, error) {
+	var total int
+	err := r.database.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM contents WHERE kind=? AND status='published' AND trashed_at IS NULL`, kind).Scan(&total)
+	return total, err
+}
+
+func (r *Repository) PublicArticleNavigation(ctx context.Context, articleID int64, relatedLimit int) (PublicArticleNavigation, error) {
+	current, err := r.PublicContentByID(ctx, "article", articleID)
+	if err != nil {
+		return PublicArticleNavigation{}, err
+	}
+	if current.PublishedRevisionID < 1 || current.PublishedAt == nil {
+		return PublicArticleNavigation{}, ErrNotFound
+	}
+	previous, err := r.neighbor(ctx, current, true)
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, sql.ErrNoRows) {
+		return PublicArticleNavigation{}, err
+	}
+	var previousArticle *Article
+	if err == nil {
+		previousArticle = &previous
+	}
+	next, err := r.neighbor(ctx, current, false)
+	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, sql.ErrNoRows) {
+		return PublicArticleNavigation{}, err
+	}
+	var nextArticle *Article
+	if err == nil {
+		nextArticle = &next
+	}
+	related, err := r.related(ctx, current, relatedLimit)
+	if err != nil {
+		return PublicArticleNavigation{}, err
+	}
+	return PublicArticleNavigation{Previous: previousArticle, Next: nextArticle, Related: related}, nil
+}
+
+func (r *Repository) neighbor(ctx context.Context, current Article, older bool) (Article, error) {
+	operator, order := "<", "DESC"
+	if !older {
+		operator, order = ">", "ASC"
+	}
+	query := publicContentSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		AND (c.published_at ` + operator + ` ? OR (c.published_at = ? AND c.id ` + operator + ` ?))
+		ORDER BY c.published_at ` + order + `, c.id ` + order + ` LIMIT 1`
+	return scanContent(r.database.Reader.QueryRowContext(ctx, query, current.PublishedAt.UnixMilli(), current.PublishedAt.UnixMilli(), current.ID))
+}
+
+func (r *Repository) related(ctx context.Context, current Article, limit int) ([]Article, error) {
+	conditions := make([]string, 0, 2)
+	args := make([]any, 0, 6)
+	if len(current.publishedCategoryPublicID) > 0 {
+		conditions = append(conditions, "r.category_public_id = ?")
+		args = append(args, current.publishedCategoryPublicID)
+	}
+	for _, tag := range current.Tags {
+		if len(tag.PublicID) == 0 {
+			continue
+		}
+		conditions = append(conditions, "EXISTS (SELECT 1 FROM json_each(r.tag_public_ids_json) WHERE json_each.value = lower(hex(?)))")
+		args = append(args, tag.PublicID)
+	}
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+	query := publicContentSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL AND c.id <> ? AND (` + strings.Join(conditions, " OR ") + `)
+		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`
+	queryArgs := []any{current.ID}
+	queryArgs = append(queryArgs, args...)
+	queryArgs = append(queryArgs, limit)
+	rows, err := r.database.Reader.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("list related articles: %w", err)
+	}
+	defer rows.Close()
+	result := make([]Article, 0, limit)
+	for rows.Next() {
+		article, err := scanContent(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, article)
+	}
+	return result, rows.Err()
 }
 
 func (r *Repository) enrichTaxonomy(ctx context.Context, content Article) (Article, error) {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 type Repository struct{ database *database.DB }
@@ -55,6 +56,127 @@ func (r *Repository) Tags(ctx context.Context) ([]Tag, error) {
 		value.CreatedAt = fromMillis(created)
 		value.UpdatedAt = fromMillis(updated)
 		result = append(result, value)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) PublicCategories(ctx context.Context) ([]PublicCategorySummary, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT category.id, category.public_id, category.slug, category.name, category.description,
+		       category.sort_order, category.created_at, category.updated_at, COUNT(content.id),
+		       COALESCE((
+		           SELECT revision_latest.title
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND revision_latest.category_public_id=category.public_id
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), ''),
+		       COALESCE((
+		           SELECT '/posts/' || content_latest.published_slug
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND revision_latest.category_public_id=category.public_id
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), ''),
+		       COALESCE((
+		           SELECT content_latest.published_at
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND revision_latest.category_public_id=category.public_id
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), 0)
+		FROM categories category
+		LEFT JOIN content_revisions revision ON revision.category_public_id=category.public_id
+		LEFT JOIN contents content ON content.published_revision_id=revision.id
+		  AND content.kind='article' AND content.status='published' AND content.trashed_at IS NULL
+		GROUP BY category.id, category.public_id, category.slug, category.name, category.description,
+		         category.sort_order, category.created_at, category.updated_at
+		HAVING COUNT(content.id) > 0
+		ORDER BY category.sort_order, category.name, category.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list public category summaries: %w", err)
+	}
+	defer rows.Close()
+	result := make([]PublicCategorySummary, 0)
+	for rows.Next() {
+		var summary PublicCategorySummary
+		var created, updated, latestPublish int64
+		if err := rows.Scan(&summary.Category.ID, &summary.Category.PublicID, &summary.Category.Slug, &summary.Category.Name, &summary.Category.Description, &summary.Category.SortOrder, &created, &updated, &summary.ArticleCount, &summary.LatestTitle, &summary.LatestPath, &latestPublish); err != nil {
+			return nil, fmt.Errorf("scan public category summary: %w", err)
+		}
+		summary.Category.CreatedAt = fromMillis(created)
+		summary.Category.UpdatedAt = fromMillis(updated)
+		if latestPublish > 0 {
+			summary.LatestPublish = fromMillis(latestPublish)
+		}
+		result = append(result, summary)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) PublicTags(ctx context.Context) ([]PublicTagSummary, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT tag.id, tag.public_id, tag.slug, tag.name, tag.description, tag.created_at, tag.updated_at,
+		       COUNT(content.id),
+		       COALESCE((
+		           SELECT revision_latest.title
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), ''),
+		       COALESCE((
+		           SELECT '/posts/' || content_latest.published_slug
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), ''),
+		       COALESCE((
+		           SELECT content_latest.published_at
+		           FROM contents content_latest
+		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
+		           WHERE content_latest.kind='article' AND content_latest.status='published'
+		             AND content_latest.trashed_at IS NULL
+		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
+		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
+		       ), 0)
+		FROM tags tag
+		LEFT JOIN content_revisions revision ON EXISTS (
+			SELECT 1 FROM json_each(revision.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id))
+		)
+		LEFT JOIN contents content ON content.published_revision_id=revision.id
+		  AND content.kind='article' AND content.status='published' AND content.trashed_at IS NULL
+		GROUP BY tag.id, tag.public_id, tag.slug, tag.name, tag.description, tag.created_at, tag.updated_at
+		HAVING COUNT(content.id) > 0
+		ORDER BY tag.name, tag.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list public tag summaries: %w", err)
+	}
+	defer rows.Close()
+	result := make([]PublicTagSummary, 0)
+	for rows.Next() {
+		var summary PublicTagSummary
+		var created, updated, latestPublish int64
+		if err := rows.Scan(&summary.Tag.ID, &summary.Tag.PublicID, &summary.Tag.Slug, &summary.Tag.Name, &summary.Tag.Description, &created, &updated, &summary.ArticleCount, &summary.LatestTitle, &summary.LatestPath, &latestPublish); err != nil {
+			return nil, fmt.Errorf("scan public tag summary: %w", err)
+		}
+		summary.Tag.CreatedAt = fromMillis(created)
+		summary.Tag.UpdatedAt = fromMillis(updated)
+		if latestPublish > 0 {
+			summary.LatestPublish = fromMillis(latestPublish)
+		}
+		result = append(result, summary)
 	}
 	return result, rows.Err()
 }
@@ -451,38 +573,64 @@ func (r *Repository) ReplaceArticleTaxonomyTx(ctx context.Context, tx *sql.Tx, c
 }
 
 func (r *Repository) PublicCategory(ctx context.Context, key string, limit int) (Category, []int64, error) {
+	page, err := r.PublicCategoryPage(ctx, key, pagination.Request{Page: 1, PerPage: limit})
+	if err != nil {
+		return Category{}, nil, err
+	}
+	return page.Category, page.ArticleIDs, nil
+}
+
+func (r *Repository) PublicCategoryPage(ctx context.Context, key string, request pagination.Request) (PublicCategoryPage, error) {
 	var category Category
 	var created, updated int64
 	err := r.database.Reader.QueryRowContext(ctx, `SELECT id,public_id,slug,name,description,sort_order,created_at,updated_at FROM categories WHERE slug_key=?`, key).Scan(&category.ID, &category.PublicID, &category.Slug, &category.Name, &category.Description, &category.SortOrder, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Category{}, nil, ErrNotFound
+		return PublicCategoryPage{}, ErrNotFound
 	}
 	if err != nil {
-		return Category{}, nil, err
+		return PublicCategoryPage{}, err
 	}
 	category.CreatedAt = fromMillis(created)
 	category.UpdatedAt = fromMillis(updated)
+	total, err := r.publicCategoryCount(ctx, category.PublicID)
+	if err != nil {
+		return PublicCategoryPage{}, err
+	}
+	info := pagination.NewInfo(total, request)
 	ids, err := r.publicContentIDs(ctx, `
 		SELECT c.id
 		FROM contents c
 		JOIN content_revisions revision ON revision.id = c.published_revision_id
 		WHERE revision.category_public_id = ?
 		  AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
-		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`, category.PublicID, limit)
-	return category, ids, err
+		ORDER BY c.published_at DESC,c.id DESC LIMIT ? OFFSET ?`, category.PublicID, info.PerPage, info.Offset())
+	return PublicCategoryPage{Category: category, ArticleIDs: ids, Pagination: info}, err
 }
 func (r *Repository) PublicTag(ctx context.Context, key string, limit int) (Tag, []int64, error) {
+	page, err := r.PublicTagPage(ctx, key, pagination.Request{Page: 1, PerPage: limit})
+	if err != nil {
+		return Tag{}, nil, err
+	}
+	return page.Tag, page.ArticleIDs, nil
+}
+
+func (r *Repository) PublicTagPage(ctx context.Context, key string, request pagination.Request) (PublicTagPage, error) {
 	var tag Tag
 	var created, updated int64
 	err := r.database.Reader.QueryRowContext(ctx, `SELECT id,public_id,slug,name,description,created_at,updated_at FROM tags WHERE slug_key=?`, key).Scan(&tag.ID, &tag.PublicID, &tag.Slug, &tag.Name, &tag.Description, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Tag{}, nil, ErrNotFound
+		return PublicTagPage{}, ErrNotFound
 	}
 	if err != nil {
-		return Tag{}, nil, err
+		return PublicTagPage{}, err
 	}
 	tag.CreatedAt = fromMillis(created)
 	tag.UpdatedAt = fromMillis(updated)
+	total, err := r.publicTagCount(ctx, tag.PublicID)
+	if err != nil {
+		return PublicTagPage{}, err
+	}
+	info := pagination.NewInfo(total, request)
 	ids, err := r.publicContentIDs(ctx, `
 		SELECT c.id
 		FROM contents c
@@ -492,8 +640,33 @@ func (r *Repository) PublicTag(ctx context.Context, key string, limit int) (Tag,
 			WHERE json_each.value = lower(hex(?))
 		)
 		  AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
-		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`, tag.PublicID, limit)
-	return tag, ids, err
+		ORDER BY c.published_at DESC,c.id DESC LIMIT ? OFFSET ?`, tag.PublicID, info.PerPage, info.Offset())
+	return PublicTagPage{Tag: tag, ArticleIDs: ids, Pagination: info}, err
+}
+
+func (r *Repository) publicCategoryCount(ctx context.Context, publicID []byte) (int, error) {
+	var total int
+	err := r.database.Reader.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM contents c
+		JOIN content_revisions revision ON revision.id = c.published_revision_id
+		WHERE revision.category_public_id = ?
+		  AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL`, publicID).Scan(&total)
+	return total, err
+}
+
+func (r *Repository) publicTagCount(ctx context.Context, publicID []byte) (int, error) {
+	var total int
+	err := r.database.Reader.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM contents c
+		JOIN content_revisions revision ON revision.id = c.published_revision_id
+		WHERE EXISTS (
+			SELECT 1 FROM json_each(revision.tag_public_ids_json)
+			WHERE json_each.value = lower(hex(?))
+		)
+		  AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL`, publicID).Scan(&total)
+	return total, err
 }
 func (r *Repository) publicContentIDs(ctx context.Context, query string, args ...any) ([]int64, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, query, args...)

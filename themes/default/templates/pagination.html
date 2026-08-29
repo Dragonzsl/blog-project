@@ -1,0 +1,12 @@
+{{define "pagination"}}
+  {{if .PageCount}}
+  <nav class="pagination" aria-label="分页">
+    <p class="pagination-summary">第 {{.Page}} / {{.PageCount}} 页 · 共 {{.Total}} 项</p>
+    <div class="pagination-links">
+      {{if .HasPrevious}}<a class="pagination-link" href="{{.PreviousURL}}">上一页</a>{{end}}
+      {{range .Pages}}<a class="pagination-link {{if .Current}}current{{end}}" href="{{.URL}}" {{if .Current}}aria-current="page"{{end}}>{{.Number}}</a>{{end}}
+      {{if .HasNext}}<a class="pagination-link" href="{{.NextURL}}">下一页</a>{{end}}
+    </div>
+  </nav>
+  {{end}}
+{{end}}
