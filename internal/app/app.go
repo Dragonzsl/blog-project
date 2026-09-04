@@ -22,9 +22,11 @@ import (
 	"github.com/zhushilin/blog-project/internal/notifications"
 	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/organization"
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
+	"github.com/zhushilin/blog-project/internal/platform/publicwrite"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
 	"github.com/zhushilin/blog-project/internal/presentation"
 	"github.com/zhushilin/blog-project/internal/publishing"
@@ -43,6 +45,7 @@ type App struct {
 	extensions           *extensions.Registry
 	analytics            *analytics.Service
 	outbox               *notifications.Outbox
+	publicWrites         *publicwrite.Guard
 	dataLock             *operations.DataLock
 	lifecycleInterval    time.Duration
 	trashCleanupInterval time.Duration
@@ -81,10 +84,20 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	publicWriteGuard := publicwrite.NewGuard(db, authSecret)
+	if err := notifications.RekeyNewsletterHashes(ctx, db, authSecret); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("rekey newsletter hashes: %w", err)
+	}
 	identityService, err := identity.NewService(identity.NewRepository(db), authSecret, cfg.Security.SessionLifetime.Duration)
 	if err != nil {
 		db.Close()
 		return nil, err
+	}
+	clientIPResolver, err := clientip.New(cfg.Server.TrustedProxyCIDRs)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("configure trusted proxy CIDRs: %w", err)
 	}
 	identityHTTP, err := identity.NewHTTPHandler(identityService, cfg.Security, logger)
 	if err != nil {
@@ -104,6 +117,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		TrashRetention:     time.Duration(cfg.Publishing.TrashRetentionDays) * 24 * time.Hour,
 	})
 	identityHTTP.SetDashboardQueries(publishingService)
+	identityHTTP.SetClientIPResolver(clientIPResolver)
 	publishingHTTP, err := publishing.NewHTTPHandler(publishingService, identityHTTP, identityService, logger)
 	if err != nil {
 		db.Close()
@@ -205,7 +219,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	presentationHTTP.SetDiscovery(discoveryService)
 	presentationHTTP.SetThemeManager(themeManager)
-	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration)
+	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration, authSecret)
+	commentService.SetWriteGuard(publicWriteGuard)
 	identityHTTP.SetPendingCommentQueries(commentService)
 	if cfg.Mail.Enabled {
 		commentService.SetNotifier(outbox, cfg.Mail.From)
@@ -214,6 +229,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	// enable survives a restart; their routes remain absent (or guarded) while
 	// the corresponding plugin is disabled.
 	commentHTTP := comments.NewHTTPHandler(commentService, publishingService, identityHTTP, logger)
+	commentHTTP.SetClientIPResolver(clientIPResolver)
 	analyticsService := analytics.NewService(db, authSecret, cfg.Analytics.RetentionDays)
 	analyticsHTTP, err := analytics.NewHTTPHandler(analyticsService, identityHTTP, logger)
 	if err != nil {
@@ -221,6 +237,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 	var newsletterPlugin *notifications.NewsletterPlugin
+	var newsletterService *notifications.NewsletterService
 	if cfg.Newsletter.Enabled {
 		var adapter notifications.NewsletterAdapter
 		if cfg.Newsletter.Provider == "local" {
@@ -232,13 +249,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 				return nil, err
 			}
 		}
-		newsletterService := notifications.NewsletterService{Adapter: adapter}
-		newsletterHandler := notifications.NewNewsletterHTTPHandler(newsletterService)
+		newsletterService = notifications.NewNewsletterService(db, adapter, authSecret)
+		newsletterService.SetWriteGuard(publicWriteGuard)
+		newsletterService.SetOutbox(outbox)
+		newsletterService.SetBaseURL(cfg.Discovery.BaseURL)
+		newsletterHandler := notifications.NewNewsletterHTTPHandlerFromService(newsletterService)
+		newsletterHandler.SetClientIPResolver(clientIPResolver)
 		pluginID, pluginName := "newsletter.external", "外部 Newsletter"
 		if cfg.Newsletter.Provider == "local" {
 			pluginID, pluginName = "newsletter.local", "本地 Newsletter"
 		}
-		newsletterPlugin = &notifications.NewsletterPlugin{ID: pluginID, Name: pluginName, Handler: newsletterHandler}
+		newsletterPlugin = &notifications.NewsletterPlugin{ID: pluginID, Name: pluginName, Handler: newsletterHandler, Service: newsletterService}
 	}
 
 	router := chi.NewRouter()
@@ -252,11 +273,22 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	mediaHTTP.RegisterPublic(router)
 	presentationHTTP.RegisterPublic(router)
 	extensionRegistry := extensions.NewRegistry(db, router, logger)
+	outbox.SetTaskQueue(extensionRegistry.TaskQueue())
+	if err := extensionRegistry.RegisterCoreTask("core:notification_send", outbox.ProcessTask); err != nil {
+		db.Close()
+		return nil, err
+	}
+	presentationHTTP.SetClientIPResolver(clientIPResolver)
 	presentationHTTP.SetAnalyticsRecorder(gatedAnalyticsRecorder{registry: extensionRegistry, service: analyticsService})
 	presentationHTTP.SetFeatureProvider(extensionRegistry)
 	publishingService.SetEventSink(extensionRegistry)
 	commentService.SetEventSink(extensionRegistry)
 	extensionHTTP, err := extensions.NewHTTPHandler(extensionRegistry, identityHTTP, logger)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	taskHTTP, err := operations.NewTaskHTTPHandler(extensionRegistry, identityHTTP, logger)
 	if err != nil {
 		db.Close()
 		return nil, err
@@ -296,6 +328,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 			protected.Use(identityHTTP.RequireSession)
 			identityHTTP.RegisterProtected(protected)
 			extensionHTTP.RegisterAdmin(protected)
+			taskHTTP.RegisterAdmin(protected)
 			publishingHTTP.RegisterAdmin(protected)
 			organizationHTTP.RegisterAdmin(protected)
 			redirectHTTP.RegisterAdmin(protected)
@@ -337,7 +370,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MaxHeaderBytes:    1 << 20,
 	}
 	keepLock = true
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, extensions: extensionRegistry, analytics: analyticsService, outbox: outbox, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, extensions: extensionRegistry, analytics: analyticsService, outbox: outbox, publicWrites: publicWriteGuard, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
 }
 
 func appendUnique(values []string, value string) []string {
@@ -438,26 +471,33 @@ func (app *App) runLifecycle(ctx context.Context) {
 			app.logger.InfoContext(ctx, "analytics retention purge", "rows", purged)
 		}
 	}
-	processPluginTask := func() {
+	cleanupPublicWrites := func() {
+		if app.publicWrites == nil {
+			return
+		}
+		if removed, err := app.publicWrites.Cleanup(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			app.logger.ErrorContext(ctx, "purge public-write safety records", "error", err)
+		} else if removed > 0 {
+			app.logger.InfoContext(ctx, "public-write safety records purged", "rows", removed)
+		}
+	}
+	processPluginTasks := func() {
 		if app.extensions == nil {
 			return
 		}
-		processed, err := app.extensions.ProcessOne(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			app.logger.ErrorContext(ctx, "process plugin task", "error", err)
-		} else if processed {
+		const maxTasksPerTick = 8
+		for index := 0; index < maxTasksPerTick; index++ {
+			processed, err := app.extensions.ProcessOne(ctx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					app.logger.ErrorContext(ctx, "process plugin task", "error", err)
+				}
+				return
+			}
+			if !processed {
+				return
+			}
 			app.logger.DebugContext(ctx, "plugin task processed")
-		}
-	}
-	processNotification := func() {
-		if app.outbox == nil {
-			return
-		}
-		processed, err := app.outbox.ProcessOne(ctx)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			app.logger.ErrorContext(ctx, "process notification outbox", "error", err)
-		} else if processed {
-			app.logger.DebugContext(ctx, "notification outbox processed")
 		}
 	}
 	if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -469,8 +509,8 @@ func (app *App) runLifecycle(ctx context.Context) {
 	cleanupTrash()
 	backupIfDue()
 	purgeAnalytics()
-	processPluginTask()
-	processNotification()
+	cleanupPublicWrites()
+	processPluginTasks()
 	schedulerTicker := time.NewTicker(app.lifecycleInterval)
 	defer schedulerTicker.Stop()
 	cleanupTicker := time.NewTicker(app.trashCleanupInterval)
@@ -483,11 +523,11 @@ func (app *App) runLifecycle(ctx context.Context) {
 			return
 		case <-schedulerTicker.C:
 			processScheduled()
-			processPluginTask()
-			processNotification()
+			processPluginTasks()
 		case <-cleanupTicker.C:
 			cleanupTrash()
 			purgeAnalytics()
+			cleanupPublicWrites()
 		case <-backupTicker.C:
 			backupIfDue()
 		}

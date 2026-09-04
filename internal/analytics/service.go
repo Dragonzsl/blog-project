@@ -6,11 +6,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 )
 
@@ -81,12 +81,12 @@ func (s *Service) visitorHash(path, visitor string) []byte {
 	return mac.Sum(nil)
 }
 
-func VisitorIdentity(r *http.Request) string {
-	remote := strings.TrimSpace(r.RemoteAddr)
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
+func VisitorIdentity(r *http.Request, resolvers ...*clientip.Resolver) string {
+	resolver := clientip.DirectPeerOnly()
+	if len(resolvers) > 0 && resolvers[0] != nil {
+		resolver = resolvers[0]
 	}
-	return remote + "\x00" + strings.TrimSpace(r.UserAgent())
+	return resolver.Resolve(r) + "\x00" + strings.TrimSpace(r.UserAgent())
 }
 
 func (s *Service) Summary(ctx context.Context, days int) ([]Daily, error) {

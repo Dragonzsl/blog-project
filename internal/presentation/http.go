@@ -13,7 +13,6 @@ import (
 	htmlstd "html"
 	"html/template"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -25,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/discovery"
 	"github.com/zhushilin/blog-project/internal/organization"
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	platformslug "github.com/zhushilin/blog-project/internal/platform/slug"
@@ -104,6 +104,7 @@ type HTTPHandler struct {
 	discovery    DiscoveryQueries
 	analytics    AnalyticsRecorder
 	features     FeatureProvider
+	clientIP     *clientip.Resolver
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
@@ -111,6 +112,13 @@ func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = ser
 func (h *HTTPHandler) SetThemeManager(manager *ThemeManager) { h.themeManager = manager }
 
 func (h *HTTPHandler) SetAnalyticsRecorder(recorder AnalyticsRecorder) { h.analytics = recorder }
+
+func (h *HTTPHandler) SetClientIPResolver(resolver *clientip.Resolver) {
+	if resolver == nil {
+		resolver = clientip.DirectPeerOnly()
+	}
+	h.clientIP = resolver
+}
 
 func (h *HTTPHandler) SetFeatureProvider(provider FeatureProvider) { h.features = provider }
 
@@ -927,17 +935,21 @@ func (h *HTTPHandler) recordAnalytics(r *http.Request) {
 	if h.analytics == nil || r.Method != http.MethodGet {
 		return
 	}
-	if err := h.analytics.Record(r.Context(), r.URL.Path, analyticsVisitor(r)); err != nil {
+	if err := h.analytics.Record(r.Context(), r.URL.Path, h.resolvedAnalyticsVisitor(r)); err != nil {
 		h.logger.DebugContext(r.Context(), "record public analytics", "error", err)
 	}
 }
 
 func analyticsVisitor(r *http.Request) string {
-	remote := strings.TrimSpace(r.RemoteAddr)
-	if host, _, err := net.SplitHostPort(remote); err == nil {
-		remote = host
+	return clientip.DirectPeerOnly().Resolve(r) + "\x00" + strings.TrimSpace(r.UserAgent())
+}
+
+func (h *HTTPHandler) resolvedAnalyticsVisitor(r *http.Request) string {
+	resolver := h.clientIP
+	if resolver == nil {
+		resolver = clientip.DirectPeerOnly()
 	}
-	return remote + "\x00" + strings.TrimSpace(r.UserAgent())
+	return resolver.Resolve(r) + "\x00" + strings.TrimSpace(r.UserAgent())
 }
 
 func (h *HTTPHandler) writeCacheEntry(w http.ResponseWriter, r *http.Request, entry CacheEntry, cacheStatus string) {

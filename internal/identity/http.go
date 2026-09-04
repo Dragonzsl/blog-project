@@ -10,7 +10,6 @@ import (
 	"html/template"
 	"image/png"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/pquerna/otp"
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/publishing"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
@@ -48,6 +48,7 @@ type HTTPHandler struct {
 	adminJSETag      string
 	js               []byte
 	jsETag           string
+	clientIP         *clientip.Resolver
 }
 
 func NewHTTPHandler(service *Service, security config.Security, logger *slog.Logger) (*HTTPHandler, error) {
@@ -81,7 +82,15 @@ func NewHTTPHandler(service *Service, security config.Security, logger *slog.Log
 		adminJSETag: `"` + base64.RawURLEncoding.EncodeToString(adminJSHash[:12]) + `"`,
 		js:          js,
 		jsETag:      `"` + base64.RawURLEncoding.EncodeToString(jsHash[:12]) + `"`,
+		clientIP:    clientip.DirectPeerOnly(),
 	}, nil
+}
+
+func (h *HTTPHandler) SetClientIPResolver(resolver *clientip.Resolver) {
+	if resolver == nil {
+		resolver = clientip.DirectPeerOnly()
+	}
+	h.clientIP = resolver
 }
 
 func (h *HTTPHandler) SetDashboardQueries(queries DashboardQueries) {
@@ -284,7 +293,7 @@ func (h *HTTPHandler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username := strings.TrimSpace(r.FormValue("username"))
-	session, err := h.service.Login(r.Context(), remoteAddress(r), username, r.FormValue("password"), r.FormValue("second_factor"))
+	session, err := h.service.Login(r.Context(), h.resolveClientIP(r), username, r.FormValue("password"), r.FormValue("second_factor"))
 	if err != nil {
 		if !errors.Is(err, ErrInvalidCredentials) && !errors.Is(err, ErrRateLimited) {
 			h.internalError(w, r, err)
@@ -617,13 +626,16 @@ func sessionFromContext(ctx context.Context) Session {
 	return session
 }
 
-func remoteAddress(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err == nil {
-		return host
+func (h *HTTPHandler) resolveClientIP(r *http.Request) string {
+	if h.clientIP == nil {
+		return clientip.DirectPeerOnly().Resolve(r)
 	}
-	return r.RemoteAddr
+	return h.clientIP.Resolve(r)
 }
+
+// remoteAddress is kept for package-level callers from the original handler;
+// it intentionally uses the safe direct-peer-only policy.
+func remoteAddress(r *http.Request) string { return clientip.DirectPeerOnly().Resolve(r) }
 
 func statusForError(message string) int {
 	if message != "" {
