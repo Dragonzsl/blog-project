@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,8 +47,9 @@ type Config struct {
 }
 
 type Server struct {
-	ListenAddress   string   `toml:"listen_address"`
-	ShutdownTimeout Duration `toml:"shutdown_timeout"`
+	ListenAddress     string   `toml:"listen_address"`
+	ShutdownTimeout   Duration `toml:"shutdown_timeout"`
+	TrustedProxyCIDRs []string `toml:"trusted_proxy_cidrs"`
 }
 
 type Storage struct {
@@ -380,6 +382,17 @@ func applyEnvironment(cfg *Config) error {
 		}
 		cfg.Extensions.ThemeMaxUnpacked = parsed
 	}
+	if value, ok := os.LookupEnv("BLOG_TRUSTED_PROXY_CIDRS"); ok {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			cfg.Server.TrustedProxyCIDRs = nil
+		} else {
+			cfg.Server.TrustedProxyCIDRs = make([]string, 0, len(strings.Split(value, ",")))
+			for _, part := range strings.Split(value, ",") {
+				cfg.Server.TrustedProxyCIDRs = append(cfg.Server.TrustedProxyCIDRs, strings.TrimSpace(part))
+			}
+		}
+	}
 	if value, ok := os.LookupEnv("BLOG_COOKIE_SECURE"); ok && strings.TrimSpace(value) != "" {
 		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
 		if err != nil {
@@ -456,6 +469,23 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Server.ShutdownTimeout.Duration <= 0 || cfg.Server.ShutdownTimeout.Duration > time.Minute {
 		problems = append(problems, errors.New("server.shutdown_timeout must be between 1ns and 1m"))
+	}
+	if len(cfg.Server.TrustedProxyCIDRs) > 32 {
+		problems = append(problems, errors.New("server.trusted_proxy_cidrs must contain at most 32 entries"))
+	}
+	seenProxyCIDRs := make(map[string]struct{}, len(cfg.Server.TrustedProxyCIDRs))
+	for _, raw := range cfg.Server.TrustedProxyCIDRs {
+		prefix, err := normalizeProxyCIDR(raw)
+		if err != nil {
+			problems = append(problems, fmt.Errorf("server.trusted_proxy_cidrs contains invalid CIDR %q", raw))
+			continue
+		}
+		key := prefix.String()
+		if _, exists := seenProxyCIDRs[key]; exists {
+			problems = append(problems, fmt.Errorf("server.trusted_proxy_cidrs contains duplicate CIDR %q", raw))
+			continue
+		}
+		seenProxyCIDRs[key] = struct{}{}
 	}
 	if strings.TrimSpace(cfg.Storage.DataDir) == "" {
 		problems = append(problems, errors.New("storage.data_dir is required"))
@@ -598,4 +628,25 @@ func (cfg Config) Validate() error {
 		problems = append(problems, errors.New("security.session_lifetime must be between 15m and 168h"))
 	}
 	return errors.Join(problems...)
+}
+
+func normalizeProxyCIDR(raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil || !prefix.IsValid() {
+		return netip.Prefix{}, errors.New("invalid proxy CIDR")
+	}
+	address := prefix.Addr()
+	bits := prefix.Bits()
+	if address.Is4In6() {
+		address = address.Unmap()
+		bits -= 96
+	}
+	if bits <= 0 {
+		return netip.Prefix{}, errors.New("proxy CIDR must not be a default route")
+	}
+	normalized := netip.PrefixFrom(address, bits).Masked()
+	if !normalized.IsValid() {
+		return netip.Prefix{}, errors.New("invalid normalized proxy CIDR")
+	}
+	return normalized, nil
 }

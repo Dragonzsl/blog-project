@@ -167,3 +167,34 @@ func TestStage3ExtensionEnvironmentOverrides(t *testing.T) {
 		t.Fatalf("webhooks=%+v", cfg.Webhooks)
 	}
 }
+
+func TestTrustedProxyCIDRsCanBeConfiguredFromEnvironment(t *testing.T) {
+	t.Setenv("BLOG_TRUSTED_PROXY_CIDRS", "10.20.0.0/24, 2001:db8::/64")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Server.TrustedProxyCIDRs) != 2 || cfg.Server.TrustedProxyCIDRs[0] != "10.20.0.0/24" || cfg.Server.TrustedProxyCIDRs[1] != "2001:db8::/64" {
+		t.Fatalf("trusted proxy CIDRs=%v", cfg.Server.TrustedProxyCIDRs)
+	}
+}
+
+func TestValidateRejectsOpenTrustedProxyCIDR(t *testing.T) {
+	cfg := Defaults()
+	cfg.Server.TrustedProxyCIDRs = []string{"0.0.0.0/0"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("open trusted proxy CIDR was accepted")
+	}
+}
+
+func TestValidateNormalizesMappedTrustedProxyCIDR(t *testing.T) {
+	cfg := Defaults()
+	cfg.Server.TrustedProxyCIDRs = []string{"::ffff:192.0.2.0/120"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("mapped trusted proxy CIDR rejected: %v", err)
+	}
+	cfg.Server.TrustedProxyCIDRs = []string{"::ffff:0:0/96"}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("mapped default trusted proxy CIDR was accepted")
+	}
+}
