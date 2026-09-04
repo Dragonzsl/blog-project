@@ -42,6 +42,7 @@ func TestWebhookDeliveryIsSignedAndDurable(t *testing.T) {
 	router := chi.NewRouter()
 	registry := extensions.NewRegistry(db, router, nil)
 	plugin := NewPlugin(NewStore(db), Config{Endpoint: server.URL, Secret: secret, MaxAttempts: 3})
+	plugin.SetHTTPClient(server.Client())
 	if err := registry.Register(plugin); err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +85,9 @@ func TestWebhookFailureIsRetriedAndEventuallyFails(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { calls++; http.Error(w, "no", http.StatusBadGateway) }))
 	defer server.Close()
 	registry := extensions.NewRegistry(db, chi.NewRouter(), nil)
-	if err := registry.Register(NewPlugin(NewStore(db), Config{Endpoint: server.URL, Secret: "secret", MaxAttempts: 2})); err != nil {
+	plugin := NewPlugin(NewStore(db), Config{Endpoint: server.URL, Secret: "secret", MaxAttempts: 2})
+	plugin.SetHTTPClient(server.Client())
+	if err := registry.Register(plugin); err != nil {
 		t.Fatal(err)
 	}
 	if err := registry.Enable(ctx, PluginID); err != nil {

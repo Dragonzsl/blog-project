@@ -17,12 +17,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/extensions"
+	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/netguard"
 )
 
 const (
@@ -38,6 +39,7 @@ type Config struct {
 
 type Delivery struct {
 	ID           string
+	EventKey     string
 	EventName    string
 	EventVersion int
 	Endpoint     string
@@ -49,14 +51,55 @@ type Delivery struct {
 
 type Store struct{ db *database.DB }
 
+type Counts struct {
+	Pending   int
+	Failed    int
+	Succeeded int
+}
+
 func NewStore(db *database.DB) *Store { return &Store{db: db} }
+
+func (s *Store) Counts(ctx context.Context) (Counts, error) {
+	if s == nil || s.db == nil {
+		return Counts{}, errors.New("webhook store is not configured")
+	}
+	var counts Counts
+	err := s.db.Reader.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM webhook_deliveries WHERE status='pending'),
+		(SELECT count(*) FROM webhook_deliveries WHERE status='failed'),
+		(SELECT count(*) FROM webhook_deliveries WHERE status='succeeded')
+	`).Scan(&counts.Pending, &counts.Failed, &counts.Succeeded)
+	return counts, err
+}
 
 func (s *Store) Create(ctx context.Context, delivery Delivery, now time.Time) error {
 	if s == nil || s.db == nil {
 		return errors.New("webhook store is not configured")
 	}
-	_, err := s.db.Writer.ExecContext(ctx, `INSERT INTO webhook_deliveries(delivery_id,event_name,event_version,endpoint,payload,status,attempts,created_at,updated_at) VALUES(?,?,?,?,?,'pending',0,?,?)`, delivery.ID, delivery.EventName, delivery.EventVersion, delivery.Endpoint, delivery.Payload, now.UnixMilli(), now.UnixMilli())
-	return err
+	tx, err := s.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := s.CreateTx(ctx, tx, delivery, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CreateTx(ctx context.Context, tx *sql.Tx, delivery Delivery, now time.Time) (bool, error) {
+	if s == nil || s.db == nil || tx == nil {
+		return false, errors.New("webhook store transaction is not configured")
+	}
+	if strings.TrimSpace(delivery.EventKey) == "" {
+		return false, errors.New("webhook event key is required")
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO webhook_deliveries(delivery_id,event_key,event_name,event_version,endpoint,payload,status,attempts,created_at,updated_at) VALUES(?,?,?,?,?,?,'pending',0,?,?) ON CONFLICT(event_key) WHERE event_key <> '' DO NOTHING`, delivery.ID, delivery.EventKey, delivery.EventName, delivery.EventVersion, delivery.Endpoint, delivery.Payload, now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
 }
 
 func (s *Store) Get(ctx context.Context, id string) (Delivery, error) {
@@ -110,22 +153,27 @@ type taskPayload struct {
 }
 
 type Plugin struct {
-	config     Config
-	store      *Store
-	client     *http.Client
-	now        func() time.Time
-	enqueueJob func(context.Context, string, time.Time) error
+	config       Config
+	store        *Store
+	client       *http.Client
+	now          func() time.Time
+	enqueueJob   func(context.Context, string, time.Time) error
+	enqueueJobTx func(context.Context, *sql.Tx, string, time.Time) error
 }
 
 func NewPlugin(store *Store, cfg Config) *Plugin {
 	if cfg.MaxAttempts < 1 || cfg.MaxAttempts > MaxTaskAttempts {
 		cfg.MaxAttempts = MaxTaskAttempts
 	}
-	return &Plugin{config: cfg, store: store, client: &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("webhook redirects are not allowed") }}, now: func() time.Time { return time.Now().UTC() }}
+	return &Plugin{config: cfg, store: store, client: netguard.NewClient(netguard.Options{Timeout: 8 * time.Second, ConnectTimeout: 5 * time.Second, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 6 * time.Second}), now: func() time.Time { return time.Now().UTC() }}
 }
 
+// SetHTTPClient is intended for deterministic tests or an explicitly managed
+// transport. Production construction uses the guarded client from NewPlugin.
+func (p *Plugin) SetHTTPClient(client *http.Client) { p.client = client }
+
 func (p *Plugin) Manifest() extensions.Manifest {
-	return extensions.Manifest{ID: PluginID, Name: "签名 Webhook", Version: "1.0.0", APIVersion: extensions.HostAPIVersion, Kind: "webhook", Capabilities: []string{"post_commit_events", "signed_http", "durable_retry"}}
+	return extensions.Manifest{ID: PluginID, Name: "签名 Webhook", Version: "1.0.0", APIVersion: extensions.HostAPIVersion, Kind: "webhook", Capabilities: []string{"post_commit_events", "signed_http", "persistent_task", "durable_retry"}}
 }
 
 func (p *Plugin) Register(host *extensions.Host) error {
@@ -145,21 +193,25 @@ func (p *Plugin) Register(host *extensions.Host) error {
 	p.enqueueJob = func(ctx context.Context, id string, availableAt time.Time) error {
 		return host.EnqueueTask(ctx, "deliver", taskPayload{DeliveryID: id}, "webhook:"+id, availableAt)
 	}
+	p.enqueueJobTx = func(ctx context.Context, tx *sql.Tx, id string, availableAt time.Time) error {
+		return host.EnqueueTaskTx(ctx, tx, "deliver", taskPayload{DeliveryID: id}, "webhook:"+id, availableAt)
+	}
 	if err := host.Subscribe("ContentPublished.v1", p.enqueue); err != nil {
 		return err
 	}
 	if err := host.Subscribe("CommentApproved.v1", p.enqueue); err != nil {
 		return err
 	}
-	if err := host.RegisterTask("deliver", p.deliver); err != nil {
+	if err := host.RegisterTaskWithRetry("deliver", p.deliver, p.prepareTaskRetryTx); err != nil {
 		return err
 	}
 	return host.AdminRoute(http.MethodGet, "/status", func(w http.ResponseWriter, r *http.Request) {
-		var pending, failed, succeeded int
-		_ = p.store.db.Reader.QueryRowContext(r.Context(), "SELECT count(*) FROM webhook_deliveries WHERE status='pending'").Scan(&pending)
-		_ = p.store.db.Reader.QueryRowContext(r.Context(), "SELECT count(*) FROM webhook_deliveries WHERE status='failed'").Scan(&failed)
-		_ = p.store.db.Reader.QueryRowContext(r.Context(), "SELECT count(*) FROM webhook_deliveries WHERE status='succeeded'").Scan(&succeeded)
-		writeJSON(w, http.StatusOK, map[string]any{"id": PluginID, "pending": pending, "failed": failed, "succeeded": succeeded})
+		counts, err := p.store.Counts(r.Context())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "status unavailable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": PluginID, "pending": counts.Pending, "failed": counts.Failed, "succeeded": counts.Succeeded})
 	})
 }
 
@@ -175,6 +227,7 @@ func (p *Plugin) enqueue(ctx context.Context, event extensions.Event) error {
 	if err != nil {
 		return err
 	}
+	eventKey := eventDeliveryKey(event)
 	envelope := eventEnvelope{DeliveryID: deliveryID, Event: event.Name, Version: event.Version, ObjectID: hex.EncodeToString(event.ObjectID), Payload: event.Payload, OccurredAt: now.UTC()}
 	body, err := json.Marshal(envelope)
 	if err != nil {
@@ -184,10 +237,25 @@ func (p *Plugin) enqueue(ctx context.Context, event extensions.Event) error {
 	if err != nil {
 		return err
 	}
-	if err := p.store.Create(ctx, Delivery{ID: deliveryID, EventName: event.Name, EventVersion: event.Version, Endpoint: endpoint, Payload: body}, p.now().UTC()); err != nil {
+	tx, err := p.store.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	return p.enqueueTask(ctx, deliveryID, now)
+	defer tx.Rollback()
+	created, err := p.store.CreateTx(ctx, tx, Delivery{ID: deliveryID, EventKey: eventKey, EventName: event.Name, EventVersion: event.Version, Endpoint: endpoint, Payload: body}, p.now().UTC())
+	if err != nil {
+		return err
+	}
+	if !created {
+		return tx.Commit()
+	}
+	if p.enqueueJobTx == nil {
+		return errors.New("webhook host is not bound")
+	}
+	if err := p.enqueueJobTx(ctx, tx, deliveryID, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (p *Plugin) enqueueTask(ctx context.Context, id string, availableAt time.Time) error {
@@ -197,6 +265,28 @@ func (p *Plugin) enqueueTask(ctx context.Context, id string, availableAt time.Ti
 		return errors.New("webhook host is not bound")
 	}
 	return p.enqueueJob(ctx, id, availableAt)
+}
+
+func (p *Plugin) prepareTaskRetryTx(ctx context.Context, tx *sql.Tx, task operations.Task) error {
+	var payload taskPayload
+	if err := json.Unmarshal(task.Payload, &payload); err != nil || payload.DeliveryID == "" {
+		return errors.New("invalid webhook retry payload")
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE webhook_deliveries SET status='pending',attempts=0,last_error='',delivered_at=NULL,updated_at=? WHERE delivery_id=? AND status='failed'`, p.now().UnixMilli(), payload.DeliveryID)
+	return err
+}
+
+func eventDeliveryKey(event extensions.Event) string {
+	if len(event.ID) > 0 {
+		return "event:" + hex.EncodeToString(event.ID)
+	}
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(event.Name))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write([]byte(fmt.Sprint(event.Version)))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(event.ObjectID)
+	return "event:" + hex.EncodeToString(hash.Sum(nil))
 }
 
 // taskEnqueuer is populated at registration time. Keeping it on the plugin
@@ -220,8 +310,8 @@ func (p *Plugin) deliver(ctx context.Context, payload []byte) error {
 	requestBody := bytes.NewReader(delivery.Payload)
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, delivery.Endpoint, requestBody)
 	if err != nil {
-		_ = p.store.Finish(ctx, delivery.ID, terminalStatus(attempt, p.config.MaxAttempts), err.Error(), p.now().UTC())
-		return err
+		_ = p.store.Finish(ctx, delivery.ID, "failed", operations.SafeError(err), p.now().UTC())
+		return operations.Permanent(err)
 	}
 	signature := hmac.New(sha256.New, []byte(p.config.Secret))
 	_, _ = signature.Write(delivery.Payload)
@@ -235,7 +325,13 @@ func (p *Plugin) deliver(ctx context.Context, payload []byte) error {
 	response, err := p.client.Do(httpRequest)
 	if err != nil {
 		status := terminalStatus(attempt, p.config.MaxAttempts)
-		_ = p.store.Finish(ctx, delivery.ID, status, err.Error(), p.now().UTC())
+		if netguard.IsPermanent(err) {
+			status = "failed"
+		}
+		_ = p.store.Finish(ctx, delivery.ID, status, operations.SafeError(err), p.now().UTC())
+		if netguard.IsPermanent(err) {
+			return operations.Permanent(err)
+		}
 		return err
 	}
 	defer response.Body.Close()
@@ -243,7 +339,13 @@ func (p *Plugin) deliver(ctx context.Context, payload []byte) error {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		err = fmt.Errorf("webhook endpoint returned %s", response.Status)
 		status := terminalStatus(attempt, p.config.MaxAttempts)
-		_ = p.store.Finish(ctx, delivery.ID, status, err.Error(), p.now().UTC())
+		if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusTooManyRequests {
+			status = "failed"
+		}
+		_ = p.store.Finish(ctx, delivery.ID, status, operations.SafeError(err), p.now().UTC())
+		if response.StatusCode >= 400 && response.StatusCode < 500 && response.StatusCode != http.StatusRequestTimeout && response.StatusCode != http.StatusTooManyRequests {
+			return operations.Permanent(err)
+		}
 		return err
 	}
 	return p.store.Finish(ctx, delivery.ID, "succeeded", "", p.now().UTC())
@@ -265,9 +367,9 @@ func newDeliveryID() (string, error) {
 }
 
 func validateEndpoint(value string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(value))
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || len(parsed.String()) > 2048 {
-		return "", errors.New("webhook endpoint must be an absolute HTTP or HTTPS URL without credentials")
+	parsed, err := netguard.ValidateURL(value)
+	if err != nil {
+		return "", err
 	}
 	return parsed.String(), nil
 }
