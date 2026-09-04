@@ -22,7 +22,7 @@ Browser / Feed reader
           optional adapters -- S3 / SMTP / Webhook targets
 ```
 
-不存在内部 HTTP 微服务调用。模块间使用 Go 接口、应用服务和提交后的领域事件；持久任务写入同一个 SQLite 数据库。
+不存在内部 HTTP 微服务调用。模块间使用 Go 接口、应用服务和事务内登记、提交后派发的领域事件；持久任务写入同一个 SQLite 数据库。
 
 ## 模块边界
 
@@ -84,15 +84,15 @@ official plugin    -> narrow Host capabilities
 - HTTP handler 不直接写 SQL。
 - 模块不得查询其他模块私有表；跨模块读通过应用查询接口或专用只读投影。
 - 事务由调用方应用服务控制，同一业务动作只创建一个 SQLite 写事务。
-- 领域事件在事务提交后派发；需要重试的外部副作用先写入持久任务表。
+- 领域事件在业务事务内写入 `event_outbox` 和 `core:event_dispatch` 任务，提交后才派发；需要重试的外部副作用先写入持久任务表。
 - 不建立“万能 AppContext”或全局 service locator。
 
 ## 发布写入流程
 
 1. 站主提交 Markdown 与结构化元数据。
 2. Publishing 校验 slug、状态转换、时间与编辑快照版本。
-3. 一个事务内保存内容、创建不可变版本、更新媒体引用，并登记提交后事件。
-4. 提交成功后立即提高站点 `render_epoch`，使旧公开缓存不可命中。
+3. 一个事务内保存内容、创建不可变版本、更新媒体引用，并登记 `ContentPublished.v1` 事件及其任务。
+4. 提交成功后由有界任务执行器派发事件；同时提高站点 `render_epoch`，使旧公开缓存不可命中。
 5. 持久任务依次更新 FTS5、预热关键页面、刷新 RSS/Sitemap，并投递 Webhook。
 6. 任一异步任务失败只记录重试，不回滚已完成的发布；后台明确显示“已发布但派生任务失败”。
 
@@ -116,7 +116,7 @@ official plugin    -> narrow Host capabilities
 
 ## 任务执行器
 
-任务表使用 `pending/running/succeeded/failed` 状态、可见时间、尝试次数、短租约、有限指数退避和幂等键。单进程默认一个串行工作循环；图片处理、备份和 Webhook 分别有独立并发上限，但总并发受 1 GiB 预算约束。插件任务最多执行五次，过期租约会在重启后重新变为可执行，最终失败可在状态页审计。
+任务表使用 `pending/running/succeeded/failed` 状态、可见时间、尝试次数、短租约、有限指数退避和幂等键。单进程默认一个串行工作循环；每个生命周期 tick 最多处理固定数量的任务，适配 0.85 CPU/256 MiB 容器预算。插件任务最多执行五次，过期租约会在重启后重新变为可执行，最终失败可在状态页审计。
 
 任务必须幂等。进程崩溃后，过期租约回到可执行状态。失败使用有上限指数退避并进入后台可见的失败列表；不引入 Redis、Kafka 或外部队列。
 
@@ -136,9 +136,13 @@ official plugin    -> narrow Host capabilities
 
 应用以非 root 用户运行，根文件系统只读，只给数据目录写权限。健康检查分为进程存活和依赖就绪；部署脚本等待就绪后再切换流量。应用只信任显式配置的代理网段所提供的转发头。
 
+`server.trusted_proxy_cidrs` 默认为空；只有直接对端命中该列表时，`X-Forwarded-For` 才参与登录限流、公开写入限流和隐私统计。Compose 示例为 Caddy 与应用使用的明确内部网段，其他反向代理必须替换为实际出口网段。
+
 ## 安全基线
 
 - 管理后台与公开写接口均使用同站会话 cookie、CSRF 防护和 Origin 校验。
+- 评论与 Newsletter 公开写入使用 keyed 幂等/短期指纹，Newsletter 通过一次性确认和退订 token，不接受邮箱地址直接退订。
+- Webhook、Newsletter 和 SMTP 的外发连接有界、禁止跟随重定向，并在连接阶段拒绝 loopback、私网、链路本地和多播地址。
 - HTTPS 部署的 Cookie 设置 Secure、HttpOnly、SameSite；HTTP 本地开发会按公开基址关闭 Secure，登录后轮换会话 ID。
 - 登录、TOTP、恢复码、评论和预览链接分别限速。
 - Markdown 原始 HTML 默认关闭，文章和评论使用不同清洗策略。

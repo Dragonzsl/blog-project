@@ -1,6 +1,6 @@
 # 个人博客系统
 
-这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环、阶段二扩展能力与阶段三生态/发行加固已经完成，实施记录见[阶段一](./docs/progress/stage-1.md)、[阶段二](./docs/progress/stage-2.md)和[阶段三](./docs/progress/stage-3.md)。
+这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环、阶段二扩展能力与阶段三生态/发行加固已经完成；当前的生产安全与一致性改进阶段也已实施，记录见[阶段一核心闭环](./docs/progress/stage-1.md)、[阶段二](./docs/progress/stage-2.md)、[阶段三](./docs/progress/stage-3.md)和[改进阶段一](./docs/progress/phase-one-production-hardening.md)。
 
 核心方向：Go 模块化单体、SQLite、Markdown、服务端渲染、可上传主题、可信编译期插件，以及可在 1 核 1 GiB VPS 上稳定运行的硬性资源预算。
 
@@ -45,6 +45,10 @@ docker compose down
 ```
 
 `BLOG_SITE_ADDRESS` 同时作为 canonical、Open Graph、RSS、Sitemap、robots 和 llms.txt 的公开基址，正式部署前必须设置为访问者实际使用的地址。内容编辑器可单独覆盖 SEO 标题和描述；留空时自动回退到内容标题、摘要与站点名。
+
+应用只信任 `BLOG_TRUSTED_PROXY_CIDRS` 中列出的反向代理网段提供的 `X-Forwarded-For`。默认 Compose 已将 Caddy 与应用绑定在 `172.30.0.0/24` 内部网段；如果前面还有 Nginx、平台负载均衡器或其他代理，请将环境变量替换为实际代理出口网段，不要填入 `0.0.0.0/0`。未配置时会安全地使用应用看到的直接对端地址。
+
+Newsletter 启用后，公开订阅先进入待确认状态；确认邮件、外部同步和通知都由后台任务处理。管理员可在 `/admin/operations/tasks` 查看 pending/running/failed 任务、脱敏错误并安全重试失败任务。
 
 Cookie 的 Secure 属性默认跟随 `BLOG_SITE_ADDRESS` 的协议：HTTPS 自动启用，HTTP 本地开发自动关闭；如有特殊部署需求，可通过 `BLOG_COOKIE_SECURE` 显式覆盖。
 

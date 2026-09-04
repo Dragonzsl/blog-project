@@ -70,6 +70,10 @@ SQLite 表使用 `INTEGER PRIMARY KEY` 获得紧凑索引和稳定性能。需�
 
 `jobs` 保存持久任务类型、载荷版本、幂等键、状态、可见时间、租约、尝试次数和最后错误。载荷必须小；大文件使用媒体或备份对象键引用。
 
+`event_outbox` 保存已经在业务写事务中登记、但尚未完成派发的版本化事件。事件拥有稳定的 `event_id` 和去重键；派发任务只引用它，事件本体和业务写入一起提交或回滚。任务达到重试上限后保留为失败状态，不能静默丢弃。
+
+`request_idempotencies` 保存短期的公开写请求结果，`public_write_fingerprints` 保存按站点密钥计算的短期重复请求指纹。两者只保存摘要和有限响应，不保存原始令牌、密码、邮箱或完整请求体；过期数据由有界批次清理。
+
 `audit_entries` 保存站主重要动作、对象公开 ID、结果、请求 ID 和去敏上下文。审计不保存正文、密码、令牌、TOTP 或访客原始 IP。
 
 `backups` 保存备份清单、目标、大小、校验结果、加密状态和恢复演练时间，不保存备份解密密钥。
@@ -92,12 +96,19 @@ SQLite 表使用 `INTEGER PRIMARY KEY` 获得紧凑索引和稳定性能。需�
 
 Webhook 插件保存订阅、投递和有限重试状态；签名密钥只存秘密引用。内容 API 插件除自己的访问配置外不复制内容数据。
 
+Newsletter 订阅保存加密邮箱和带版本的密钥摘要；`email_hash_version=2` 使用运行时站点密钥派生的 HMAC，历史摘要由启动时按批次从加密邮箱重算。确认/退订意图只通过短期 token 摘要定位，token 原文不进入数据库、日志或公开响应；为支持提交后异步发送，必要的 token 密文受长度约束并按站点密钥加密保存。
+
+通知 outbox 和 Webhook 投递均保存稳定幂等键、租约、更新时间与有限错误摘要。Webhook 事件键具有唯一约束，避免同一事件重复创建投递；外发失败由 `jobs` 统一退避，永久配置/策略错误直接进入 `failed`，人工重试仍需显式操作。
+
 ## 关键索引
 
 - `contents(kind, status, published_at DESC)` 支撑首页与归档。
 - `contents(slug_key)` 唯一索引；回收站内容也占用其历史身份。
 - `content_tags(tag_id, content_id)` 和反向唯一关系。
 - `jobs(status, available_at)` 与租约查询索引。
+- `event_outbox(status, created_at)` 支撑提交后事件派发与失败巡检。
+- `request_idempotencies(expires_at)`、`public_write_fingerprints(expires_at)` 和 `newsletter_tokens(expires_at)` 支撑有界过期清理。
+- `webhook_deliveries(event_key)` 唯一索引和 `(status, available_at)` 任务索引支撑投递幂等与恢复。
 - `redirects(source_path_key)` 唯一索引。
 - `media(content_hash)` 非唯一索引用于重复提示。
 - 评论按 `(content_id, status, created_at)` 查询。
@@ -115,6 +126,9 @@ Webhook 插件保存订阅、投递和有限重试状态；签名密钥只存秘
 - 一个文章同一时间只有一个评论提供方。
 - 主题、导航、站点设置或发布状态变化必须提高 `render_epoch`。
 - 外部副作用只能在事务提交后执行，并拥有幂等键。
+- 业务事务登记的事件必须先进入 `event_outbox`，再由持久任务派发；事件派发失败不能回滚已经提交的业务写入。
+- 公开写入必须绑定授权、CSRF/Origin（适用时）、限流、幂等或重复指纹与统一错误语义；token 仅以摘要或受保护密文形式持久化。
+- 任务 claim、租约、完成和失败状态更新必须是短事务；处理器不得在 claim 事务中执行网络、邮件、Markdown 重计算或媒体处理。
 - 缓存、搜索、统计和媒体变体均可从权威数据重建。
 
 ## 数据保留
