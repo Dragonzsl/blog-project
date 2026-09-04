@@ -423,7 +423,7 @@ func statusWithOutput(arguments []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "migration_version: %d\nfailed_jobs: %d\nvalid_backups: %d\n", current.MigrationVersion, current.FailedJobs, current.ValidBackups)
+	fmt.Fprintf(output, "migration_version: %d\npending_jobs: %d\nrunning_jobs: %d\nfailed_jobs: %d\nvalid_backups: %d\n", current.MigrationVersion, current.PendingJobs, current.RunningJobs, current.FailedJobs, current.ValidBackups)
 	if current.LastBackupAt != nil {
 		fmt.Fprintf(output, "last_backup_at: %s\n", current.LastBackupAt.Format(time.RFC3339))
 	}

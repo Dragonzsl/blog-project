@@ -34,7 +34,11 @@ type BackupRecord struct {
 
 type Status struct {
 	MigrationVersion int64
+	PendingJobs      int
+	RunningJobs      int
 	FailedJobs       int
+	OldestFailedAt   *time.Time
+	LastTaskError    string
 	ValidBackups     int
 	LastBackupAt     *time.Time
 	LastRestoreTest  *time.Time
@@ -105,14 +109,24 @@ func ReadStatus(ctx context.Context, db *database.DB) (Status, error) {
 		return Status{}, err
 	}
 	status := Status{MigrationVersion: version}
-	var lastBackup, lastRestore sql.NullInt64
+	var oldestFailed, lastBackup, lastRestore sql.NullInt64
+	var lastTaskError sql.NullString
 	if err := db.Reader.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM jobs WHERE status='pending'),
+		(SELECT count(*) FROM jobs WHERE status='running'),
 		(SELECT count(*) FROM jobs WHERE status='failed'),
+		(SELECT MIN(updated_at) FROM jobs WHERE status='failed'),
+		(SELECT COALESCE(last_error,'') FROM jobs WHERE status='failed' ORDER BY updated_at DESC,id DESC LIMIT 1),
 		(SELECT count(*) FROM backups WHERE checksum_status='valid'),
 		(SELECT MAX(created_at) FROM backups WHERE checksum_status='valid'),
 		(SELECT MAX(restore_tested_at) FROM backups WHERE restore_tested_at IS NOT NULL)
-	`).Scan(&status.FailedJobs, &status.ValidBackups, &lastBackup, &lastRestore); err != nil {
+	`).Scan(&status.PendingJobs, &status.RunningJobs, &status.FailedJobs, &oldestFailed, &lastTaskError, &status.ValidBackups, &lastBackup, &lastRestore); err != nil {
 		return Status{}, fmt.Errorf("read operational status: %w", err)
+	}
+	status.LastTaskError = truncateError(lastTaskError.String)
+	if oldestFailed.Valid {
+		value := time.UnixMilli(oldestFailed.Int64).UTC()
+		status.OldestFailedAt = &value
 	}
 	if lastBackup.Valid {
 		value := time.UnixMilli(lastBackup.Int64).UTC()

@@ -44,6 +44,7 @@
   <p class="admin-nav-label">外观与扩展</p>
   <a class="admin-nav-link {{if eq .AdminSection "themes"}}active{{end}}" href="/admin/themes" {{if eq .AdminSection "themes"}}aria-current="page"{{end}}><span class="admin-nav-icon" aria-hidden="true">{{template "admin_nav_icon" "themes"}}</span><span class="admin-nav-label-text">主题</span></a>
   <a class="admin-nav-link {{if eq .AdminSection "plugins"}}active{{end}}" href="/admin/plugins" {{if eq .AdminSection "plugins"}}aria-current="page"{{end}}><span class="admin-nav-icon" aria-hidden="true">{{template "admin_nav_icon" "plugins"}}</span><span class="admin-nav-label-text">插件</span></a>
+  <a class="admin-nav-link {{if eq .AdminSection "operations"}}active{{end}}" href="/admin/operations/tasks" {{if eq .AdminSection "operations"}}aria-current="page"{{end}}><span class="admin-nav-icon" aria-hidden="true">{{template "admin_nav_icon" "operations"}}</span><span class="admin-nav-label-text">后台任务</span><span class="nav-count">运维</span></a>
   <a class="admin-nav-link {{if eq .AdminSection "redirects"}}active{{end}}" href="/admin/redirects" {{if eq .AdminSection "redirects"}}aria-current="page"{{end}}><span class="admin-nav-icon" aria-hidden="true">{{template "admin_nav_icon" "redirects"}}</span><span class="admin-nav-label-text">重定向</span></a>
 {{end}}
 
