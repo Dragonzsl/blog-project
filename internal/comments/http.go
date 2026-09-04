@@ -14,6 +14,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/operations"
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
+	"github.com/zhushilin/blog-project/internal/platform/publicwrite"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
 )
 
@@ -30,6 +33,7 @@ type HTTPHandler struct {
 	templates *template.Template
 	rateMu    sync.Mutex
 	rate      map[string]rateWindow
+	clientIP  *clientip.Resolver
 }
 
 type rateWindow struct {
@@ -55,7 +59,14 @@ func NewHTTPHandler(service *Service, lookup ContentLookup, security Security, l
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &HTTPHandler{service: service, lookup: lookup, security: security, logger: logger, templates: parsed, rate: make(map[string]rateWindow)}
+	return &HTTPHandler{service: service, lookup: lookup, security: security, logger: logger, templates: parsed, rate: make(map[string]rateWindow), clientIP: clientip.DirectPeerOnly()}
+}
+
+func (h *HTTPHandler) SetClientIPResolver(resolver *clientip.Resolver) {
+	if resolver == nil {
+		resolver = clientip.DirectPeerOnly()
+	}
+	h.clientIP = resolver
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
@@ -99,20 +110,29 @@ func (h *HTTPHandler) create(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Too many comments", http.StatusTooManyRequests)
 		return
 	}
-	comment, err := h.service.Create(r.Context(), publicSlug(r), Input{DisplayName: r.FormValue("display_name"), Email: r.FormValue("email"), Website: r.FormValue("website"), Body: r.FormValue("body"), ParentID: parseID(r.FormValue("parent_id"))})
+	comment, err := h.service.CreateWithRequest(r.Context(), publicSlug(r), Input{DisplayName: r.FormValue("display_name"), Email: r.FormValue("email"), Website: r.FormValue("website"), Body: r.FormValue("body"), ParentID: parseID(r.FormValue("parent_id"))}, WriteRequest{IdempotencyKey: r.Header.Get("Idempotency-Key"), ClientIdentity: h.resolveClientIP(r)})
 	if err != nil {
 		status := http.StatusUnprocessableEntity
 		if errors.Is(err, ErrNotFound) {
 			status = http.StatusNotFound
 		}
-		http.Error(w, err.Error(), status)
+		if errors.Is(err, publicwrite.ErrIdempotencyConflict) || errors.Is(err, publicwrite.ErrIdempotencyPending) || errors.Is(err, publicwrite.ErrDuplicateRequest) {
+			status = http.StatusConflict
+		}
+		message := "Invalid comment"
+		if errors.Is(err, ErrNotFound) {
+			message = "Comment target not found"
+		} else if status == http.StatusConflict {
+			message = "Duplicate comment submission"
+		}
+		http.Error(w, message, status)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"id": comment.ID, "status": comment.Status})
+	writeJSON(w, http.StatusCreated, map[string]any{"id": comment.ID, "public_id": fmt.Sprintf("%x", comment.PublicID), "status": comment.Status})
 }
 
 func (h *HTTPHandler) allowRequest(r *http.Request) bool {
-	key := strings.TrimSpace(r.RemoteAddr)
+	key := h.resolveClientIP(r)
 	now := time.Now()
 	h.rateMu.Lock()
 	defer h.rateMu.Unlock()
@@ -130,6 +150,13 @@ func (h *HTTPHandler) allowRequest(r *http.Request) bool {
 	window.Count++
 	h.rate[key] = window
 	return window.Count <= 5
+}
+
+func (h *HTTPHandler) resolveClientIP(r *http.Request) string {
+	if h.clientIP == nil {
+		return clientip.DirectPeerOnly().Resolve(r)
+	}
+	return h.clientIP.Resolve(r)
 }
 
 func (h *HTTPHandler) pending(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +201,7 @@ func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 }
 func parseID(value string) int64 { id, _ := strconv.ParseInt(value, 10, 64); return id }
 func (h *HTTPHandler) error(w http.ResponseWriter, r *http.Request, err error) {
-	h.logger.ErrorContext(r.Context(), "comment request failed", "error", err)
+	h.logger.ErrorContext(r.Context(), "comment request failed", "error", operations.SafeError(err))
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 }
 

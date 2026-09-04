@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -14,6 +16,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
+	"github.com/zhushilin/blog-project/internal/platform/publicwrite"
 	"github.com/zhushilin/blog-project/internal/presentation"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
@@ -54,6 +57,15 @@ type Notifier interface {
 	Enqueue(context.Context, string, string, string, string, time.Time) error
 }
 
+type transactionalNotifier interface {
+	EnqueueTx(context.Context, *sql.Tx, string, string, string, string, time.Time) error
+}
+
+type WriteRequest struct {
+	IdempotencyKey string
+	ClientIdentity string
+}
+
 type Service struct {
 	db                *database.DB
 	lookup            ContentLookup
@@ -65,6 +77,10 @@ type Service struct {
 	events            interface {
 		Dispatch(context.Context, extensions.Event) []error
 	}
+	eventRecorder interface {
+		RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
+	}
+	writeGuard *publicwrite.Guard
 }
 
 func (s *Service) SetNotifier(notifier Notifier, recipient string) {
@@ -75,16 +91,38 @@ func (s *Service) SetEventSink(sink interface {
 	Dispatch(context.Context, extensions.Event) []error
 }) {
 	s.events = sink
+	if recorder, ok := sink.(interface {
+		RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
+	}); ok {
+		s.eventRecorder = recorder
+	}
 }
 
-func NewService(db *database.DB, lookup ContentLookup, markdown *presentation.Markdown, requireModeration bool) *Service {
+func NewService(db *database.DB, lookup ContentLookup, markdown *presentation.Markdown, requireModeration bool, secret ...[]byte) *Service {
 	if markdown == nil {
 		markdown = presentation.NewMarkdown()
 	}
-	return &Service{db: db, lookup: lookup, markdown: markdown, requireModeration: requireModeration, now: func() time.Time { return time.Now().UTC() }}
+	service := &Service{db: db, lookup: lookup, markdown: markdown, requireModeration: requireModeration, now: func() time.Time { return time.Now().UTC() }}
+	if len(secret) > 0 && len(secret[0]) > 0 {
+		service.writeGuard = publicwrite.NewGuard(db, secret[0])
+	}
+	return service
+}
+
+func (s *Service) SetWriteGuard(guard *publicwrite.Guard) { s.writeGuard = guard }
+
+func (s *Service) Cleanup(ctx context.Context) (int64, error) {
+	if s == nil || s.writeGuard == nil {
+		return 0, nil
+	}
+	return s.writeGuard.Cleanup(ctx)
 }
 
 func (s *Service) Create(ctx context.Context, slug string, input Input) (Comment, error) {
+	return s.CreateWithRequest(ctx, slug, input, WriteRequest{})
+}
+
+func (s *Service) CreateWithRequest(ctx context.Context, slug string, input Input, request WriteRequest) (Comment, error) {
 	if s.lookup == nil {
 		return Comment{}, ErrInvalid
 	}
@@ -138,7 +176,33 @@ func (s *Service) Create(ctx context.Context, slug string, input Input) (Comment
 		status = "approved"
 	}
 	now := s.now()
-	result, err := s.db.Writer.ExecContext(ctx, `INSERT INTO comments(public_id,content_id,parent_id,display_name,email_hash,website,body_markdown,body_html,status,created_at,approved_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, publicID, article.ID, parent, name, emailHash, website, body, string(html), status, now.UnixMilli(), nullableTime(status == "approved", now), now.UnixMilli())
+	tx, err := s.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return Comment{}, err
+	}
+	defer tx.Rollback()
+	if s.writeGuard != nil && strings.TrimSpace(request.IdempotencyKey) != "" {
+		fingerprint := commentFingerprint(slug, request.ClientIdentity, name, input.Email, website, body, input.ParentID)
+		claim, err := s.writeGuard.ClaimTx(ctx, tx, "comments.create", request.IdempotencyKey, fingerprint)
+		if err != nil {
+			return Comment{}, err
+		}
+		if claim.Completed {
+			if err := tx.Commit(); err != nil {
+				return Comment{}, err
+			}
+			if len(claim.ResultPublicID) == 0 {
+				return Comment{}, ErrNotFound
+			}
+			return s.GetByPublicID(ctx, claim.ResultPublicID)
+		}
+	} else if s.writeGuard != nil {
+		fingerprint := commentFingerprint(slug, request.ClientIdentity, name, input.Email, website, body, input.ParentID)
+		if _, err := s.writeGuard.ClaimFingerprintTx(ctx, tx, "comments.create", fingerprint, publicID); err != nil {
+			return Comment{}, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO comments(public_id,content_id,parent_id,display_name,email_hash,website,body_markdown,body_html,status,created_at,approved_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, publicID, article.ID, parent, name, emailHash, website, body, string(html), status, now.UnixMilli(), nullableTime(status == "approved", now), now.UnixMilli())
 	if err != nil {
 		return Comment{}, err
 	}
@@ -146,11 +210,38 @@ func (s *Service) Create(ctx context.Context, slug string, input Input) (Comment
 	if err != nil {
 		return Comment{}, err
 	}
-	_, _ = s.db.Writer.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,object_public_id,result,context_json,created_at) VALUES('comments.created','comment',?,'succeeded',?,?)`, publicID, fmt.Sprintf(`{"content_id":%d,"status":%q}`, article.ID, status), now.UnixMilli())
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,object_public_id,result,context_json,created_at) VALUES('comments.created','comment',?,'succeeded',?,?)`, publicID, fmt.Sprintf(`{"status":%q}`, status), now.UnixMilli()); err != nil {
+		return Comment{}, err
+	}
 	if status == "pending" && s.notifier != nil && s.notificationTo != "" {
-		_ = s.notifier.Enqueue(ctx, "comment.pending", s.notificationTo, "有新的评论待审核", fmt.Sprintf("文章《%s》收到来自 %s 的新评论。", article.Title, name), now)
+		message := fmt.Sprintf("文章《%s》收到新的待审核评论。", article.Title)
+		if notifier, ok := s.notifier.(transactionalNotifier); ok {
+			if err := notifier.EnqueueTx(ctx, tx, "comment.pending", s.notificationTo, "有新的评论待审核", message, now); err != nil {
+				return Comment{}, err
+			}
+		}
+	}
+	if s.writeGuard != nil && strings.TrimSpace(request.IdempotencyKey) != "" {
+		responseBody, _ := json.Marshal(map[string]any{"status": status, "public_id": hex.EncodeToString(publicID)})
+		if err := s.writeGuard.CompleteTx(ctx, tx, "comments.create", request.IdempotencyKey, httpCreated, publicID, responseBody); err != nil {
+			return Comment{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return Comment{}, err
+	}
+	if status == "pending" && s.notifier != nil && s.notificationTo != "" {
+		if _, ok := s.notifier.(transactionalNotifier); !ok {
+			_ = s.notifier.Enqueue(ctx, "comment.pending", s.notificationTo, "有新的评论待审核", fmt.Sprintf("文章《%s》收到新的待审核评论。", article.Title), now)
+		}
 	}
 	return s.Get(ctx, id)
+}
+
+const httpCreated = 201
+
+func commentFingerprint(slug, client, name, email, website, body string, parentID int64) string {
+	return strings.Join([]string{strings.TrimSpace(slug), strings.TrimSpace(client), strings.TrimSpace(name), strings.ToLower(strings.TrimSpace(email)), strings.TrimSpace(website), strings.TrimSpace(body), fmt.Sprint(parentID)}, "\x00")
 }
 
 func (s *Service) Get(ctx context.Context, id int64) (Comment, error) {
@@ -176,6 +267,20 @@ func (s *Service) Get(ctx context.Context, id int64) (Comment, error) {
 	}
 	_ = updated
 	return result, nil
+}
+
+func (s *Service) GetByPublicID(ctx context.Context, publicID []byte) (Comment, error) {
+	if len(publicID) == 0 {
+		return Comment{}, ErrNotFound
+	}
+	var id int64
+	if err := s.db.Reader.QueryRowContext(ctx, "SELECT id FROM comments WHERE public_id=?", publicID).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Comment{}, ErrNotFound
+		}
+		return Comment{}, err
+	}
+	return s.Get(ctx, id)
 }
 
 func (s *Service) Approved(ctx context.Context, contentID int64) ([]Comment, error) {
@@ -255,7 +360,19 @@ func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 		return ErrInvalid
 	}
 	now := s.now()
-	result, err := s.db.Writer.ExecContext(ctx, "UPDATE comments SET status=?,approved_at=?,updated_at=? WHERE id=?", status, nullableTime(status == "approved", now), now.UnixMilli(), id)
+	tx, err := s.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var publicID, contentPublicID []byte
+	if err := tx.QueryRowContext(ctx, `SELECT comment.public_id,content.public_id FROM comments comment JOIN contents content ON content.id=comment.content_id WHERE comment.id=?`, id).Scan(&publicID, &contentPublicID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	result, err := tx.ExecContext(ctx, "UPDATE comments SET status=?,approved_at=?,updated_at=? WHERE id=?", status, nullableTime(status == "approved", now), now.UnixMilli(), id)
 	if err != nil {
 		return err
 	}
@@ -263,11 +380,22 @@ func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 	if affected == 0 {
 		return ErrNotFound
 	}
-	_, _ = s.db.Writer.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES('comments.moderated','comment','succeeded',?,?)`, fmt.Sprintf(`{"comment_id":%d,"status":%q}`, id, status), now.UnixMilli())
-	if status == "approved" && s.events != nil {
-		if comment, err := s.Get(ctx, id); err == nil {
-			_ = s.events.Dispatch(ctx, extensions.Event{Name: "CommentApproved.v1", Version: 1, ObjectID: append([]byte(nil), comment.PublicID...), Payload: map[string]any{"content_id": comment.ContentID, "comment_id": comment.ID}})
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,object_public_id,result,context_json,created_at) VALUES('comments.moderated','comment',?,'succeeded',?,?)`, publicID, fmt.Sprintf(`{"status":%q}`, status), now.UnixMilli()); err != nil {
+		return err
+	}
+	if status == "approved" && s.eventRecorder != nil {
+		if err := s.eventRecorder.RecordEventTx(ctx, tx, extensions.Event{
+			Name: "CommentApproved.v1", Version: 1, ObjectID: append([]byte(nil), publicID...),
+			Payload: map[string]any{"content_public_id": hex.EncodeToString(contentPublicID)}, OccurredAt: now,
+		}); err != nil {
+			return err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if status == "approved" && s.eventRecorder == nil && s.events != nil {
+		_ = s.events.Dispatch(ctx, extensions.Event{Name: "CommentApproved.v1", Version: 1, ObjectID: append([]byte(nil), publicID...), Payload: map[string]any{"content_public_id": hex.EncodeToString(contentPublicID)}})
 	}
 	return nil
 }
