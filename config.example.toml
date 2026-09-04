@@ -1,6 +1,9 @@
 [server]
 listen_address = ":8080"
 shutdown_timeout = "10s"
+# Only list reverse-proxy source networks whose forwarding headers are
+# authoritative. Empty means the application uses the direct peer address.
+trusted_proxy_cidrs = []
 
 [storage]
 data_dir = "./data"

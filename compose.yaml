@@ -47,6 +47,7 @@ services:
       BLOG_LOG_FORMAT: ${BLOG_LOG_FORMAT:-json}
       BLOG_AUTH_SECRET: ${BLOG_AUTH_SECRET:-}
       BLOG_BASE_URL: ${BLOG_SITE_ADDRESS:-https://localhost}
+      BLOG_TRUSTED_PROXY_CIDRS: ${BLOG_TRUSTED_PROXY_CIDRS:-172.30.0.0/24}
       GOMEMLIMIT: ${BLOG_MEMORY_LIMIT:-192MiB}
     volumes:
       - blog_data:/data
@@ -65,6 +66,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    networks:
+      - blog_internal
 
   caddy:
     image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
@@ -91,8 +94,16 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
+    networks:
+      - blog_internal
 
 volumes:
   blog_data:
   caddy_data:
   caddy_config:
+
+networks:
+  blog_internal:
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

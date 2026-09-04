@@ -1,8 +1,5 @@
 {
 	admin off
-	servers {
-		trusted_proxies static private_ranges
-	}
 }
 
 {$BLOG_SITE_ADDRESS:https://localhost} {
