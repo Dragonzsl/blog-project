@@ -3,6 +3,7 @@ package extensions
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/operations"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 )
 
 const HostAPIVersion = 1
@@ -64,6 +67,7 @@ type PluginState struct {
 }
 
 type Event struct {
+	ID         []byte
 	Name       string
 	Version    int
 	ObjectID   []byte
@@ -128,6 +132,16 @@ func (h *Host) Subscribe(event string, handler EventHandler) error {
 	return nil
 }
 func (h *Host) RegisterTask(kind string, handler TaskHandler) error {
+	return h.registerTask(kind, handler, nil)
+}
+
+// RegisterTaskWithRetry adds a transaction-safe hook used by the operations
+// page when an operator retries a terminal plugin delivery.
+func (h *Host) RegisterTaskWithRetry(kind string, handler TaskHandler, retry operations.TaskRetryHook) error {
+	return h.registerTask(kind, handler, retry)
+}
+
+func (h *Host) registerTask(kind string, handler TaskHandler, retry operations.TaskRetryHook) error {
 	if strings.TrimSpace(kind) == "" || handler == nil {
 		return errors.New("task kind and handler are required")
 	}
@@ -138,6 +152,9 @@ func (h *Host) RegisterTask(kind string, handler TaskHandler) error {
 		return fmt.Errorf("task %s already registered", key)
 	}
 	h.registry.tasks[key] = handler
+	if retry != nil {
+		h.registry.taskRetryHooks[key] = retry
+	}
 	return nil
 }
 func (h *Host) EnqueueTask(ctx context.Context, kind string, payload any, idempotency string, availableAt time.Time) error {
@@ -154,8 +171,19 @@ func (h *Host) EnqueueTask(ctx context.Context, kind string, payload any, idempo
 	if availableAt.IsZero() {
 		availableAt = time.Now().UTC()
 	}
-	_, err = h.registry.db.Writer.ExecContext(ctx, `INSERT INTO jobs(kind,payload_version,payload,idempotency_key,status,available_at,attempts,created_at,updated_at) VALUES(?,?,?,?,'pending',?,0,?,?) ON CONFLICT(idempotency_key) DO NOTHING`, "plugin:"+h.pluginID+":"+kind, 1, encoded, idempotency, availableAt.UTC().UnixMilli(), time.Now().UTC().UnixMilli(), time.Now().UTC().UnixMilli())
-	return err
+	return h.registry.queue.Enqueue(ctx, operations.Task{Kind: "plugin:" + h.pluginID + ":" + kind, PayloadVersion: 1, Payload: encoded, IdempotencyKey: idempotency, AvailableAt: availableAt})
+}
+
+// EnqueueTaskTx atomically records a plugin-owned durable record and its job.
+func (h *Host) EnqueueTaskTx(ctx context.Context, tx *sql.Tx, kind string, payload any, idempotency string, availableAt time.Time) error {
+	if !h.registry.isEnabled(h.pluginID) {
+		return ErrPluginDisabled
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return h.registry.queue.EnqueueTx(ctx, tx, operations.Task{Kind: "plugin:" + h.pluginID + ":" + kind, PayloadVersion: 1, Payload: encoded, IdempotencyKey: idempotency, AvailableAt: availableAt})
 }
 func (h *Host) Route(method, path string, handler http.HandlerFunc) error {
 	if h.registry.router == nil || handler == nil {
@@ -219,26 +247,77 @@ func (h *Host) guard(handler http.HandlerFunc) http.HandlerFunc {
 }
 
 type Registry struct {
-	db          *database.DB
-	router      chi.Router
-	adminRouter chi.Router
-	adminPrefix string
-	logger      *slog.Logger
-	mu          sync.RWMutex
-	plugins     map[string]Plugin
-	schemas     map[string]SettingsSchema
-	events      map[string][]eventSubscription
-	tasks       map[string]TaskHandler
-	menus       []MenuItem
-	enabled     map[string]bool
-	initialized map[string]bool
+	db             *database.DB
+	router         chi.Router
+	adminRouter    chi.Router
+	adminPrefix    string
+	logger         *slog.Logger
+	mu             sync.RWMutex
+	plugins        map[string]Plugin
+	schemas        map[string]SettingsSchema
+	events         map[string][]eventSubscription
+	tasks          map[string]TaskHandler
+	taskRetryHooks map[string]operations.TaskRetryHook
+	menus          []MenuItem
+	enabled        map[string]bool
+	initialized    map[string]bool
+	coreTasks      map[string]TaskHandler
+	coreRetryHooks map[string]operations.TaskRetryHook
+	queue          *operations.TaskQueue
 }
 
 func NewRegistry(db *database.DB, router chi.Router, logger *slog.Logger) *Registry {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Registry{db: db, router: router, adminRouter: router, adminPrefix: "/admin", logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]eventSubscription), tasks: make(map[string]TaskHandler), enabled: make(map[string]bool), initialized: make(map[string]bool)}
+	return &Registry{db: db, router: router, adminRouter: router, adminPrefix: "/admin", logger: logger, plugins: make(map[string]Plugin), schemas: make(map[string]SettingsSchema), events: make(map[string][]eventSubscription), tasks: make(map[string]TaskHandler), taskRetryHooks: make(map[string]operations.TaskRetryHook), coreTasks: make(map[string]TaskHandler), coreRetryHooks: make(map[string]operations.TaskRetryHook), enabled: make(map[string]bool), initialized: make(map[string]bool), queue: operations.NewTaskQueue(db)}
+}
+
+// TaskQueue returns the shared, bounded task scheduler used by core adapters.
+func (r *Registry) TaskQueue() *operations.TaskQueue { return r.queue }
+
+func (r *Registry) RegisterCoreTask(kind string, handler TaskHandler) error {
+	return r.RegisterCoreTaskWithRetry(kind, handler, nil)
+}
+
+func (r *Registry) RegisterCoreTaskWithRetry(kind string, handler TaskHandler, retry operations.TaskRetryHook) error {
+	if !strings.HasPrefix(kind, "core:") || handler == nil {
+		return errors.New("core task kind and handler are required")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.coreTasks[kind]; exists {
+		return fmt.Errorf("core task %s already registered", kind)
+	}
+	r.coreTasks[kind] = handler
+	if retry != nil {
+		r.coreRetryHooks[kind] = retry
+	}
+	return nil
+}
+
+func (r *Registry) RetryTask(ctx context.Context, id int64) error {
+	task, err := r.queue.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	var hook operations.TaskRetryHook
+	if strings.HasPrefix(task.Kind, "core:") {
+		hook = r.coreRetryHooks[task.Kind]
+	} else if strings.HasPrefix(task.Kind, "plugin:") {
+		hook = r.taskRetryHooks[strings.TrimPrefix(task.Kind, "plugin:")]
+	}
+	r.mu.RUnlock()
+	return r.queue.RetryWith(ctx, id, hook)
+}
+
+func (r *Registry) TaskList(ctx context.Context, limit int) ([]operations.TaskSummary, error) {
+	return r.queue.List(ctx, limit)
+}
+
+func (r *Registry) TaskCounts(ctx context.Context) (operations.TaskCounts, error) {
+	return r.queue.Counts(ctx)
 }
 
 // SetAdminRouter binds the protected /admin subtree. It must be called before
@@ -466,100 +545,133 @@ func (r *Registry) Dispatch(ctx context.Context, event Event) []error {
 		}
 		if err := subscription.handler(ctx, event); err != nil {
 			failures = append(failures, err)
-			r.logger.ErrorContext(ctx, "plugin event failed", "event", event.Name, "error", err)
+			r.logger.ErrorContext(ctx, "plugin event failed", "event", event.Name, "error", operations.SafeError(err))
 		}
 	}
 	return failures
 }
 
+type durableEventTask struct {
+	EventID string `json:"event_id"`
+}
+
+// RecordEventTx persists an event and its dispatch job in the caller's
+// business transaction. A publication or moderation write therefore cannot
+// commit without its durable after-commit work.
+func (r *Registry) RecordEventTx(ctx context.Context, tx *sql.Tx, event Event) error {
+	if r == nil || r.queue == nil || tx == nil {
+		return errors.New("event recorder is not configured")
+	}
+	if strings.TrimSpace(event.Name) == "" || len(event.Name) > 120 || strings.ContainsAny(event.Name, "\r\n") || event.Version < 1 || len(event.ObjectID) > 64 {
+		return errors.New("event metadata is invalid")
+	}
+	now := event.OccurredAt.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	eventID, err := platformid.NewPublicID(now)
+	if err != nil {
+		return err
+	}
+	payload := event.Payload
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > 16<<10 {
+		return errors.New("event payload is invalid or too large")
+	}
+	objectID := append([]byte(nil), event.ObjectID...)
+	if objectID == nil {
+		objectID = []byte{}
+	}
+	eventIDHex := hex.EncodeToString(eventID)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO event_outbox(event_id,event_name,event_version,object_public_id,payload,status,occurred_at,created_at,updated_at) VALUES(?,?,?,?,?,'pending',?,?,?)`, eventID, event.Name, event.Version, objectID, encoded, now.UnixMilli(), now.UnixMilli(), now.UnixMilli()); err != nil {
+		return err
+	}
+	taskPayload, err := json.Marshal(durableEventTask{EventID: eventIDHex})
+	if err != nil {
+		return err
+	}
+	return r.queue.EnqueueTx(ctx, tx, operations.Task{Kind: "core:event_dispatch", PayloadVersion: 1, Payload: taskPayload, IdempotencyKey: "event:" + eventIDHex, AvailableAt: now})
+}
+
+func (r *Registry) processDurableEvent(ctx context.Context, payload []byte) error {
+	var task durableEventTask
+	if err := json.Unmarshal(payload, &task); err != nil || len(task.EventID) != 32 {
+		return errors.New("invalid event task payload")
+	}
+	eventID, err := hex.DecodeString(task.EventID)
+	if err != nil || len(eventID) != 16 {
+		return errors.New("invalid event ID")
+	}
+	var event Event
+	var eventPayload []byte
+	var status string
+	var occurredAt int64
+	err = r.db.Reader.QueryRowContext(ctx, `SELECT event_name,event_version,object_public_id,payload,status,occurred_at FROM event_outbox WHERE event_id=?`, eventID).Scan(&event.Name, &event.Version, &event.ObjectID, &eventPayload, &status, &occurredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("event record not found")
+	}
+	if err != nil {
+		return err
+	}
+	if status == "succeeded" {
+		return nil
+	}
+	if err := json.Unmarshal(eventPayload, &event.Payload); err != nil {
+		return err
+	}
+	event.ID = append([]byte(nil), eventID...)
+	event.OccurredAt = time.UnixMilli(occurredAt).UTC()
+	if failures := r.Dispatch(ctx, event); len(failures) > 0 {
+		message := operations.SafeError(errors.Join(failures...))
+		_, _ = r.db.Writer.ExecContext(ctx, `UPDATE event_outbox SET last_error=?,updated_at=? WHERE event_id=?`, message, time.Now().UTC().UnixMilli(), eventID)
+		return errors.Join(failures...)
+	}
+	_, err = r.db.Writer.ExecContext(ctx, `UPDATE event_outbox SET status='succeeded',last_error='',updated_at=? WHERE event_id=?`, time.Now().UTC().UnixMilli(), eventID)
+	return err
+}
+
 func (r *Registry) ProcessOne(ctx context.Context) (bool, error) {
-	now := time.Now().UTC()
-	// A process crash can leave a task in running. Once its short lease expires
-	// it is safe to make it runnable again; handlers are required to be
-	// idempotent and the idempotency key remains unique in jobs.
-	_, _ = r.db.Writer.ExecContext(ctx, `UPDATE jobs SET status='pending',lease_expires_at=NULL,updated_at=? WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<?`, now.UnixMilli(), now.UnixMilli())
 	r.mu.RLock()
 	handlers := make(map[string]TaskHandler, len(r.tasks))
 	for key, handler := range r.tasks {
 		handlers[key] = handler
 	}
+	coreHandlers := make(map[string]TaskHandler, len(r.coreTasks))
+	for key, handler := range r.coreTasks {
+		coreHandlers[key] = handler
+	}
 	r.mu.RUnlock()
-	if len(handlers) == 0 {
-		return false, nil
-	}
-	rows, err := r.db.Writer.QueryContext(ctx, `SELECT id,kind,payload FROM jobs WHERE status='pending' AND available_at<=? AND kind LIKE 'plugin:%' AND attempts<? ORDER BY available_at,id LIMIT 50`, now.UnixMilli(), maxTaskAttempts)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	var id int64
-	var payload []byte
-	var handler TaskHandler
-	var missing []int64
-	for rows.Next() {
-		var candidateID int64
-		var candidateKind string
-		var candidatePayload []byte
-		if err := rows.Scan(&candidateID, &candidateKind, &candidatePayload); err != nil {
-			return false, err
+	return r.queue.ProcessOne(ctx, func(task operations.Task) (operations.TaskHandler, bool) {
+		if task.Kind == "core:event_dispatch" {
+			return func(ctx context.Context, task operations.Task) error { return r.processDurableEvent(ctx, task.Payload) }, true
 		}
-		key := strings.TrimPrefix(candidateKind, "plugin:")
+		if strings.HasPrefix(task.Kind, "core:") {
+			handler, ok := coreHandlers[task.Kind]
+			if !ok {
+				return nil, false
+			}
+			return func(ctx context.Context, task operations.Task) error { return handler(ctx, task.Payload) }, true
+		}
+		if !strings.HasPrefix(task.Kind, "plugin:") {
+			return nil, false
+		}
+		key := strings.TrimPrefix(task.Kind, "plugin:")
 		pluginID := key
 		if separator := strings.IndexByte(key, ':'); separator >= 0 {
 			pluginID = key[:separator]
 		}
 		if !r.isEnabled(pluginID) {
-			continue
+			return nil, false
 		}
-		candidateHandler, ok := handlers[key]
+		handler, ok := handlers[key]
 		if !ok {
-			missing = append(missing, candidateID)
-			continue
+			return nil, false
 		}
-		id, payload, handler = candidateID, candidatePayload, candidateHandler
-		break
-	}
-	rowsErr := rows.Err()
-	closeErr := rows.Close()
-	if rowsErr != nil {
-		return false, rowsErr
-	}
-	if closeErr != nil {
-		return false, closeErr
-	}
-	for _, missingID := range missing {
-		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='failed',last_error=?,updated_at=? WHERE id=?", "no handler", time.Now().UTC().UnixMilli(), missingID)
-	}
-	if handler == nil {
-		return false, nil
-	}
-	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='running',attempts=attempts+1,lease_expires_at=?,updated_at=? WHERE id=? AND status='pending'", now.Add(taskLease).UnixMilli(), now.UnixMilli(), id); err != nil {
-		return false, err
-	}
-	if err := handler(ctx, payload); err != nil {
-		var attempts int
-		_ = r.db.Writer.QueryRowContext(ctx, "SELECT attempts FROM jobs WHERE id=?", id).Scan(&attempts)
-		status := "pending"
-		availableAt := time.Now().UTC().Add(taskRetryDelay(attempts)).UnixMilli()
-		if attempts >= maxTaskAttempts {
-			status = "failed"
-			availableAt = now.UnixMilli()
-		}
-		_, _ = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=?", status, availableAt, err.Error(), time.Now().UTC().UnixMilli(), id)
-		return true, err
-	}
-	_, err = r.db.Writer.ExecContext(ctx, "UPDATE jobs SET status='succeeded',lease_expires_at=NULL,updated_at=? WHERE id=?", time.Now().UTC().UnixMilli(), id)
-	return true, err
-}
-
-func taskRetryDelay(attempts int) time.Duration {
-	if attempts < 1 {
-		attempts = 1
-	}
-	if attempts > 5 {
-		attempts = 5
-	}
-	return time.Duration(1<<(attempts-1)) * time.Second
+		return func(ctx context.Context, task operations.Task) error { return handler(ctx, task.Payload) }, true
+	})
 }
 
 func (r *Registry) registerSettings(id string, schema SettingsSchema) error {
