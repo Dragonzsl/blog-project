@@ -2,6 +2,7 @@ package publishing
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"sort"
 	"strings"
@@ -21,6 +22,9 @@ type Service struct {
 	now        func() time.Time
 	events     interface {
 		Dispatch(context.Context, extensions.Event) []error
+	}
+	eventRecorder interface {
+		RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
 	}
 }
 
@@ -60,6 +64,12 @@ func (s *Service) SetEventSink(sink interface {
 	Dispatch(context.Context, extensions.Event) []error
 }) {
 	s.events = sink
+	if recorder, ok := sink.(interface {
+		RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
+	}); ok {
+		s.eventRecorder = recorder
+		s.repository.SetEventRecorder(recorder)
+	}
 }
 
 func (s *Service) CreateDraft(ctx context.Context, input DraftInput) (Article, error) {
@@ -162,7 +172,7 @@ func (s *Service) Publish(ctx context.Context, id, expectedVersion int64) (Artic
 		return Article{}, ErrNotFound
 	}
 	article, err := s.repository.Publish(ctx, "article", id, expectedVersion, s.now())
-	if err == nil && s.events != nil {
+	if err == nil && s.events != nil && s.eventRecorder == nil {
 		_ = s.events.Dispatch(ctx, extensions.Event{Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), article.PublicID...), Payload: map[string]any{"kind": "article", "slug": article.Slug}})
 	}
 	return article, err
@@ -173,7 +183,7 @@ func (s *Service) PublishPage(ctx context.Context, id, expectedVersion int64) (A
 		return Article{}, ErrNotFound
 	}
 	page, err := s.repository.Publish(ctx, "page", id, expectedVersion, s.now())
-	if err == nil && s.events != nil {
+	if err == nil && s.events != nil && s.eventRecorder == nil {
 		_ = s.events.Dispatch(ctx, extensions.Event{Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), page.PublicID...), Payload: map[string]any{"kind": "page", "slug": page.Slug}})
 	}
 	return page, err

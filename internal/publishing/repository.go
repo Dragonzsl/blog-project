@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mattn/go-sqlite3"
+	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/database"
@@ -19,10 +20,19 @@ type Repository struct {
 	database        *database.DB
 	organization    *organization.Service
 	mediaReferences *media.ReferenceRepository
+	eventRecorder   interface {
+		RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
+	}
 }
 
 func NewRepository(db *database.DB) *Repository {
 	return &Repository{database: db, organization: organization.NewService(db), mediaReferences: media.NewReferenceRepository()}
+}
+
+func (r *Repository) SetEventRecorder(recorder interface {
+	RecordEventTx(context.Context, *sql.Tx, extensions.Event) error
+}) {
+	r.eventRecorder = recorder
 }
 
 func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []byte, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time) (Article, error) {
@@ -216,6 +226,14 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".published", kind, publicID, now); err != nil {
 		return Article{}, err
+	}
+	if r.eventRecorder != nil {
+		if err := r.eventRecorder.RecordEventTx(ctx, tx, extensions.Event{
+			Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), publicID...),
+			Payload: map[string]any{"kind": kind, "slug": slug}, OccurredAt: now,
+		}); err != nil {
+			return Article{}, fmt.Errorf("record publication event: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return Article{}, fmt.Errorf("commit %s publication: %w", kind, err)

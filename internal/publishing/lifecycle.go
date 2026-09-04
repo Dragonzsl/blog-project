@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/zhushilin/blog-project/internal/extensions"
 )
 
 func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64) ([]Revision, error) {
@@ -411,6 +413,14 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".scheduled_published", kind, publicID, now); err != nil {
 		return false, err
+	}
+	if r.eventRecorder != nil {
+		if err := r.eventRecorder.RecordEventTx(ctx, tx, extensions.Event{
+			Name: "ContentPublished.v1", Version: 1, ObjectID: append([]byte(nil), publicID...),
+			Payload: map[string]any{"kind": kind, "slug": slug}, OccurredAt: now,
+		}); err != nil {
+			return false, fmt.Errorf("record scheduled publication event: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, err
