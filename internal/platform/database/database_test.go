@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pressly/goose/v3"
+	"github.com/zhushilin/blog-project/db/migrations"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 )
 
@@ -42,6 +44,53 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 	}
 	if got := db.Reader.Stats().MaxOpenConnections; got != 2 {
 		t.Fatalf("reader connections = %d, want 2", got)
+	}
+}
+
+func TestPhaseOneMigrationUpgradesVersionTenDatabaseAndIsRestartSafe(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "upgrade.sqlite")
+	cfg := config.Database{Path: path, BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2}
+	db, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatal(err)
+	}
+	goose.SetBaseFS(migrations.Files)
+	if err := goose.DownTo(db.Writer, ".", 10); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if version, err := upgraded.MigrationVersion(ctx); err != nil || version != LatestMigrationVersion {
+		upgraded.Close()
+		t.Fatalf("version=%d err=%v", version, err)
+	}
+	for _, table := range []string{"request_idempotencies", "public_write_fingerprints", "newsletter_tokens", "event_outbox"} {
+		var count int
+		if err := upgraded.Reader.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&count); err != nil {
+			upgraded.Close()
+			t.Fatalf("table %s missing: %v", table, err)
+		}
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := Open(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if version, err := restarted.MigrationVersion(ctx); err != nil || version != LatestMigrationVersion {
+		t.Fatalf("restart version=%d err=%v", version, err)
 	}
 }
 
