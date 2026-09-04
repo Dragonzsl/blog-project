@@ -11,6 +11,9 @@ import (
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/zhushilin/blog-project/internal/operations"
+	"github.com/zhushilin/blog-project/internal/platform/netguard"
 )
 
 type Message struct {
@@ -69,9 +72,12 @@ func (s *SMTPSender) Send(ctx context.Context, message Message) error {
 	if message.Text == "" && message.HTML == "" {
 		return errors.New("mail body is required")
 	}
-	dialer := net.Dialer{Timeout: s.config.Timeout}
-	connection, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", s.config.Host, s.config.Port))
+	dial := netguard.DialContext(net.DefaultResolver, s.config.Timeout)
+	connection, err := dial(ctx, "tcp", net.JoinHostPort(s.config.Host, fmt.Sprint(s.config.Port)))
 	if err != nil {
+		if netguard.IsPermanent(err) {
+			return operations.Permanent(err)
+		}
 		return err
 	}
 	client, err := smtp.NewClient(connection, s.config.Host)
