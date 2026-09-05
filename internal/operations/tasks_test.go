@@ -132,6 +132,54 @@ func TestTaskQueueStopsRetryingPermanentError(t *testing.T) {
 	}
 }
 
+func TestTaskQueueSnapshotIncludesLatestAttemptMetrics(t *testing.T) {
+	ctx := context.Background()
+	db := openTaskDatabase(t)
+	now := time.UnixMilli(1000).UTC()
+	queue := NewTaskQueue(db, TaskQueueOptions{Now: func() time.Time { return now }, MaxAttempts: 1})
+	if err := queue.Enqueue(ctx, Task{Kind: "core:observed", PayloadVersion: 1, Payload: []byte(`{}`), IdempotencyKey: "observed-task", AvailableAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	now = time.UnixMilli(2000).UTC()
+	processed, err := queue.ProcessOne(ctx, func(Task) (TaskHandler, bool) {
+		return func(context.Context, Task) error {
+			now = time.UnixMilli(2050).UTC()
+			return nil
+		}, true
+	})
+	if !processed || err != nil {
+		t.Fatalf("processed=%v err=%v", processed, err)
+	}
+	if err := queue.Enqueue(ctx, Task{Kind: "core:failed", PayloadVersion: 1, Payload: []byte(`{}`), IdempotencyKey: "failed-task", AvailableAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	now = time.UnixMilli(3000).UTC()
+	if _, err := queue.ProcessOne(ctx, func(Task) (TaskHandler, bool) {
+		return func(context.Context, Task) error {
+			now = time.UnixMilli(3050).UTC()
+			return errors.New("failed after a long diagnostic message")
+		}, true
+	}); err == nil {
+		t.Fatal("failed task unexpectedly succeeded")
+	}
+	snapshot, err := queue.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Failed != 1 || snapshot.LastError == "" || snapshot.LastDuration <= 0 || len(snapshot.ByKind) != 2 {
+		t.Fatalf("task snapshot=%+v", snapshot)
+	}
+	list, err := queue.List(ctx, 10)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("task list=%+v err=%v", list, err)
+	}
+	for _, task := range list {
+		if task.Kind == "core:observed" && (task.LastStartedAt == nil || task.LastCompletedAt == nil || task.LastDuration <= 0) {
+			t.Fatalf("successful task metrics=%+v", task)
+		}
+	}
+}
+
 func TestSafeErrorRedactsIPv6Address(t *testing.T) {
 	message := SafeError(errors.New("dial tcp [2001:db8::1]:443: connection refused"))
 	if strings.Contains(message, "2001:db8") || strings.Contains(message, "::1") {

@@ -39,6 +39,8 @@ type BackupManifest struct {
 	ApplicationCommit  string        `json:"application_commit"`
 	MigrationVersion   int64         `json:"migration_version"`
 	DatabasePath       string        `json:"database_path"`
+	Encrypted          bool          `json:"encrypted,omitempty"`
+	Encryption         string        `json:"encryption,omitempty"`
 	Entries            []BackupEntry `json:"entries"`
 }
 
@@ -135,6 +137,14 @@ func writeBackupArchive(ctx context.Context, output string, manifest BackupManif
 }
 
 func VerifyBackup(ctx context.Context, archivePath string) (VerifiedBackup, error) {
+	return verifyBackupPath(ctx, archivePath, nil)
+}
+
+func VerifyBackupWithCipher(ctx context.Context, archivePath string, cipher BackupCipher) (VerifiedBackup, error) {
+	return verifyBackupPath(ctx, archivePath, cipher)
+}
+
+func verifyBackupPath(ctx context.Context, archivePath string, cipher BackupCipher) (VerifiedBackup, error) {
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return VerifiedBackup{}, fmt.Errorf("open backup archive: %w", err)
@@ -153,6 +163,43 @@ func VerifyBackup(ctx context.Context, archivePath string) (VerifiedBackup, erro
 		return VerifiedBackup{}, fmt.Errorf("create backup verification directory: %w", err)
 	}
 	defer os.RemoveAll(temporary)
+	if encrypted, err := encryptedBackupFile(archive); err != nil {
+		archive.Close()
+		return VerifiedBackup{}, err
+	} else if encrypted {
+		if cipher == nil {
+			archive.Close()
+			return VerifiedBackup{}, errors.New("encrypted backup requires an encryption key")
+		}
+		plainPath := filepath.Join(temporary, "decrypted.tar.gz")
+		plain, createErr := os.OpenFile(plainPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if createErr != nil {
+			archive.Close()
+			return VerifiedBackup{}, createErr
+		}
+		decryptErr := cipher.Decrypt(ctx, archive, plain)
+		closeErr := plain.Close()
+		archive.Close()
+		if decryptErr == nil {
+			decryptErr = closeErr
+		}
+		if decryptErr != nil {
+			return VerifiedBackup{}, decryptErr
+		}
+		plainFile, openErr := os.Open(plainPath)
+		if openErr != nil {
+			return VerifiedBackup{}, openErr
+		}
+		result, verifyErr := verifyBackupReader(ctx, plainFile, info.Size(), temporary)
+		plainFile.Close()
+		if verifyErr != nil {
+			return VerifiedBackup{}, verifyErr
+		}
+		if !result.Manifest.Encrypted {
+			return VerifiedBackup{}, errors.New("encrypted backup manifest is not marked encrypted")
+		}
+		return result, nil
+	}
 	result, err := verifyBackupReader(ctx, archive, info.Size(), temporary)
 	closeErr := archive.Close()
 	if err != nil {
@@ -161,7 +208,25 @@ func VerifyBackup(ctx context.Context, archivePath string) (VerifiedBackup, erro
 	if closeErr != nil {
 		return VerifiedBackup{}, fmt.Errorf("close backup archive: %w", closeErr)
 	}
+	if result.Manifest.Encrypted {
+		return VerifiedBackup{}, errors.New("backup manifest is encrypted but archive is not encrypted")
+	}
 	return result, nil
+}
+
+func encryptedBackupFile(file *os.File) (bool, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	prefix := make([]byte, len(backupCipherMagic))
+	count, err := io.ReadFull(file, prefix)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	return count == len(prefix) && string(prefix) == backupCipherMagic, nil
 }
 
 func verifyBackupReader(ctx context.Context, input io.Reader, archiveSize int64, temporary string) (VerifiedBackup, error) {
@@ -284,6 +349,12 @@ func validateManifest(manifest BackupManifest, observed map[string]BackupEntry) 
 	}
 	if !validBackupReason(manifest.Reason) || manifest.CreatedAt.IsZero() {
 		return fmt.Errorf("backup manifest metadata is invalid")
+	}
+	if manifest.Encrypted && strings.TrimSpace(manifest.Encryption) == "" {
+		return errors.New("encrypted backup manifest is missing its encryption algorithm")
+	}
+	if !manifest.Encrypted && strings.TrimSpace(manifest.Encryption) != "" {
+		return errors.New("unencrypted backup manifest has an encryption algorithm")
 	}
 	if !validBackupEntryPath(manifest.DatabasePath) {
 		return fmt.Errorf("backup database path is invalid")

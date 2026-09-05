@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
 )
 
@@ -149,13 +150,14 @@ func matchesETag(header, etag string) bool {
 }
 
 func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message string, status int) {
-	items, err := h.service.Items(r.Context())
+	page := requestedMediaPage(r)
+	mediaPage, err := h.service.ItemsPage(r.Context(), pagination.Request{Page: page, PerPage: 40})
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
-	views := make([]map[string]any, 0, len(items))
-	for _, item := range items {
+	views := make([]map[string]any, 0, len(mediaPage.Items))
+	for _, item := range mediaPage.Items {
 		originalURL := item.OriginalURL()
 		srcset := []string{}
 		for _, variant := range item.Variants {
@@ -179,6 +181,9 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 		"MaxUploadMiB":       fmt.Sprintf("%.1f", float64(h.service.options.MaxUploadBytes)/(1<<20)),
 		"MaxImageMegapixels": fmt.Sprintf("%.1f", float64(h.service.options.MaxImagePixels)/1_000_000),
 		"JPEGQuality":        h.service.options.JPEGQuality,
+		"Pagination":         mediaPage.Pagination,
+		"PreviousURL":        mediaPageURL(mediaPage.Pagination.Page - 1),
+		"NextURL":            mediaPageURL(mediaPage.Pagination.Page + 1),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -186,6 +191,21 @@ func (h *HTTPHandler) render(w http.ResponseWriter, r *http.Request, message str
 	if err := h.templates.ExecuteTemplate(w, "media.html", data); err != nil {
 		h.logger.ErrorContext(r.Context(), "render media template", "error", err)
 	}
+}
+
+func requestedMediaPage(r *http.Request) int {
+	value, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil || value < 1 {
+		return 1
+	}
+	return value
+}
+
+func mediaPageURL(page int) string {
+	if page < 1 {
+		page = 1
+	}
+	return "/admin/media?page=" + strconv.Itoa(page)
 }
 
 func mediaKind(mimeType string) string {

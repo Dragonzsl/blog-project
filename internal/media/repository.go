@@ -3,14 +3,19 @@ package media
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 type Repository struct{ database *database.DB }
+
+const publicMediaBatchSize = 64
 
 func NewRepository(db *database.DB) *Repository { return &Repository{database: db} }
 
@@ -62,6 +67,81 @@ func (r *Repository) Items(ctx context.Context) ([]Item, error) {
 	}
 	return items, rows.Err()
 }
+
+// ItemsPage is the bounded media-library projection. It loads metadata and a
+// small variant summary for one page; object bytes are only opened by Asset.
+func (r *Repository) ItemsPage(ctx context.Context, request pagination.Request) (Page, error) {
+	total, err := r.countItems(ctx)
+	if err != nil {
+		return Page{}, err
+	}
+	request = pagination.Normalize(request, 40, 100)
+	info := pagination.NewInfo(total, request)
+	rows, err := r.database.Reader.QueryContext(ctx, mediaSelect+` ORDER BY m.created_at DESC,m.id DESC LIMIT ? OFFSET ?`, info.PerPage, info.Offset())
+	if err != nil {
+		return Page{}, err
+	}
+	defer rows.Close()
+	items := make([]Item, 0, info.PerPage)
+	for rows.Next() {
+		item, err := scanItem(rows)
+		if err != nil {
+			return Page{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return Page{}, err
+	}
+	if err := r.batchVariants(ctx, items); err != nil {
+		return Page{}, err
+	}
+	return Page{Items: items, Pagination: info}, nil
+}
+
+func (r *Repository) countItems(ctx context.Context) (int, error) {
+	var total int
+	if err := r.database.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM media").Scan(&total); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func (r *Repository) batchVariants(ctx context.Context, items []Item) error {
+	if len(items) == 0 {
+		return nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(items)), ",")
+	args := make([]any, 0, len(items))
+	for _, item := range items {
+		args = append(args, item.ID)
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, `SELECT media_id,variant_key,width,height,mime_type,size_bytes,content_hash,object_key FROM media_variants WHERE media_id IN (`+placeholders+`) AND status='ready' ORDER BY media_id,width,variant_key`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	byID := make(map[int64][]Variant, len(items))
+	for rows.Next() {
+		var mediaID int64
+		var value Variant
+		if err := rows.Scan(&mediaID, &value.Key, &value.Width, &value.Height, &value.MIMEType, &value.SizeBytes, &value.ContentHash, &value.ObjectKey); err != nil {
+			return err
+		}
+		// The editor only needs a bounded responsive summary. Asset lookup
+		// still exposes every ready variant through the detail path.
+		if len(byID[mediaID]) < 4 {
+			byID[mediaID] = append(byID[mediaID], value)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for index := range items {
+		items[index].Variants = byID[items[index].ID]
+	}
+	return nil
+}
 func (r *Repository) Item(ctx context.Context, id int64) (Item, error) {
 	item, err := scanItem(r.database.Reader.QueryRowContext(ctx, mediaSelect+` WHERE m.id=?`, id))
 	if err != nil {
@@ -77,6 +157,63 @@ func (r *Repository) ItemByPublicID(ctx context.Context, publicID []byte) (Item,
 	}
 	item.Variants, err = r.variants(ctx, item.ID)
 	return item, err
+}
+
+// ItemsByPublicIDs returns bounded metadata projections for public cards. It
+// deliberately shares the variant batch query with the media library so a
+// page of cards never turns cover resolution into one query per article.
+func (r *Repository) ItemsByPublicIDs(ctx context.Context, publicIDs [][]byte) ([]Item, error) {
+	unique := make([][]byte, 0, len(publicIDs))
+	seen := make(map[string]struct{}, len(publicIDs))
+	for _, publicID := range publicIDs {
+		if len(publicID) == 0 {
+			continue
+		}
+		key := hex.EncodeToString(publicID)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, append([]byte(nil), publicID...))
+	}
+	result := make([]Item, 0, len(unique))
+	for start := 0; start < len(unique); start += publicMediaBatchSize {
+		end := start + publicMediaBatchSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk))
+		for _, publicID := range chunk {
+			args = append(args, publicID)
+		}
+		rows, err := r.database.Reader.QueryContext(ctx, mediaSelect+" WHERE m.public_id IN ("+placeholders+") ORDER BY m.created_at DESC,m.id DESC", args...)
+		if err != nil {
+			return nil, err
+		}
+		items := make([]Item, 0, len(chunk))
+		for rows.Next() {
+			item, err := scanItem(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			items = append(items, item)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := r.batchVariants(ctx, items); err != nil {
+			return nil, err
+		}
+		result = append(result, items...)
+	}
+	return result, nil
 }
 
 func (r *Repository) Asset(ctx context.Context, publicID []byte, variantKey string) (Asset, error) {

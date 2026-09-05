@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -106,6 +107,61 @@ func TestBackupVerifyRestoreAndAuditRoundTrip(t *testing.T) {
 	status, err := ReadStatus(ctx, db)
 	if err != nil || status.MigrationVersion != database.LatestMigrationVersion || status.ValidBackups != 1 || status.LastRestoreTest == nil {
 		t.Fatalf("status=%+v err=%v", status, err)
+	}
+	summary, err := ReadOperationsSummary(ctx, db, nil, filepath.Join(sourceDir, "cache", "pages"))
+	if err != nil || summary.ValidBackups != 1 || summary.LastBackupDestination != "local" || summary.LastBackupVerifiedAt == nil {
+		t.Fatalf("operations summary=%+v err=%v", summary, err)
+	}
+}
+
+func TestEncryptedBackupUsesKeyForVerifyAndRestore(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "db", "blog.sqlite")
+	db := openOperationsDatabase(t, dbPath)
+	keyPath := filepath.Join(t.TempDir(), "backup.key")
+	key := bytes.Repeat([]byte{0x7a}, 32)
+	key[0], key[len(key)-1] = ' ', '\t'
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keyPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewBackupService(db, BackupOptions{DataDir: dataDir, DatabasePath: dbPath, EncryptionKeyFile: keyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "encrypted.tar.gz.enc")
+	created, err := service.Create(ctx, "manual", archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.Encrypted || !created.Manifest.Encrypted || created.Manifest.Encryption != "aes-gcm-256" {
+		t.Fatalf("encrypted backup result=%+v", created)
+	}
+	if _, err := VerifyBackup(ctx, created.Path); err == nil {
+		t.Fatal("encrypted backup verified without a key")
+	}
+	verified, err := service.Verify(ctx, created.Path)
+	if err != nil || verified.Manifest.PublicID != created.Manifest.PublicID {
+		t.Fatalf("encrypted verify=%+v err=%v", verified, err)
+	}
+	target := filepath.Join(t.TempDir(), "restored")
+	restored, err := service.Restore(ctx, created.Path, target, false)
+	if err != nil || restored.RestoredFiles != len(created.Manifest.Entries) {
+		t.Fatalf("encrypted restore=%+v err=%v", restored, err)
+	}
+	wrongKeyPath := filepath.Join(t.TempDir(), "wrong.key")
+	if err := os.WriteFile(wrongKeyPath, bytes.Repeat([]byte{0x31}, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wrongService, err := NewBackupService(db, BackupOptions{DataDir: dataDir, DatabasePath: dbPath, EncryptionKeyFile: wrongKeyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrongService.Verify(ctx, created.Path); err == nil {
+		t.Fatal("encrypted backup verified with the wrong key")
 	}
 }
 

@@ -237,7 +237,7 @@ func (q *TaskQueue) claim(ctx context.Context, selector func(Task) (TaskHandler,
 			continue
 		}
 		leaseExpires := now.Add(q.lease).UnixMilli()
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_expires_at=?,updated_at=? WHERE id=? AND status='pending'`, leaseExpires, now.UnixMilli(), task.ID)
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET status='running',attempts=attempts+1,lease_expires_at=?,last_started_at=?,updated_at=? WHERE id=? AND status='pending'`, leaseExpires, now.UnixMilli(), now.UnixMilli(), task.ID)
 		if err != nil {
 			return Task{}, nil, false, err
 		}
@@ -277,7 +277,8 @@ func (q *TaskQueue) Complete(ctx context.Context, id int64) error {
 	if id < 1 {
 		return ErrTaskNotFound
 	}
-	result, err := q.db.Writer.ExecContext(ctx, `UPDATE jobs SET status='succeeded',lease_expires_at=NULL,last_error=NULL,updated_at=? WHERE id=? AND status='running'`, q.now().UTC().UnixMilli(), id)
+	now := q.now().UTC()
+	result, err := q.db.Writer.ExecContext(ctx, `UPDATE jobs SET status='succeeded',lease_expires_at=NULL,last_error=NULL,last_completed_at=?,last_duration_ms=MAX(0,?-COALESCE(last_started_at,?)),updated_at=? WHERE id=? AND status='running'`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), id)
 	if err != nil {
 		return err
 	}
@@ -310,7 +311,7 @@ func (q *TaskQueue) fail(ctx context.Context, id int64, attempts int, safeError 
 		status = "failed"
 		availableAt = now
 	}
-	result, err := q.db.Writer.ExecContext(ctx, `UPDATE jobs SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,updated_at=? WHERE id=? AND status='running'`, status, availableAt.UnixMilli(), truncateError(safeError), now.UnixMilli(), id)
+	result, err := q.db.Writer.ExecContext(ctx, `UPDATE jobs SET status=?,available_at=?,lease_expires_at=NULL,last_error=?,last_completed_at=?,last_duration_ms=MAX(0,?-COALESCE(last_started_at,?)),updated_at=? WHERE id=? AND status='running'`, status, availableAt.UnixMilli(), truncateError(safeError), now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), now.UnixMilli(), id)
 	if err != nil {
 		return err
 	}
@@ -343,9 +344,11 @@ func (q *TaskQueue) RecoverExpired(ctx context.Context) error {
 		    available_at=CASE WHEN attempts>=? THEN ? ELSE ? END,
 		    lease_expires_at=NULL,
 		    last_error=CASE WHEN attempts>=? AND COALESCE(last_error,'')='' THEN 'task lease expired after maximum attempts' ELSE last_error END,
+		    last_completed_at=?,
+		    last_duration_ms=MAX(0,?-COALESCE(last_started_at,?)),
 		    updated_at=?
 		WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<?
-	`, q.maxAttempts, q.maxAttempts, now, now, q.maxAttempts, now, now)
+	`, q.maxAttempts, q.maxAttempts, now, now, q.maxAttempts, now, now, now, now, now)
 	return err
 }
 
@@ -418,15 +421,18 @@ func (q *TaskQueue) Get(ctx context.Context, id int64) (Task, error) {
 }
 
 type TaskSummary struct {
-	ID             int64
-	Kind           string
-	Status         string
-	Attempts       int
-	AvailableAt    time.Time
-	LeaseExpiresAt *time.Time
-	LastError      string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID              int64
+	Kind            string
+	Status          string
+	Attempts        int
+	AvailableAt     time.Time
+	LeaseExpiresAt  *time.Time
+	LastError       string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	LastStartedAt   *time.Time
+	LastCompletedAt *time.Time
+	LastDuration    time.Duration
 }
 
 func (q *TaskQueue) List(ctx context.Context, limit int) ([]TaskSummary, error) {
@@ -436,7 +442,7 @@ func (q *TaskQueue) List(ctx context.Context, limit int) ([]TaskSummary, error) 
 	if limit > 200 {
 		limit = 200
 	}
-	rows, err := q.db.Reader.QueryContext(ctx, `SELECT id,kind,status,attempts,available_at,lease_expires_at,COALESCE(last_error,''),created_at,updated_at FROM jobs ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,updated_at DESC,id DESC LIMIT ?`, limit)
+	rows, err := q.db.Reader.QueryContext(ctx, `SELECT id,kind,status,attempts,available_at,lease_expires_at,COALESCE(last_error,''),created_at,updated_at,last_started_at,last_completed_at,COALESCE(last_duration_ms,0) FROM jobs ORDER BY CASE status WHEN 'failed' THEN 0 WHEN 'running' THEN 1 ELSE 2 END,updated_at DESC,id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -444,9 +450,9 @@ func (q *TaskQueue) List(ctx context.Context, limit int) ([]TaskSummary, error) 
 	result := make([]TaskSummary, 0, limit)
 	for rows.Next() {
 		var item TaskSummary
-		var available, created, updated int64
-		var leaseValue sql.NullInt64
-		if err := rows.Scan(&item.ID, &item.Kind, &item.Status, &item.Attempts, &available, &leaseValue, &item.LastError, &created, &updated); err != nil {
+		var available, created, updated, duration int64
+		var leaseValue, startedValue, completedValue sql.NullInt64
+		if err := rows.Scan(&item.ID, &item.Kind, &item.Status, &item.Attempts, &available, &leaseValue, &item.LastError, &created, &updated, &startedValue, &completedValue, &duration); err != nil {
 			return nil, err
 		}
 		item.AvailableAt = time.UnixMilli(available).UTC()
@@ -457,6 +463,17 @@ func (q *TaskQueue) List(ctx context.Context, limit int) ([]TaskSummary, error) 
 		item.LastError = truncateError(item.LastError)
 		item.CreatedAt = time.UnixMilli(created).UTC()
 		item.UpdatedAt = time.UnixMilli(updated).UTC()
+		if startedValue.Valid {
+			value := time.UnixMilli(startedValue.Int64).UTC()
+			item.LastStartedAt = &value
+		}
+		if completedValue.Valid {
+			value := time.UnixMilli(completedValue.Int64).UTC()
+			item.LastCompletedAt = &value
+		}
+		if duration > 0 {
+			item.LastDuration = time.Duration(duration) * time.Millisecond
+		}
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -468,6 +485,29 @@ type TaskCounts struct {
 	Failed  int
 }
 
+type TaskKindCount struct {
+	Kind    string
+	Pending int
+	Running int
+	Failed  int
+}
+
+// TaskSnapshot is a bounded operational view. It deliberately excludes task
+// payloads and idempotency keys, which keeps the admin surface safe even when
+// a plugin has queued private data.
+type TaskSnapshot struct {
+	Pending         int
+	Running         int
+	Failed          int
+	ExpiredRunning  int
+	OldestPendingAt *time.Time
+	OldestFailedAt  *time.Time
+	LastFailedAt    *time.Time
+	LastError       string
+	LastDuration    time.Duration
+	ByKind          []TaskKindCount
+}
+
 func (q *TaskQueue) Counts(ctx context.Context) (TaskCounts, error) {
 	var counts TaskCounts
 	err := q.db.Reader.QueryRowContext(ctx, `SELECT
@@ -476,6 +516,72 @@ func (q *TaskQueue) Counts(ctx context.Context) (TaskCounts, error) {
 		(SELECT count(*) FROM jobs WHERE status='failed')
 	`).Scan(&counts.Pending, &counts.Running, &counts.Failed)
 	return counts, err
+}
+
+func (q *TaskQueue) Snapshot(ctx context.Context) (TaskSnapshot, error) {
+	if q == nil || q.db == nil || q.db.Reader == nil {
+		return TaskSnapshot{}, errors.New("task queue is not configured")
+	}
+	tx, err := q.db.Reader.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return TaskSnapshot{}, err
+	}
+	defer tx.Rollback()
+	var snapshot TaskSnapshot
+	now := q.now().UTC().UnixMilli()
+	var oldestPending, oldestFailed, lastFailed, duration sql.NullInt64
+	var lastError sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM jobs WHERE status='pending'),
+		(SELECT count(*) FROM jobs WHERE status='running'),
+		(SELECT count(*) FROM jobs WHERE status='failed'),
+		(SELECT count(*) FROM jobs WHERE status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at<?),
+		(SELECT MIN(created_at) FROM jobs WHERE status='pending'),
+		(SELECT MIN(updated_at) FROM jobs WHERE status='failed'),
+		(SELECT MAX(updated_at) FROM jobs WHERE status='failed'),
+		(SELECT COALESCE(last_error,'') FROM jobs WHERE status='failed' ORDER BY updated_at DESC,id DESC LIMIT 1),
+		(SELECT last_duration_ms FROM jobs WHERE last_duration_ms IS NOT NULL ORDER BY last_completed_at DESC,id DESC LIMIT 1)
+	`, now).Scan(&snapshot.Pending, &snapshot.Running, &snapshot.Failed, &snapshot.ExpiredRunning, &oldestPending, &oldestFailed, &lastFailed, &lastError, &duration); err != nil {
+		return TaskSnapshot{}, err
+	}
+	snapshot.LastError = truncateError(lastError.String)
+	snapshot.OldestPendingAt = nullableMillisTime(oldestPending)
+	snapshot.OldestFailedAt = nullableMillisTime(oldestFailed)
+	snapshot.LastFailedAt = nullableMillisTime(lastFailed)
+	if duration.Valid && duration.Int64 > 0 {
+		snapshot.LastDuration = time.Duration(duration.Int64) * time.Millisecond
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT kind,
+		SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+		SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+		FROM jobs GROUP BY kind ORDER BY kind LIMIT 64`)
+	if err != nil {
+		return TaskSnapshot{}, err
+	}
+	for rows.Next() {
+		var count TaskKindCount
+		if err := rows.Scan(&count.Kind, &count.Pending, &count.Running, &count.Failed); err != nil {
+			rows.Close()
+			return TaskSnapshot{}, err
+		}
+		snapshot.ByKind = append(snapshot.ByKind, count)
+	}
+	if err := rows.Close(); err != nil {
+		return TaskSnapshot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TaskSnapshot{}, err
+	}
+	return snapshot, nil
+}
+
+func nullableMillisTime(value sql.NullInt64) *time.Time {
+	if !value.Valid || value.Int64 < 1 {
+		return nil
+	}
+	result := time.UnixMilli(value.Int64).UTC()
+	return &result
 }
 
 func validateTask(task Task) error {

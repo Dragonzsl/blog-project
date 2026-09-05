@@ -219,7 +219,7 @@ func backupWithOutput(arguments []string, output io.Writer) error {
 	case "create":
 		flags := flag.NewFlagSet("backup create", flag.ContinueOnError)
 		configPath := flags.String("config", "", "path to TOML configuration")
-		archivePath := flags.String("output", "", "output .tar.gz path; defaults to the data backup directory")
+		archivePath := flags.String("output", "", "output .tar.gz or .tar.gz.enc path; defaults to the data backup directory")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
@@ -233,18 +233,24 @@ func backupWithOutput(arguments []string, output io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(output, "Backup created and verified: %s\n", result.Path)
-		fmt.Fprintf(output, "Backup ID: %s\nMigration: %d\nFiles: %d\nSize: %d bytes\n", result.Manifest.PublicID, result.Manifest.MigrationVersion, len(result.Manifest.Entries), result.SizeBytes)
+		fmt.Fprintf(output, "Backup ID: %s\nMigration: %d\nFiles: %d\nSize: %d bytes\nDestination: %s\nEncrypted: %t\n", result.Manifest.PublicID, result.Manifest.MigrationVersion, len(result.Manifest.Entries), result.SizeBytes, result.Destination, result.Encrypted)
 		return nil
 	case "verify":
 		flags := flag.NewFlagSet("backup verify", flag.ContinueOnError)
-		archivePath := flags.String("archive", "", "backup .tar.gz path")
+		configPath := flags.String("config", "", "path to TOML configuration")
+		archivePath := flags.String("archive", "", "backup .tar.gz or .tar.gz.enc path")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
 		if *archivePath == "" {
 			return fmt.Errorf("--archive is required")
 		}
-		verified, err := operations.VerifyBackup(context.Background(), *archivePath)
+		service, db, err := openBackupService(*configPath)
+		if err != nil {
+			return err
+		}
+		defer db.Close()
+		verified, err := service.Verify(context.Background(), *archivePath)
 		if err != nil {
 			return err
 		}
@@ -254,7 +260,7 @@ func backupWithOutput(arguments []string, output io.Writer) error {
 	case "drill":
 		flags := flag.NewFlagSet("backup drill", flag.ContinueOnError)
 		configPath := flags.String("config", "", "path to TOML configuration")
-		archivePath := flags.String("archive", "", "registered backup .tar.gz path")
+		archivePath := flags.String("archive", "", "registered backup .tar.gz or .tar.gz.enc path")
 		if err := flags.Parse(arguments[1:]); err != nil {
 			return err
 		}
@@ -271,7 +277,7 @@ func backupWithOutput(arguments []string, output io.Writer) error {
 			return err
 		}
 		defer os.RemoveAll(work)
-		result, err := operations.RestoreBackup(context.Background(), *archivePath, filepath.Join(work, "data"), false)
+		result, err := service.Restore(context.Background(), *archivePath, filepath.Join(work, "data"), false)
 		if err != nil {
 			return err
 		}
@@ -301,7 +307,7 @@ func backupWithOutput(arguments []string, output io.Writer) error {
 			if record.RestoreTestedAt != nil {
 				tested = "tested=" + record.RestoreTestedAt.Format(time.RFC3339)
 			}
-			fmt.Fprintf(output, "%s  %s  %s  migration=%d  size=%d  %s  %s\n", record.CreatedAt.Format(time.RFC3339), record.PublicID, record.Reason, record.MigrationVersion, record.SizeBytes, tested, record.Path)
+			fmt.Fprintf(output, "%s  %s  %s  destination=%s  encrypted=%t  migration=%d  size=%d  %s  %s\n", record.CreatedAt.Format(time.RFC3339), record.PublicID, record.Reason, record.Destination, record.Encrypted, record.MigrationVersion, record.SizeBytes, tested, record.Path)
 		}
 		return nil
 	default:
@@ -316,7 +322,7 @@ func restore(arguments []string) error {
 func restoreWithOutput(arguments []string, output io.Writer) error {
 	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
 	configPath := flags.String("config", "", "path to TOML configuration")
-	archivePath := flags.String("archive", "", "backup .tar.gz path")
+	archivePath := flags.String("archive", "", "backup .tar.gz or .tar.gz.enc path")
 	targetDataDir := flags.String("target-data-dir", "", "restore destination; defaults to configured data directory")
 	replace := flags.Bool("replace", false, "atomically preserve and replace an existing destination")
 	if err := flags.Parse(arguments); err != nil {
@@ -332,7 +338,12 @@ func restoreWithOutput(arguments []string, output io.Writer) error {
 		}
 		*targetDataDir = cfg.Storage.DataDir
 	}
-	result, err := operations.RestoreBackup(context.Background(), *archivePath, *targetDataDir, *replace)
+	service, db, err := openBackupService(*configPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	result, err := service.Restore(context.Background(), *archivePath, *targetDataDir, *replace)
 	if err != nil {
 		return err
 	}
@@ -717,11 +728,25 @@ func openBackupService(configPath string) (*operations.BackupService, *database.
 	if err != nil {
 		return nil, nil, err
 	}
+	var backupStore operations.BackupStore
+	if cfg.Operations.Backup.Adapter == "s3" {
+		backupStorage, storageErr := media.NewS3Storage(cfg.Operations.Backup.S3.Endpoint, cfg.Operations.Backup.S3.Bucket, cfg.Operations.Backup.S3.Region, cfg.Operations.Backup.S3.AccessKey, cfg.Operations.Backup.S3.SecretKey, cfg.Operations.Backup.S3.Prefix, cfg.Operations.Backup.S3.ForcePathStyle, cfg.Operations.Backup.S3.UseTLS)
+		if storageErr != nil {
+			db.Close()
+			return nil, nil, storageErr
+		}
+		backupStore, err = operations.NewMediaStorageBackupStore(backupStorage, cfg.Operations.Backup.Prefix)
+		if err != nil {
+			db.Close()
+			return nil, nil, err
+		}
+	}
 	service, err := operations.NewBackupService(db, operations.BackupOptions{
 		DataDir: cfg.Storage.DataDir, DatabasePath: cfg.Database.Path,
 		ApplicationVersion: buildinfo.Version, ApplicationCommit: buildinfo.Commit,
 		Interval: cfg.Operations.BackupInterval.Duration, DailyRetention: cfg.Operations.BackupDailyRetention,
-		WeeklyRetention: cfg.Operations.BackupWeeklyRetention,
+		WeeklyRetention:   cfg.Operations.BackupWeeklyRetention,
+		EncryptionKeyFile: cfg.Operations.Backup.EncryptionKeyFile, Store: backupStore,
 	})
 	if err != nil {
 		db.Close()

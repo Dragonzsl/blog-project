@@ -24,6 +24,7 @@ import (
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 type Options struct {
@@ -236,6 +237,17 @@ func (s *Service) Items(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
+func (s *Service) ItemsPage(ctx context.Context, request pagination.Request) (Page, error) {
+	page, err := s.repository.ItemsPage(ctx, request)
+	if err != nil {
+		return Page{}, err
+	}
+	for index := range page.Items {
+		page.Items[index].PublicIDText, _ = platformid.EncodePublicID(page.Items[index].PublicID)
+	}
+	return page, nil
+}
+
 // PublicItem resolves an immutable media public id for public rendering. The
 // returned item is still an internal value; callers should convert it with
 // Item.PublicView before exposing it outside the media module.
@@ -249,6 +261,17 @@ func (s *Service) PublicItem(ctx context.Context, publicID []byte) (Item, error)
 		return Item{}, ErrNotFound
 	}
 	return item, nil
+}
+
+func (s *Service) PublicItems(ctx context.Context, publicIDs [][]byte) ([]Item, error) {
+	items, err := s.repository.ItemsByPublicIDs(ctx, publicIDs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range items {
+		items[index].PublicIDText, _ = platformid.EncodePublicID(items[index].PublicID)
+	}
+	return items, nil
 }
 
 func (s *Service) ItemByPublicID(ctx context.Context, publicID []byte) (Item, error) {

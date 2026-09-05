@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,18 +26,24 @@ type BackupOptions struct {
 	Interval           time.Duration
 	DailyRetention     int
 	WeeklyRetention    int
+	EncryptionKeyFile  string
+	Store              BackupStore
 }
 
 type BackupResult struct {
-	Path      string
-	Manifest  BackupManifest
-	SizeBytes int64
+	Path        string
+	Manifest    BackupManifest
+	SizeBytes   int64
+	Destination string
+	Encrypted   bool
 }
 
 type BackupService struct {
 	database *database.DB
 	options  BackupOptions
 	now      func() time.Time
+	cipher   BackupCipher
+	store    BackupStore
 }
 
 func NewBackupService(db *database.DB, options BackupOptions) (*BackupService, error) {
@@ -71,14 +79,21 @@ func NewBackupService(db *database.DB, options BackupOptions) (*BackupService, e
 	if options.WeeklyRetention < 0 {
 		options.WeeklyRetention = 4
 	}
-	return &BackupService{database: db, options: options, now: func() time.Time { return time.Now().UTC() }}, nil
+	var backupCipher BackupCipher
+	if strings.TrimSpace(options.EncryptionKeyFile) != "" {
+		backupCipher, err = LoadAESGCMBackupCipher(options.EncryptionKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load backup encryption key: %w", err)
+		}
+	}
+	return &BackupService{database: db, options: options, now: func() time.Time { return time.Now().UTC() }, cipher: backupCipher, store: options.Store}, nil
 }
 
 // ReconcileStoredPaths repairs backup records after the configured data directory
 // moves. A path is only changed when a same-named archive exists in the current
 // backup directory, verifies successfully, and carries the recorded public ID.
 func (s *BackupService) ReconcileStoredPaths(ctx context.Context) error {
-	rows, err := s.database.Reader.QueryContext(ctx, "SELECT id,public_id,manifest_path FROM backups WHERE checksum_status='valid'")
+	rows, err := s.database.Reader.QueryContext(ctx, "SELECT id,public_id,manifest_path FROM backups WHERE checksum_status='valid' AND destination='local'")
 	if err != nil {
 		return fmt.Errorf("list backup paths for reconciliation: %w", err)
 	}
@@ -107,7 +122,7 @@ func (s *BackupService) ReconcileStoredPaths(ctx context.Context) error {
 		if candidate == value.path {
 			continue
 		}
-		verified, err := VerifyBackup(ctx, candidate)
+		verified, err := s.verifyArchive(ctx, candidate)
 		if err != nil {
 			continue
 		}
@@ -139,7 +154,11 @@ func (s *BackupService) Create(ctx context.Context, reason, output string) (Back
 		return BackupResult{}, fmt.Errorf("create backup directory: %w", err)
 	}
 	if output == "" {
-		output = filepath.Join(s.options.BackupDir, "blog-"+now.Format("20060102T150405Z")+"-"+encodedID[:12]+".tar.gz")
+		suffix := ".tar.gz"
+		if s.cipher != nil {
+			suffix = ".tar.gz.enc"
+		}
+		output = filepath.Join(s.options.BackupDir, "blog-"+now.Format("20060102T150405Z")+"-"+encodedID[:12]+suffix)
 	} else {
 		output, err = filepath.Abs(output)
 		if err != nil {
@@ -149,8 +168,8 @@ func (s *BackupService) Create(ctx context.Context, reason, output string) (Back
 			return BackupResult{}, fmt.Errorf("create backup output directory: %w", err)
 		}
 	}
-	if !strings.HasSuffix(strings.ToLower(output), ".tar.gz") {
-		return BackupResult{}, fmt.Errorf("backup output must end in .tar.gz")
+	if !strings.HasSuffix(strings.ToLower(output), ".tar.gz") && !strings.HasSuffix(strings.ToLower(output), ".tar.gz.enc") {
+		return BackupResult{}, fmt.Errorf("backup output must end in .tar.gz or .tar.gz.enc")
 	}
 	temporary, err := os.MkdirTemp(s.options.BackupDir, ".backup-work-")
 	if err != nil {
@@ -184,9 +203,22 @@ func (s *BackupService) Create(ctx context.Context, reason, output string) (Back
 		CreatedAt: now, ApplicationVersion: s.options.ApplicationVersion, ApplicationCommit: s.options.ApplicationCommit,
 		MigrationVersion: migrationVersion, DatabasePath: databaseArchivePath,
 	}
+	if s.cipher != nil {
+		manifest.Encrypted = true
+		manifest.Encryption = s.cipher.Name()
+	}
 	partial := output + ".partial-" + encodedID[:12]
-	if err := writeBackupArchive(ctx, partial, manifest, sources); err != nil {
+	plainArchive := partial
+	if s.cipher != nil {
+		plainArchive = filepath.Join(temporary, "backup.tar.gz")
+	}
+	if err := writeBackupArchive(ctx, plainArchive, manifest, sources); err != nil {
 		return BackupResult{}, err
+	}
+	if s.cipher != nil {
+		if err := encryptBackupFile(ctx, plainArchive, partial, s.cipher); err != nil {
+			return BackupResult{}, err
+		}
 	}
 	if _, err := os.Lstat(output); err == nil {
 		_ = os.Remove(partial)
@@ -202,17 +234,125 @@ func (s *BackupService) Create(ctx context.Context, reason, output string) (Back
 	if err := syncDirectory(filepath.Dir(output)); err != nil {
 		return BackupResult{}, err
 	}
-	verified, err := VerifyBackup(ctx, output)
+	verified, err := s.verifyArchive(ctx, output)
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("verify created backup: %w", err)
 	}
 	if verified.Manifest.PublicID != encodedID {
 		return BackupResult{}, fmt.Errorf("created backup identity changed during verification")
 	}
-	if err := s.recordBackup(ctx, publicID, output, verified, reason, now); err != nil {
+	destination := "local"
+	objectKey := ""
+	if s.store != nil {
+		objectKey = "backups/" + filepath.Base(output)
+		file, openErr := os.Open(output)
+		if openErr != nil {
+			return BackupResult{}, openErr
+		}
+		info, statErr := file.Stat()
+		if statErr == nil {
+			statErr = s.store.Put(ctx, objectKey, file, info.Size())
+		}
+		closeErr := file.Close()
+		if statErr == nil {
+			statErr = closeErr
+		}
+		if statErr != nil {
+			return BackupResult{}, fmt.Errorf("upload backup object: %w", statErr)
+		}
+		if remoteVerified, verifyErr := s.verifyStoreObject(ctx, objectKey); verifyErr != nil {
+			return BackupResult{}, verifyErr
+		} else if remoteVerified.Manifest.PublicID != encodedID {
+			return BackupResult{}, errors.New("remote backup identity changed during verification")
+		}
+		destination = s.store.Name()
+	}
+	if err := s.recordBackup(ctx, publicID, output, objectKey, destination, verified, reason, now); err != nil {
 		return BackupResult{}, err
 	}
-	return BackupResult{Path: output, Manifest: verified.Manifest, SizeBytes: verified.SizeBytes}, nil
+	return BackupResult{Path: output, Manifest: verified.Manifest, SizeBytes: verified.SizeBytes, Destination: destination, Encrypted: verified.Manifest.Encrypted}, nil
+}
+
+func (s *BackupService) verifyArchive(ctx context.Context, path string) (VerifiedBackup, error) {
+	return VerifyBackupWithCipher(ctx, path, s.cipher)
+}
+
+func (s *BackupService) Verify(ctx context.Context, path string) (VerifiedBackup, error) {
+	return s.verifyArchive(ctx, path)
+}
+
+func (s *BackupService) Restore(ctx context.Context, archivePath, targetDataDir string, replace bool) (RestoreResult, error) {
+	return RestoreBackupWithCipher(ctx, archivePath, targetDataDir, replace, s.cipher)
+}
+
+func (s *BackupService) verifyStoreObject(ctx context.Context, key string) (VerifiedBackup, error) {
+	if s.store == nil {
+		return VerifiedBackup{}, errors.New("backup store is not configured")
+	}
+	object, err := s.store.Stat(ctx, key)
+	if err != nil {
+		return VerifiedBackup{}, fmt.Errorf("stat remote backup object: %w", err)
+	}
+	if object.Size < 1 || object.Size > maxBackupExtractSize {
+		return VerifiedBackup{}, errors.New("remote backup object size is outside the allowed range")
+	}
+	reader, err := s.store.Open(ctx, key)
+	if err != nil {
+		return VerifiedBackup{}, err
+	}
+	temporary, err := os.CreateTemp(s.options.BackupDir, ".remote-backup-verify-*.tar.gz")
+	if err != nil {
+		reader.Close()
+		return VerifiedBackup{}, err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	defer temporary.Close()
+	written, copyErr := io.Copy(temporary, io.LimitReader(reader, object.Size+1))
+	closeErr := reader.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr == nil {
+		copyErr = temporary.Sync()
+	}
+	if copyErr != nil {
+		return VerifiedBackup{}, copyErr
+	}
+	if written != object.Size {
+		return VerifiedBackup{}, fmt.Errorf("remote backup object size changed: got %d, want %d", written, object.Size)
+	}
+	return s.verifyArchive(ctx, temporaryPath)
+}
+
+func encryptBackupFile(ctx context.Context, inputPath, outputPath string, cipher BackupCipher) error {
+	input, err := os.Open(inputPath)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := os.OpenFile(outputPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	complete := false
+	defer func() {
+		output.Close()
+		if !complete {
+			os.Remove(outputPath)
+		}
+	}()
+	if err := cipher.Encrypt(ctx, input, output); err != nil {
+		return err
+	}
+	if err := output.Sync(); err != nil {
+		return err
+	}
+	if err := output.Close(); err != nil {
+		return err
+	}
+	complete = true
+	return nil
 }
 
 func (s *BackupService) CreateScheduledIfDue(ctx context.Context) (*BackupResult, error) {
@@ -252,21 +392,23 @@ func (s *BackupService) MarkRestoreTested(ctx context.Context, manifest BackupMa
 }
 
 func (s *BackupService) PruneScheduled(ctx context.Context) error {
-	rows, err := s.database.Reader.QueryContext(ctx, "SELECT id,public_id,manifest_path,created_at FROM backups WHERE reason='scheduled' AND checksum_status='valid' ORDER BY created_at DESC,id DESC")
+	rows, err := s.database.Reader.QueryContext(ctx, "SELECT id,public_id,manifest_path,destination,object_key,created_at FROM backups WHERE reason='scheduled' AND checksum_status='valid' ORDER BY created_at DESC,id DESC")
 	if err != nil {
 		return fmt.Errorf("list scheduled backups: %w", err)
 	}
 	type record struct {
-		id       int64
-		publicID []byte
-		path     string
-		created  time.Time
+		id          int64
+		publicID    []byte
+		path        string
+		destination string
+		objectKey   string
+		created     time.Time
 	}
 	var records []record
 	for rows.Next() {
 		var value record
 		var created int64
-		if err := rows.Scan(&value.id, &value.publicID, &value.path, &created); err != nil {
+		if err := rows.Scan(&value.id, &value.publicID, &value.path, &value.destination, &value.objectKey, &created); err != nil {
 			rows.Close()
 			return err
 		}
@@ -294,12 +436,27 @@ func (s *BackupService) PruneScheduled(ctx context.Context) error {
 		if keep {
 			continue
 		}
-		inside, err := pathInside(s.options.BackupDir, value.path)
-		if err != nil || !inside {
-			return fmt.Errorf("refuse to prune backup outside configured directory: %q", value.path)
-		}
-		if err := os.Remove(value.path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove expired backup: %w", err)
+		if value.destination == "local" {
+			inside, err := pathInside(s.options.BackupDir, value.path)
+			if err != nil || !inside {
+				return fmt.Errorf("refuse to prune backup outside configured directory: %q", value.path)
+			}
+			if err := os.Remove(value.path); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove expired backup: %w", err)
+			}
+		} else {
+			if s.store == nil || s.store.Name() != value.destination || value.objectKey == "" {
+				// A changed configuration must not delete a remote object that
+				// cannot be addressed by the current process.
+				continue
+			}
+			deleter, ok := s.store.(backupStoreDeleter)
+			if !ok {
+				continue
+			}
+			if err := deleter.Delete(ctx, value.objectKey); err != nil {
+				return fmt.Errorf("remove expired remote backup: %w", err)
+			}
 		}
 		if _, err := s.database.Writer.ExecContext(ctx, "DELETE FROM backups WHERE id=?", value.id); err != nil {
 			return fmt.Errorf("remove expired backup record: %w", err)
@@ -311,13 +468,17 @@ func (s *BackupService) PruneScheduled(ctx context.Context) error {
 	return nil
 }
 
-func (s *BackupService) recordBackup(ctx context.Context, publicID []byte, path string, verified VerifiedBackup, reason string, now time.Time) error {
+func (s *BackupService) recordBackup(ctx context.Context, publicID []byte, path, objectKey, destination string, verified VerifiedBackup, reason string, now time.Time) error {
 	tx, err := s.database.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO backups(public_id,manifest_path,destination,size_bytes,checksum_status,encrypted,created_at,reason,application_version,migration_version) VALUES(?,?,'local',?,'valid',0,?,?,?,?)`, publicID, path, verified.SizeBytes, now.UnixMilli(), reason, verified.Manifest.ApplicationVersion, verified.Manifest.MigrationVersion); err != nil {
+	encrypted := 0
+	if verified.Manifest.Encrypted {
+		encrypted = 1
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO backups(public_id,manifest_path,destination,object_key,size_bytes,checksum_status,encrypted,verified_at,created_at,reason,application_version,migration_version,last_error) VALUES(?,?,?,?,?,'valid',?,?,?, ?,?,?, '')`, publicID, path, destination, objectKey, verified.SizeBytes, encrypted, now.UnixMilli(), now.UnixMilli(), reason, verified.Manifest.ApplicationVersion, verified.Manifest.MigrationVersion); err != nil {
 		return fmt.Errorf("record backup: %w", err)
 	}
 	contextJSON, _ := json.Marshal(map[string]any{"reason": reason, "size_bytes": verified.SizeBytes, "migration_version": verified.Manifest.MigrationVersion})

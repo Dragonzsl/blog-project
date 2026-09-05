@@ -81,6 +81,10 @@ func TestUploadPreservesOriginalGeneratesVariantsAndProtectsReferences(t *testin
 	if len(item.Variants) != 2 || item.Variants[0].Width != 640 || item.Variants[1].Width != 1280 {
 		t.Fatalf("variants=%+v", item.Variants)
 	}
+	batched, err := service.PublicItems(ctx, [][]byte{item.PublicID, item.PublicID})
+	if err != nil || len(batched) != 1 || len(batched[0].Variants) != 2 {
+		t.Fatalf("batched public media=%+v err=%v", batched, err)
+	}
 	for _, variant := range item.Variants {
 		file, err := os.Open(filepath.Join(root, filepath.FromSlash(variant.ObjectKey)))
 		if err != nil {

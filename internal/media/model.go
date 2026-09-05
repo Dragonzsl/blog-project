@@ -8,6 +8,7 @@ import (
 	"time"
 
 	platformid "github.com/zhushilin/blog-project/internal/platform/id"
+	"github.com/zhushilin/blog-project/internal/platform/pagination"
 )
 
 var (
@@ -32,6 +33,11 @@ type Item struct {
 	ReferenceCount int
 	CreatedAt      time.Time
 	Variants       []Variant
+}
+
+type Page struct {
+	Items      []Item
+	Pagination pagination.Info
 }
 
 type Variant struct {

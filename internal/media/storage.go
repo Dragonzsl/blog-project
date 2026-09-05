@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -276,116 +277,158 @@ type StorageMigrationResult struct {
 	FailedObjects int
 }
 
-// MigrateStorage copies every media object recorded in the location index,
-// verifies size and SHA-256, and flips the index only after all copies pass.
-// A failed run leaves the source locations untouched and can be retried.
+const storageMigrationBatchSize = 16
+
+type storageMigrationObject struct {
+	mediaID int64
+	variant string
+	key     string
+	size    int64
+	hash    []byte
+}
+
+// MigrateStorage copies media objects in fixed-size batches, verifies size and
+// SHA-256 at both ends, and flips the location index only after all copies
+// pass. Progress is persisted after every confirmed object, so a failed run
+// can resume without retaining the complete media inventory in memory.
 func MigrateStorage(ctx context.Context, db *database.DB, source, destination Storage) (StorageMigrationResult, error) {
 	if db == nil || source == nil || destination == nil {
 		return StorageMigrationResult{}, errors.New("database and storage adapters are required")
 	}
-	rows, err := db.Reader.QueryContext(ctx, `SELECT media_id,variant_key,object_key,size_bytes,content_hash FROM media_storage_locations WHERE adapter=? ORDER BY media_id,variant_key`, source.Name())
-	if err != nil {
+	if source.Name() == destination.Name() {
+		return StorageMigrationResult{}, errors.New("source and destination storage adapters must differ")
+	}
+	var total int
+	if err := db.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM media_storage_locations WHERE adapter=?", source.Name()).Scan(&total); err != nil {
 		return StorageMigrationResult{}, err
 	}
-	type object struct {
-		mediaID int64
-		variant string
-		key     string
-		size    int64
-		hash    []byte
-	}
-	var objects []object
-	for rows.Next() {
-		var item object
-		if err := rows.Scan(&item.mediaID, &item.variant, &item.key, &item.size, &item.hash); err != nil {
-			rows.Close()
-			return StorageMigrationResult{}, err
+	now := time.Now().UTC()
+	result := StorageMigrationResult{SourceAdapter: source.Name(), Destination: destination.Name(), TotalObjects: total}
+	var cursorMediaID int64
+	var cursorVariant string
+	err := db.Reader.QueryRowContext(ctx, `SELECT id,cursor_media_id,cursor_variant_key,copied_objects FROM storage_migrations WHERE source_adapter=? AND destination_adapter=? AND status IN ('running','failed') ORDER BY started_at DESC,id DESC LIMIT 1`, source.Name(), destination.Name()).Scan(&result.ID, &cursorMediaID, &cursorVariant, &result.CopiedObjects)
+	if errors.Is(err, sql.ErrNoRows) {
+		insert, insertErr := db.Writer.ExecContext(ctx, `INSERT INTO storage_migrations(source_adapter,destination_adapter,status,total_objects,batch_size,started_at,lease_expires_at) VALUES(?,?, 'running',?,?,?,?)`, source.Name(), destination.Name(), total, storageMigrationBatchSize, now.UnixMilli(), now.Add(2*time.Minute).UnixMilli())
+		if insertErr != nil {
+			return result, insertErr
 		}
-		objects = append(objects, item)
-	}
-	if err := rows.Close(); err != nil {
-		return StorageMigrationResult{}, err
-	}
-	now := time.Now().UTC().UnixMilli()
-	result := StorageMigrationResult{SourceAdapter: source.Name(), Destination: destination.Name(), TotalObjects: len(objects)}
-	insert, err := db.Writer.ExecContext(ctx, `INSERT INTO storage_migrations(source_adapter,destination_adapter,status,total_objects,started_at) VALUES(?,?, 'running',?,?)`, source.Name(), destination.Name(), len(objects), now)
-	if err != nil {
+		result.ID, _ = insert.LastInsertId()
+	} else if err != nil {
 		return result, err
+	} else {
+		if _, err := db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET status='running',total_objects=?,batch_size=?,last_error='',completed_at=NULL,lease_expires_at=? WHERE id=?`, total, storageMigrationBatchSize, now.Add(2*time.Minute).UnixMilli(), result.ID); err != nil {
+			return result, err
+		}
 	}
-	result.ID, _ = insert.LastInsertId()
-	for _, item := range objects {
-		reader, openErr := source.Open(ctx, item.key)
-		if openErr != nil {
+	for {
+		if err := ctx.Err(); err != nil {
 			result.FailedObjects++
-			return result, finishMigration(ctx, db, result.ID, result, openErr)
-		}
-		temporary, tempErr := os.CreateTemp("", "blog-storage-migrate-*")
-		if tempErr == nil {
-			_, tempErr = io.Copy(temporary, io.LimitReader(reader, item.size+1))
-		}
-		closeErr := reader.Close()
-		if tempErr == nil {
-			tempErr = closeErr
-		}
-		if tempErr == nil {
-			if _, tempErr = temporary.Seek(0, io.SeekStart); tempErr == nil {
-				hash := sha256.New()
-				_, tempErr = io.Copy(hash, temporary)
-				if tempErr == nil && (temporarySize(temporary) != item.size || !equalBytes(hash.Sum(nil), item.hash)) {
-					tempErr = errors.New("storage checksum mismatch")
-				}
-			}
-		}
-		if tempErr == nil {
-			if _, tempErr = temporary.Seek(0, io.SeekStart); tempErr == nil {
-				tempErr = destination.Put(ctx, item.key, temporary, item.size)
-			}
-		}
-		if tempErr == nil {
-			var copied io.ReadCloser
-			copied, tempErr = destination.Open(ctx, item.key)
-			if tempErr == nil {
-				hash := sha256.New()
-				var copiedSize int64
-				copiedSize, tempErr = io.Copy(hash, io.LimitReader(copied, item.size+1))
-				closeErr := copied.Close()
-				if tempErr == nil {
-					tempErr = closeErr
-				}
-				if tempErr == nil && (copiedSize != item.size || !equalBytes(hash.Sum(nil), item.hash)) {
-					tempErr = errors.New("destination storage checksum mismatch")
-				}
-			}
-		}
-		if temporary != nil {
-			temporary.Close()
-			os.Remove(temporary.Name())
-		}
-		if tempErr != nil {
-			result.FailedObjects++
-			return result, finishMigration(ctx, db, result.ID, result, tempErr)
-		}
-		result.CopiedObjects++
-	}
-	tx, err := db.Writer.BeginTx(ctx, nil)
-	if err != nil {
-		return result, finishMigration(ctx, db, result.ID, result, err)
-	}
-	for _, item := range objects {
-		if _, err := tx.ExecContext(ctx, `UPDATE media_storage_locations SET adapter=?,updated_at=? WHERE media_id=? AND variant_key=?`, destination.Name(), now, item.mediaID, item.variant); err != nil {
-			tx.Rollback()
 			return result, finishMigration(ctx, db, result.ID, result, err)
 		}
+		rows, err := db.Reader.QueryContext(ctx, `
+			SELECT media_id,variant_key,object_key,size_bytes,content_hash
+			FROM media_storage_locations
+			WHERE adapter=? AND (media_id>? OR (media_id=? AND variant_key>?))
+			ORDER BY media_id,variant_key LIMIT ?`, source.Name(), cursorMediaID, cursorMediaID, cursorVariant, storageMigrationBatchSize)
+		if err != nil {
+			return result, finishMigration(ctx, db, result.ID, result, err)
+		}
+		batch := make([]storageMigrationObject, 0, storageMigrationBatchSize)
+		for rows.Next() {
+			var item storageMigrationObject
+			if err := rows.Scan(&item.mediaID, &item.variant, &item.key, &item.size, &item.hash); err != nil {
+				rows.Close()
+				return result, finishMigration(ctx, db, result.ID, result, err)
+			}
+			batch = append(batch, item)
+		}
+		if err := rows.Close(); err != nil {
+			return result, finishMigration(ctx, db, result.ID, result, err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		for _, item := range batch {
+			if err := copyStorageObject(ctx, source, destination, item); err != nil {
+				result.FailedObjects++
+				return result, finishMigration(ctx, db, result.ID, result, err)
+			}
+			result.CopiedObjects++
+			cursorMediaID, cursorVariant = item.mediaID, item.variant
+			if _, err := db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET copied_objects=?,cursor_media_id=?,cursor_variant_key=?,lease_expires_at=? WHERE id=?`, result.CopiedObjects, cursorMediaID, cursorVariant, time.Now().UTC().Add(2*time.Minute).UnixMilli(), result.ID); err != nil {
+				return result, finishMigration(ctx, db, result.ID, result, err)
+			}
+		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := db.Writer.ExecContext(ctx, `UPDATE media_storage_locations SET adapter=?,updated_at=? WHERE adapter=?`, destination.Name(), time.Now().UTC().UnixMilli(), source.Name()); err != nil {
 		return result, finishMigration(ctx, db, result.ID, result, err)
 	}
-	_, err = db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET status='succeeded',copied_objects=?,failed_objects=0,completed_at=? WHERE id=?`, result.CopiedObjects, time.Now().UTC().UnixMilli(), result.ID)
+	_, err = db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET status='succeeded',copied_objects=?,failed_objects=0,completed_at=?,lease_expires_at=NULL,last_error='' WHERE id=?`, result.CopiedObjects, time.Now().UTC().UnixMilli(), result.ID)
 	return result, err
 }
 
+func copyStorageObject(ctx context.Context, source, destination Storage, item storageMigrationObject) error {
+	reader, err := source.Open(ctx, item.key)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.CreateTemp("", "blog-storage-migrate-*")
+	if err != nil {
+		reader.Close()
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	defer temporary.Close()
+	written, copyErr := io.Copy(temporary, io.LimitReader(reader, item.size+1))
+	closeErr := reader.Close()
+	if copyErr == nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return copyErr
+	}
+	if written != item.size {
+		return errors.New("storage source size mismatch")
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, temporary); err != nil {
+		return err
+	}
+	if !equalBytes(hash.Sum(nil), item.hash) {
+		return errors.New("storage source checksum mismatch")
+	}
+	if _, err := temporary.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if err := destination.Put(ctx, item.key, temporary, item.size); err != nil {
+		return err
+	}
+	copied, err := destination.Open(ctx, item.key)
+	if err != nil {
+		return err
+	}
+	defer copied.Close()
+	hash.Reset()
+	copiedSize, err := io.Copy(hash, io.LimitReader(copied, item.size+1))
+	if err != nil {
+		return err
+	}
+	if copiedSize != item.size || !equalBytes(hash.Sum(nil), item.hash) {
+		return errors.New("destination storage checksum mismatch")
+	}
+	return nil
+}
+
 func finishMigration(ctx context.Context, db *database.DB, id int64, result StorageMigrationResult, failure error) error {
-	_, _ = db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET status='failed',copied_objects=?,failed_objects=?,last_error=?,completed_at=? WHERE id=?`, result.CopiedObjects, result.FailedObjects, failure.Error(), time.Now().UTC().UnixMilli(), id)
+	message := failure.Error()
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	_, _ = db.Writer.ExecContext(ctx, `UPDATE storage_migrations SET status='failed',copied_objects=?,failed_objects=?,last_error=?,completed_at=?,lease_expires_at=NULL WHERE id=?`, result.CopiedObjects, result.FailedObjects, message, time.Now().UTC().UnixMilli(), id)
 	return failure
 }
 

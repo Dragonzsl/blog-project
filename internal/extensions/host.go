@@ -455,6 +455,10 @@ func (r *Registry) TaskCounts(ctx context.Context) (operations.TaskCounts, error
 	return r.queue.Counts(ctx)
 }
 
+func (r *Registry) TaskSnapshot(ctx context.Context) (operations.TaskSnapshot, error) {
+	return r.queue.Snapshot(ctx)
+}
+
 // SetAdminRouter binds the protected /admin subtree. It must be called before
 // enabling plugins; keeping it separate prevents a plugin from accidentally
 // registering an unauthenticated administrative endpoint.

@@ -40,6 +40,7 @@ type App struct {
 	database             *database.DB
 	server               *http.Server
 	publishing           *publishing.Service
+	organization         *organization.Service
 	discovery            *discovery.Service
 	backups              *operations.BackupService
 	themeManager         *presentation.ThemeManager
@@ -136,11 +137,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	var backupStore operations.BackupStore
+	if cfg.Operations.Backup.Adapter == "s3" {
+		backupStorage, storageErr := media.NewS3Storage(cfg.Operations.Backup.S3.Endpoint, cfg.Operations.Backup.S3.Bucket, cfg.Operations.Backup.S3.Region, cfg.Operations.Backup.S3.AccessKey, cfg.Operations.Backup.S3.SecretKey, cfg.Operations.Backup.S3.Prefix, cfg.Operations.Backup.S3.ForcePathStyle, cfg.Operations.Backup.S3.UseTLS)
+		if storageErr != nil {
+			db.Close()
+			return nil, fmt.Errorf("configure backup storage: %w", storageErr)
+		}
+		backupStore, err = operations.NewMediaStorageBackupStore(backupStorage, cfg.Operations.Backup.Prefix)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	backupService, err := operations.NewBackupService(db, operations.BackupOptions{
 		DataDir: cfg.Storage.DataDir, DatabasePath: cfg.Database.Path,
 		ApplicationVersion: buildinfo.Version, ApplicationCommit: buildinfo.Commit,
 		Interval: cfg.Operations.BackupInterval.Duration, DailyRetention: cfg.Operations.BackupDailyRetention,
-		WeeklyRetention: cfg.Operations.BackupWeeklyRetention,
+		WeeklyRetention:   cfg.Operations.BackupWeeklyRetention,
+		EncryptionKeyFile: cfg.Operations.Backup.EncryptionKeyFile, Store: backupStore,
 	})
 	if err != nil {
 		db.Close()
@@ -317,6 +332,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	taskHTTP.SetOperationsSummaryProvider(func(ctx context.Context) (operations.OperationsSummary, error) {
+		return operations.ReadOperationsSummary(ctx, db, extensionRegistry.TaskQueue(), filepath.Join(cfg.Storage.DataDir, "cache", "pages"))
+	})
 	if err := extensionRegistry.Register(comments.NewLocalPlugin(commentHTTP)); err != nil {
 		db.Close()
 		return nil, err
@@ -396,7 +414,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		MaxHeaderBytes:    1 << 20,
 	}
 	keepLock = true
-	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, discovery: discoveryService, backups: backupService, themeManager: themeManager, extensions: extensionRegistry, analytics: analyticsService, outbox: outbox, publicWrites: publicWriteGuard, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
+	return &App{config: cfg, logger: logger, database: db, server: server, publishing: publishingService, organization: organizationService, discovery: discoveryService, backups: backupService, themeManager: themeManager, extensions: extensionRegistry, analytics: analyticsService, outbox: outbox, publicWrites: publicWriteGuard, dataLock: dataLock, lifecycleInterval: cfg.Publishing.SchedulerInterval.Duration, trashCleanupInterval: cfg.Publishing.TrashCleanupInterval.Duration, backupInterval: cfg.Operations.BackupInterval.Duration}, nil
 }
 
 func appendUnique(values []string, value string) []string {
@@ -452,6 +470,76 @@ func (app *App) Run(ctx context.Context) error {
 }
 
 func (app *App) runLifecycle(ctx context.Context) {
+	processSearchIndex := func() {
+		const maxBatchesPerTick = 4
+		for batch := 0; batch < maxBatchesPerTick; batch++ {
+			indexed, err := app.discovery.SyncDirty(ctx)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					app.logger.ErrorContext(ctx, "synchronize bounded search batch", "error", err)
+				}
+				return
+			}
+			if indexed == 0 {
+				return
+			}
+			app.logger.DebugContext(ctx, "synchronized bounded search batch", "documents", indexed)
+		}
+	}
+	taxonomyWarmed := false
+	warmPublicTaxonomy := func() {
+		if app.organization == nil || taxonomyWarmed {
+			return
+		}
+		if _, err := app.organization.PublicCategories(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				app.logger.ErrorContext(ctx, "prewarm public categories", "error", err)
+			}
+			return
+		}
+		if _, err := app.organization.PublicTags(ctx); err != nil {
+			if !errors.Is(err, context.Canceled) {
+				app.logger.ErrorContext(ctx, "prewarm public tags", "error", err)
+			}
+			return
+		}
+		taxonomyWarmed = true
+		app.logger.DebugContext(ctx, "prewarmed public taxonomy snapshots")
+	}
+	processTaxonomyProjection := func() {
+		if app.organization == nil {
+			return
+		}
+		state, err := app.organization.PublicTaxonomyRebuildState(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				app.logger.ErrorContext(ctx, "read public taxonomy projection state", "error", err)
+			}
+			return
+		}
+		if state.Status == "ready" {
+			warmPublicTaxonomy()
+			return
+		}
+		const maxBatchesPerTick = 2
+		for batch := 0; batch < maxBatchesPerTick; batch++ {
+			processed, complete, rebuildErr := app.organization.RebuildPublicTaxonomy(ctx, 256)
+			if rebuildErr != nil {
+				if !errors.Is(rebuildErr, context.Canceled) {
+					app.logger.ErrorContext(ctx, "rebuild public taxonomy projection", "error", rebuildErr)
+				}
+				return
+			}
+			if processed > 0 {
+				app.logger.DebugContext(ctx, "rebuilt public taxonomy batch", "records", processed)
+			}
+			if complete {
+				app.logger.InfoContext(ctx, "public taxonomy projection ready")
+				warmPublicTaxonomy()
+				return
+			}
+		}
+	}
 	processScheduled := func() {
 		published, err := app.publishing.ProcessScheduled(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -460,11 +548,7 @@ func (app *App) runLifecycle(ctx context.Context) {
 		}
 		if published > 0 {
 			app.logger.InfoContext(ctx, "scheduled publishing processed", "published", published)
-			if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
-				app.logger.ErrorContext(ctx, "synchronize published search documents", "error", err)
-			} else if indexed > 0 {
-				app.logger.InfoContext(ctx, "search documents synchronized", "documents", indexed)
-			}
+			processSearchIndex()
 		}
 	}
 	cleanupTrash := func() {
@@ -526,11 +610,8 @@ func (app *App) runLifecycle(ctx context.Context) {
 			app.logger.DebugContext(ctx, "plugin task processed")
 		}
 	}
-	if indexed, err := app.discovery.SyncAllDirty(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		app.logger.ErrorContext(ctx, "initialize search documents", "error", err)
-	} else if indexed > 0 {
-		app.logger.InfoContext(ctx, "search documents initialized", "documents", indexed)
-	}
+	processTaxonomyProjection()
+	processSearchIndex()
 	processScheduled()
 	cleanupTrash()
 	backupIfDue()
@@ -549,6 +630,8 @@ func (app *App) runLifecycle(ctx context.Context) {
 			return
 		case <-schedulerTicker.C:
 			processScheduled()
+			processTaxonomyProjection()
+			processSearchIndex()
 			processPluginTasks()
 		case <-cleanupTicker.C:
 			cleanupTrash()

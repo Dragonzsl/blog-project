@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -104,6 +105,14 @@ type Operations struct {
 	BackupInterval        Duration `toml:"backup_interval"`
 	BackupDailyRetention  int      `toml:"backup_daily_retention"`
 	BackupWeeklyRetention int      `toml:"backup_weekly_retention"`
+	Backup                Backup   `toml:"backup"`
+}
+
+type Backup struct {
+	Adapter           string `toml:"adapter"`
+	EncryptionKeyFile string `toml:"encryption_key_file"`
+	Prefix            string `toml:"prefix"`
+	S3                S3     `toml:"s3"`
 }
 
 type Logging struct {
@@ -204,6 +213,7 @@ func Defaults() Config {
 			BackupInterval:        Duration{Duration: 24 * time.Hour},
 			BackupDailyRetention:  7,
 			BackupWeeklyRetention: 4,
+			Backup:                Backup{Adapter: "local", Prefix: "backups", S3: S3{Region: "us-east-1", UseTLS: true}},
 		},
 		Logging: Logging{Level: "info", Format: "text"},
 		Security: Security{
@@ -268,6 +278,12 @@ func Load(path string) (Config, error) {
 	if strings.TrimSpace(cfg.Security.AuthSecretFile) != "" {
 		cfg.Security.AuthSecretFile = filepath.Clean(cfg.Security.AuthSecretFile)
 	}
+	if strings.TrimSpace(cfg.Operations.Backup.EncryptionKeyFile) != "" && !filepath.IsAbs(cfg.Operations.Backup.EncryptionKeyFile) {
+		cfg.Operations.Backup.EncryptionKeyFile = filepath.Join(cfg.Storage.DataDir, cfg.Operations.Backup.EncryptionKeyFile)
+	}
+	if strings.TrimSpace(cfg.Operations.Backup.EncryptionKeyFile) != "" {
+		cfg.Operations.Backup.EncryptionKeyFile = filepath.Clean(cfg.Operations.Backup.EncryptionKeyFile)
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -289,6 +305,14 @@ func applyEnvironment(cfg *Config) error {
 		{"BLOG_AUTH_SECRET_FILE", &cfg.Security.AuthSecretFile},
 		{"BLOG_BASE_URL", &cfg.Discovery.BaseURL},
 		{"BLOG_STORAGE_ADAPTER", &cfg.Storage.Adapter},
+		{"BLOG_BACKUP_ADAPTER", &cfg.Operations.Backup.Adapter},
+		{"BLOG_BACKUP_ENCRYPTION_KEY_FILE", &cfg.Operations.Backup.EncryptionKeyFile},
+		{"BLOG_BACKUP_PREFIX", &cfg.Operations.Backup.Prefix},
+		{"BLOG_BACKUP_S3_ENDPOINT", &cfg.Operations.Backup.S3.Endpoint},
+		{"BLOG_BACKUP_S3_BUCKET", &cfg.Operations.Backup.S3.Bucket},
+		{"BLOG_BACKUP_S3_REGION", &cfg.Operations.Backup.S3.Region},
+		{"BLOG_BACKUP_S3_ACCESS_KEY", &cfg.Operations.Backup.S3.AccessKey},
+		{"BLOG_BACKUP_S3_SECRET_KEY", &cfg.Operations.Backup.S3.SecretKey},
 		{"BLOG_S3_ENDPOINT", &cfg.Storage.S3.Endpoint},
 		{"BLOG_S3_BUCKET", &cfg.Storage.S3.Bucket},
 		{"BLOG_S3_REGION", &cfg.Storage.S3.Region},
@@ -553,8 +577,8 @@ func (cfg Config) Validate() error {
 	if err != nil || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		problems = append(problems, errors.New("discovery.base_url must be an absolute HTTP or HTTPS URL without credentials, query, or fragment"))
 	}
-	if cfg.Discovery.SyncBatchSize < 1 || cfg.Discovery.SyncBatchSize > 100 {
-		problems = append(problems, errors.New("discovery.sync_batch_size must be between 1 and 100"))
+	if cfg.Discovery.SyncBatchSize < 1 || cfg.Discovery.SyncBatchSize > 500 {
+		problems = append(problems, errors.New("discovery.sync_batch_size must be between 1 and 500"))
 	}
 	if cfg.Discovery.MaxResults < 10 || cfg.Discovery.MaxResults > 100 {
 		problems = append(problems, errors.New("discovery.max_results must be between 10 and 100"))
@@ -573,6 +597,22 @@ func (cfg Config) Validate() error {
 	}
 	if cfg.Operations.BackupWeeklyRetention < 0 || cfg.Operations.BackupWeeklyRetention > 52 {
 		problems = append(problems, errors.New("operations.backup_weekly_retention must be between 0 and 52"))
+	}
+	if cfg.Operations.Backup.Adapter != "local" && cfg.Operations.Backup.Adapter != "s3" {
+		problems = append(problems, errors.New("operations.backup.adapter must be local or s3"))
+	}
+	backupPrefix := strings.Trim(strings.ReplaceAll(cfg.Operations.Backup.Prefix, "\\", "/"), "/")
+	if backupPrefix == "" || path.Clean(backupPrefix) != backupPrefix || strings.HasPrefix(backupPrefix, "../") || strings.Contains(backupPrefix, "\x00") {
+		problems = append(problems, errors.New("operations.backup.prefix must be a relative object prefix"))
+	}
+	if cfg.Operations.Backup.Adapter == "s3" {
+		endpoint, endpointErr := url.Parse(strings.TrimSpace(cfg.Operations.Backup.S3.Endpoint))
+		if endpointErr != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+			problems = append(problems, errors.New("operations.backup.s3 endpoint must be an absolute HTTP or HTTPS URL without credentials, query, or fragment"))
+		}
+		if strings.TrimSpace(cfg.Operations.Backup.S3.Bucket) == "" || strings.TrimSpace(cfg.Operations.Backup.S3.Region) == "" {
+			problems = append(problems, errors.New("operations.backup.s3 bucket and region are required when operations.backup.adapter is s3"))
+		}
 	}
 	if cfg.Extensions.ThemePackageMaxBytes < 1<<20 || cfg.Extensions.ThemePackageMaxBytes > 256<<20 {
 		problems = append(problems, errors.New("extensions.theme_package_max_bytes must be between 1 MiB and 256 MiB"))

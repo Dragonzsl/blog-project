@@ -19,11 +19,22 @@ type TaskManager interface {
 	RetryTask(context.Context, int64) error
 }
 
+type TaskSnapshotManager interface {
+	TaskSnapshot(context.Context) (TaskSnapshot, error)
+}
+
+type OperationsSummaryProvider func(context.Context) (OperationsSummary, error)
+
 type TaskHTTPHandler struct {
 	manager   TaskManager
 	security  AdminSecurity
 	logger    *slog.Logger
 	templates *template.Template
+	summary   OperationsSummaryProvider
+}
+
+func (h *TaskHTTPHandler) SetOperationsSummaryProvider(provider OperationsSummaryProvider) {
+	h.summary = provider
 }
 
 type AdminSecurity interface {
@@ -62,9 +73,27 @@ func (h *TaskHTTPHandler) index(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	var snapshot TaskSnapshot
+	if provider, ok := h.manager.(TaskSnapshotManager); ok {
+		snapshot, err = provider.TaskSnapshot(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+	}
+	var operationsSummary OperationsSummary
+	if h.summary != nil {
+		operationsSummary, err = h.summary(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+	} else {
+		operationsSummary.Tasks = snapshot
+	}
 	notice, message := taskFeedback(r)
 	data := map[string]any{
-		"Tasks": tasks, "Counts": counts, "CSRF": h.security.CSRFToken(r),
+		"Tasks": tasks, "Counts": counts, "Snapshot": snapshot, "Operations": operationsSummary, "CSRF": h.security.CSRFToken(r),
 		"AdminSection": "operations", "Notice": notice, "Error": message,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

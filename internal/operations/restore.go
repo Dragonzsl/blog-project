@@ -28,6 +28,14 @@ type RestoreResult struct {
 }
 
 func RestoreBackup(ctx context.Context, archivePath, targetDataDir string, replace bool) (RestoreResult, error) {
+	return restoreBackup(ctx, archivePath, targetDataDir, replace, nil)
+}
+
+func RestoreBackupWithCipher(ctx context.Context, archivePath, targetDataDir string, replace bool, cipher BackupCipher) (RestoreResult, error) {
+	return restoreBackup(ctx, archivePath, targetDataDir, replace, cipher)
+}
+
+func restoreBackup(ctx context.Context, archivePath, targetDataDir string, replace bool, cipher BackupCipher) (RestoreResult, error) {
 	targetDataDir, err := safeRestoreTarget(targetDataDir)
 	if err != nil {
 		return RestoreResult{}, err
@@ -49,10 +57,15 @@ func RestoreBackup(ctx context.Context, archivePath, targetDataDir string, repla
 		return RestoreResult{}, err
 	}
 	defer lock.Close()
-	verified, err := VerifyBackup(ctx, archivePath)
+	verified, err := VerifyBackupWithCipher(ctx, archivePath, cipher)
 	if err != nil {
 		return RestoreResult{}, err
 	}
+	archiveForRestore, archiveCleanup, err := materializeBackupArchive(ctx, archivePath, cipher)
+	if err != nil {
+		return RestoreResult{}, err
+	}
+	defer archiveCleanup()
 	parent := filepath.Dir(targetDataDir)
 	staging, err := os.MkdirTemp(parent, "."+filepath.Base(targetDataDir)+".restore-")
 	if err != nil {
@@ -72,7 +85,7 @@ func RestoreBackup(ctx context.Context, archivePath, targetDataDir string, repla
 	if err := lock.LinkInto(staging); err != nil {
 		return RestoreResult{}, err
 	}
-	restoredFiles, err := extractVerifiedBackup(ctx, archivePath, staging, verified.Manifest)
+	restoredFiles, err := extractVerifiedBackup(ctx, archiveForRestore, staging, verified.Manifest)
 	if err != nil {
 		return RestoreResult{}, err
 	}
@@ -107,6 +120,49 @@ func RestoreBackup(ctx context.Context, archivePath, targetDataDir string, repla
 	}
 	complete = true
 	return RestoreResult{DataDir: targetDataDir, RollbackDir: rollback, Manifest: verified.Manifest, RestoredFiles: restoredFiles}, nil
+}
+
+func materializeBackupArchive(ctx context.Context, archivePath string, cipher BackupCipher) (string, func(), error) {
+	archive, err := os.Open(archivePath)
+	if err != nil {
+		return "", func() {}, err
+	}
+	encrypted, err := encryptedBackupFile(archive)
+	archive.Close()
+	if err != nil {
+		return "", func() {}, err
+	}
+	if !encrypted {
+		return archivePath, func() {}, nil
+	}
+	if cipher == nil {
+		return "", func() {}, errors.New("encrypted backup requires an encryption key")
+	}
+	directory, err := os.MkdirTemp("", "blog-backup-restore-")
+	if err != nil {
+		return "", func() {}, err
+	}
+	plainPath := filepath.Join(directory, "decrypted.tar.gz")
+	plain, err := os.OpenFile(plainPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		os.RemoveAll(directory)
+		return "", func() {}, err
+	}
+	archive, err = os.Open(archivePath)
+	if err == nil {
+		err = cipher.Decrypt(ctx, archive, plain)
+	}
+	if archive != nil {
+		archive.Close()
+	}
+	if closeErr := plain.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.RemoveAll(directory)
+		return "", func() {}, err
+	}
+	return plainPath, func() { _ = os.RemoveAll(directory) }, nil
 }
 
 func extractVerifiedBackup(ctx context.Context, archivePath, staging string, manifest BackupManifest) (int, error) {

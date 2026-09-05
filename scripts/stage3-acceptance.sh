@@ -27,4 +27,6 @@ if command -v docker >/dev/null 2>&1; then
 	fi
 fi
 
+./scripts/perf-gate.sh
+
 echo "Stage three acceptance checks passed"

@@ -53,6 +53,23 @@ backup_interval = "24h"
 backup_daily_retention = 7
 backup_weekly_retention = 4
 
+# 备份默认写入本地 data/backups；可选加密密钥文件必须是 0600 的 32 字节
+# 原文或 64 位十六进制文件。远程目标使用独立 prefix，不复用媒体 prefix。
+[operations.backup]
+adapter = "local"
+prefix = "backups"
+encryption_key_file = ""
+
+[operations.backup.s3]
+endpoint = ""
+bucket = ""
+region = "us-east-1"
+access_key = ""
+secret_key = ""
+prefix = ""
+force_path_style = false
+use_tls = true
+
 [logging]
 level = "info"
 format = "text"

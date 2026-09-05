@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
@@ -24,10 +27,14 @@ type AuditEntry struct {
 type BackupRecord struct {
 	PublicID           string
 	Path               string
+	Destination        string
+	ObjectKey          string
 	Reason             string
 	SizeBytes          int64
+	Encrypted          bool
 	ApplicationVersion string
 	MigrationVersion   int64
+	VerifiedAt         *time.Time
 	RestoreTestedAt    *time.Time
 	CreatedAt          time.Time
 }
@@ -42,6 +49,102 @@ type Status struct {
 	ValidBackups     int
 	LastBackupAt     *time.Time
 	LastRestoreTest  *time.Time
+}
+
+type OperationsSummary struct {
+	MigrationVersion       int64
+	Ready                  bool
+	Tasks                  TaskSnapshot
+	ValidBackups           int
+	LastBackupAt           *time.Time
+	LastBackupDestination  string
+	LastBackupEncrypted    bool
+	LastBackupVerifiedAt   *time.Time
+	LastRestoreTest        *time.Time
+	MediaCount             int
+	VariantCount           int
+	StorageMigrationState  string
+	StorageMigrationCopied int
+	StorageMigrationTotal  int
+	StorageMigrationError  string
+	CacheEntries           int
+	CacheBytes             int64
+	CacheEpoch             int64
+	CacheScanLimited       bool
+}
+
+// ReadOperationsSummary gathers only bounded aggregates. It intentionally
+// returns target type and relative timestamps, never backup paths, object
+// keys, endpoints, payloads, or credentials.
+func ReadOperationsSummary(ctx context.Context, db *database.DB, queue *TaskQueue, cacheDir string) (OperationsSummary, error) {
+	if db == nil || db.Reader == nil {
+		return OperationsSummary{}, fmt.Errorf("operations database is not configured")
+	}
+	version, err := db.MigrationVersion(ctx)
+	if err != nil {
+		return OperationsSummary{}, err
+	}
+	summary := OperationsSummary{MigrationVersion: version, Ready: db.Ready(ctx) == nil}
+	if queue != nil {
+		summary.Tasks, err = queue.Snapshot(ctx)
+		if err != nil {
+			return OperationsSummary{}, err
+		}
+	}
+	var encrypted int
+	var backupAt, verifiedAt, restoreAt sql.NullInt64
+	err = db.Reader.QueryRowContext(ctx, `SELECT count(*),MAX(created_at),
+		COALESCE((SELECT destination FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT 1),''),
+		COALESCE((SELECT encrypted FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT 1),0),
+		(SELECT verified_at FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT 1),
+		(SELECT restore_tested_at FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT 1)
+		FROM backups WHERE checksum_status='valid'`).Scan(&summary.ValidBackups, &backupAt, &summary.LastBackupDestination, &encrypted, &verifiedAt, &restoreAt)
+	if err != nil {
+		return OperationsSummary{}, err
+	}
+	summary.LastBackupEncrypted = encrypted != 0
+	summary.LastBackupAt = nullableMillisTime(backupAt)
+	summary.LastBackupVerifiedAt = nullableMillisTime(verifiedAt)
+	summary.LastRestoreTest = nullableMillisTime(restoreAt)
+	if err := db.Reader.QueryRowContext(ctx, "SELECT count(*),(SELECT count(*) FROM media_variants WHERE status='ready') FROM media").Scan(&summary.MediaCount, &summary.VariantCount); err != nil {
+		return OperationsSummary{}, err
+	}
+	var migrationError string
+	_ = db.Reader.QueryRowContext(ctx, `SELECT status,copied_objects,total_objects,COALESCE(last_error,'') FROM storage_migrations ORDER BY id DESC LIMIT 1`, &summary.StorageMigrationState, &summary.StorageMigrationCopied, &summary.StorageMigrationTotal, &migrationError)
+	summary.StorageMigrationError = truncateError(migrationError)
+	_ = db.Reader.QueryRowContext(ctx, "SELECT render_epoch FROM system_state WHERE id=1").Scan(&summary.CacheEpoch)
+	summary.CacheEntries, summary.CacheBytes, summary.CacheScanLimited = scanCacheSummary(cacheDir)
+	return summary, nil
+}
+
+func scanCacheSummary(directory string) (int, int64, bool) {
+	if strings.TrimSpace(directory) == "" {
+		return 0, 0, false
+	}
+	entries, err := os.ReadDir(filepath.Clean(directory))
+	if err != nil {
+		return 0, 0, false
+	}
+	const maxEntries = 4096
+	count := 0
+	var bytes int64
+	limited := false
+	for _, entry := range entries {
+		if count >= maxEntries {
+			limited = true
+			break
+		}
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "epoch-") || !strings.HasSuffix(entry.Name(), ".cache") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		count++
+		bytes += info.Size()
+	}
+	return count, bytes, limited
 }
 
 func RecentAudit(ctx context.Context, db *database.DB, limit int) ([]AuditEntry, error) {
@@ -78,7 +181,7 @@ func ListBackups(ctx context.Context, db *database.DB, limit int) ([]BackupRecor
 	if limit > 200 {
 		limit = 200
 	}
-	rows, err := db.Reader.QueryContext(ctx, `SELECT public_id,manifest_path,reason,size_bytes,application_version,migration_version,restore_tested_at,created_at FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
+	rows, err := db.Reader.QueryContext(ctx, `SELECT public_id,manifest_path,destination,object_key,reason,size_bytes,encrypted,application_version,migration_version,verified_at,restore_tested_at,created_at FROM backups WHERE checksum_status='valid' ORDER BY created_at DESC,id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list backups: %w", err)
 	}
@@ -87,13 +190,19 @@ func ListBackups(ctx context.Context, db *database.DB, limit int) ([]BackupRecor
 	for rows.Next() {
 		var record BackupRecord
 		var publicID []byte
-		var restoreTested sql.NullInt64
+		var encrypted int
+		var verifiedAt, restoreTested sql.NullInt64
 		var created int64
-		if err := rows.Scan(&publicID, &record.Path, &record.Reason, &record.SizeBytes, &record.ApplicationVersion, &record.MigrationVersion, &restoreTested, &created); err != nil {
+		if err := rows.Scan(&publicID, &record.Path, &record.Destination, &record.ObjectKey, &record.Reason, &record.SizeBytes, &encrypted, &record.ApplicationVersion, &record.MigrationVersion, &verifiedAt, &restoreTested, &created); err != nil {
 			return nil, err
 		}
 		record.PublicID = hex.EncodeToString(publicID)
+		record.Encrypted = encrypted != 0
 		record.CreatedAt = time.UnixMilli(created).UTC()
+		if verifiedAt.Valid {
+			value := time.UnixMilli(verifiedAt.Int64).UTC()
+			record.VerifiedAt = &value
+		}
 		if restoreTested.Valid {
 			value := time.UnixMilli(restoreTested.Int64).UTC()
 			record.RestoreTestedAt = &value
