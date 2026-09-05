@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -28,19 +30,21 @@ const (
 	defaultThemeMaxBytes  = 32 << 20
 	defaultThemeMaxFiles  = 256
 	defaultThemeMaxUnpack = 64 << 20
+	maxThemeSettingsJSON  = 64 << 10
 )
 
 // ThemeManifest is the signed-by-distribution metadata for a theme package.
 // Theme packages contain templates and static assets only; they never execute
 // server-side code.
 type ThemeManifest struct {
-	ID             string                       `json:"id"`
-	Name           string                       `json:"name"`
-	Version        string                       `json:"version"`
-	ThemeAPI       int                          `json:"themeApi"`
-	Core           string                       `json:"core"`
-	Features       []string                     `json:"features"`
-	SettingsSchema map[string]SettingDefinition `json:"settingsSchema"`
+	ID              string                       `json:"id"`
+	Name            string                       `json:"name"`
+	Version         string                       `json:"version"`
+	ThemeAPI        int                          `json:"themeApi"`
+	Core            string                       `json:"core"`
+	Features        []string                     `json:"features"`
+	SettingsVersion int                          `json:"settingsVersion,omitempty"`
+	SettingsSchema  map[string]SettingDefinition `json:"settingsSchema"`
 }
 
 type SettingDefinition struct {
@@ -50,14 +54,16 @@ type SettingDefinition struct {
 	Maximum  *float64 `json:"maximum,omitempty"`
 	Options  []string `json:"options,omitempty"`
 	Required bool     `json:"required,omitempty"`
+	Secret   bool     `json:"secret,omitempty"`
 }
 
 type ThemePackage struct {
-	Manifest ThemeManifest
-	Path     string
-	Checksum [32]byte
-	Files    int
-	Bytes    int64
+	Manifest          ThemeManifest
+	Path              string
+	Checksum          [32]byte
+	DirectoryChecksum [32]byte
+	Files             int
+	Bytes             int64
 }
 
 type ThemeInstallOptions struct {
@@ -187,6 +193,13 @@ func InstallTheme(ctx context.Context, source io.Reader, options ThemeInstallOpt
 	if _, err := NewThemeFromDirectory(stage, manifest); err != nil {
 		return ThemePackage{}, fmt.Errorf("validate theme templates: %w", err)
 	}
+	if err := validateThemeFixtures(ctx, stage, manifest); err != nil {
+		return ThemePackage{}, fmt.Errorf("validate theme fixtures: %w", err)
+	}
+	directoryChecksum, err := ThemeDirectoryChecksum(stage)
+	if err != nil {
+		return ThemePackage{}, fmt.Errorf("checksum theme directory: %w", err)
+	}
 	target := filepath.Join(options.Root, manifest.ID, manifest.Version)
 	if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 		return ThemePackage{}, err
@@ -200,7 +213,97 @@ func InstallTheme(ctx context.Context, source io.Reader, options ThemeInstallOpt
 		return ThemePackage{}, fmt.Errorf("publish theme package: %w", err)
 	}
 	complete = true
-	return ThemePackage{Manifest: manifest, Path: target, Checksum: hash, Files: len(archive.File), Bytes: total}, nil
+	return ThemePackage{Manifest: manifest, Path: target, Checksum: hash, DirectoryChecksum: directoryChecksum, Files: len(archive.File), Bytes: total}, nil
+}
+
+// ThemeDirectoryChecksum is independent of ZIP entry order, timestamps, and
+// compression details. It is therefore suitable for detecting changes to the
+// extracted package at activation/startup time.
+func ThemeDirectoryChecksum(root string) ([32]byte, error) {
+	var zero [32]byte
+	entries := make([]string, 0, 64)
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == root {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("theme directory contains symlink %q", relative)
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() {
+			return fmt.Errorf("theme directory contains non-regular file %q", relative)
+		}
+		entries = append(entries, filepath.ToSlash(relative))
+		return nil
+	})
+	if err != nil {
+		return zero, err
+	}
+	sort.Strings(entries)
+	hasher := sha256.New()
+	for _, relative := range entries {
+		contents, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+		if err != nil {
+			return zero, err
+		}
+		_, _ = hasher.Write([]byte(relative + "\x00"))
+		_, _ = hasher.Write(contents)
+		_, _ = hasher.Write([]byte("\x00"))
+	}
+	var result [32]byte
+	copy(result[:], hasher.Sum(nil))
+	return result, nil
+}
+
+func validateThemeFixtures(ctx context.Context, root string, manifest ThemeManifest) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	theme, err := NewThemeFromDirectory(root, manifest)
+	if err != nil {
+		return err
+	}
+	navigation := Navigation{CurrentPath: "/"}
+	article := ArticleData{Kind: "article", Title: "Theme fixture", Slug: "theme-fixture", Excerpt: "fixture", BodyMarkdown: "## fixture\n\ncontent"}
+	checks := []func() ([]byte, error){
+		func() ([]byte, error) {
+			return theme.RenderHomePageWithView("Fixture", HomePageData{}, navigation, PageMetadata{}, nil)
+		},
+		func() ([]byte, error) {
+			return theme.RenderArticlePage("Fixture", article, false, "", navigation, PageMetadata{})
+		},
+		func() ([]byte, error) {
+			return theme.RenderCollectionPage("Fixture", CollectionView{Title: "Collection"}, navigation, PageMetadata{})
+		},
+		func() ([]byte, error) {
+			return theme.RenderDirectoryPage("Fixture", DirectoryView{Title: "Directory"}, navigation, PageMetadata{})
+		},
+		func() ([]byte, error) {
+			return theme.RenderSearch("Fixture", SearchPageData{}, navigation, PageMetadata{})
+		},
+		func() ([]byte, error) {
+			return theme.RenderStatusPage("Fixture", StatusView{Code: 404, Title: "Not found", Message: "fixture"}, navigation, PageMetadata{})
+		},
+	}
+	for index, check := range checks {
+		output, err := check()
+		if err != nil {
+			return fmt.Errorf("fixture %d: %w", index+1, err)
+		}
+		if len(output) == 0 || len(output) > 2<<20 {
+			return fmt.Errorf("fixture %d output is outside bounds", index+1)
+		}
+	}
+	return nil
 }
 
 func validThemePath(raw string) (string, error) {
@@ -231,6 +334,9 @@ func validateThemeManifest(manifest ThemeManifest, coreVersion string) error {
 	if manifest.ThemeAPI != ThemeAPIVersion {
 		return fmt.Errorf("unsupported theme API version %d", manifest.ThemeAPI)
 	}
+	if manifest.SettingsVersion < 0 {
+		return errors.New("theme settings version is invalid")
+	}
 	if coreVersion != "" && !coreRangeAllows(manifest.Core, coreVersion) {
 		return fmt.Errorf("theme requires core %s", manifest.Core)
 	}
@@ -241,6 +347,9 @@ func validateThemeManifest(manifest ThemeManifest, coreVersion string) error {
 		if err := validateSettingDefinition(definition); err != nil {
 			return fmt.Errorf("theme setting %q: %w", key, err)
 		}
+	}
+	if _, err := validateThemeSettings(manifest.SettingsSchema, defaultThemeSettings(manifest.SettingsSchema)); err != nil {
+		return err
 	}
 	return nil
 }
@@ -281,7 +390,176 @@ func validateSettingDefinition(definition SettingDefinition) error {
 	if definition.Type == "integer" && definition.Minimum != nil && definition.Maximum != nil && *definition.Minimum > *definition.Maximum {
 		return errors.New("minimum exceeds maximum")
 	}
+	if definition.Secret && definition.Type != "text" && definition.Type != "url" {
+		return errors.New("secret settings must be text or url")
+	}
+	seenOptions := make(map[string]struct{}, len(definition.Options))
+	for _, option := range definition.Options {
+		if strings.TrimSpace(option) == "" || !utf8.ValidString(option) || len(option) > 256 {
+			return errors.New("select options must be non-empty and bounded")
+		}
+		if _, exists := seenOptions[option]; exists {
+			return errors.New("select options must be unique")
+		}
+		seenOptions[option] = struct{}{}
+	}
+	if definition.Default != nil {
+		if err := validateSettingValue(definition, definition.Default); err != nil {
+			return fmt.Errorf("default is invalid: %w", err)
+		}
+	}
 	return nil
+}
+
+func normalizedSettingsVersion(version int) int {
+	if version < 1 {
+		return 1
+	}
+	return version
+}
+
+func validateSettingValue(definition SettingDefinition, value any) error {
+	switch definition.Type {
+	case "boolean":
+		if _, ok := value.(bool); !ok {
+			return errors.New("must be boolean")
+		}
+	case "text", "url", "color", "media", "select":
+		text, ok := value.(string)
+		if !ok {
+			return errors.New("must be text")
+		}
+		if utf8.RuneCountInString(text) > 4096 {
+			return errors.New("text is too long")
+		}
+		if definition.Type == "select" {
+			valid := false
+			for _, option := range definition.Options {
+				if option == text {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return errors.New("is not one of the allowed options")
+			}
+		}
+		if definition.Type == "url" && text != "" {
+			parsed, err := url.ParseRequestURI(text)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+				return errors.New("must be an http(s) URL")
+			}
+		}
+		if definition.Type == "color" && text != "" && !validThemeColor(text) {
+			return errors.New("must be a hex color")
+		}
+		if definition.Type == "media" && text != "" && !validMediaPublicID(text) {
+			return errors.New("must be a media public id")
+		}
+	case "integer":
+		number, ok := settingNumber(value)
+		if !ok || number != float64(int64(number)) {
+			return errors.New("must be an integer")
+		}
+		if definition.Minimum != nil && number < *definition.Minimum {
+			return errors.New("is below minimum")
+		}
+		if definition.Maximum != nil && number > *definition.Maximum {
+			return errors.New("is above maximum")
+		}
+	default:
+		return fmt.Errorf("unsupported type %q", definition.Type)
+	}
+	return nil
+}
+
+func settingNumber(value any) (float64, bool) {
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case float32:
+		return float64(number), true
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	case json.Number:
+		value, err := number.Float64()
+		return value, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func validThemeColor(value string) bool {
+	if len(value) != 4 && len(value) != 7 {
+		return false
+	}
+	if value[0] != '#' {
+		return false
+	}
+	for _, r := range value[1:] {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMediaPublicID(value string) bool {
+	if len(value) != 32 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateThemeSettings(schema map[string]SettingDefinition, values map[string]any) (map[string]any, error) {
+	if len(schema) > 64 || len(values) > 64 {
+		return nil, errors.New("theme settings are too numerous")
+	}
+	result := make(map[string]any, len(schema))
+	for key := range values {
+		if _, ok := schema[key]; !ok {
+			return nil, fmt.Errorf("unknown theme setting %q", key)
+		}
+	}
+	for key, definition := range schema {
+		value, ok := values[key]
+		if !ok {
+			value = definition.Default
+		}
+		if value == nil {
+			if definition.Required {
+				return nil, fmt.Errorf("required theme setting %q is missing", key)
+			}
+			continue
+		}
+		if err := validateSettingValue(definition, value); err != nil {
+			return nil, fmt.Errorf("theme setting %q: %w", key, err)
+		}
+		result[key] = value
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || len(encoded) > maxThemeSettingsJSON {
+		return nil, errors.New("theme settings JSON is too large")
+	}
+	return result, nil
+}
+
+func runtimeThemeSettings(schema map[string]SettingDefinition, values map[string]any) map[string]any {
+	result := make(map[string]any, len(values))
+	for key, value := range values {
+		if definition, ok := schema[key]; ok && definition.Secret {
+			continue
+		}
+		result[key] = value
+	}
+	return result
 }
 
 func validateThemeTemplates(root string) error {
@@ -409,15 +687,22 @@ func NewThemeFromDirectory(root string, manifest ThemeManifest) (*Theme, error) 
 	if err := validateThemeTemplates(root); err != nil {
 		return nil, err
 	}
-	templates, err := template.ParseFS(os.DirFS(root), "templates/*.html")
+	templates, err := parseThemeTemplates(root)
 	if err != nil {
 		return nil, fmt.Errorf("parse theme templates: %w", err)
 	}
 	// New public page templates are additive to the theme API. Older themes
 	// keep working with their existing templates while the core supplies the
-	// default directory and status presentation when they do not override it.
-	if templates, err = templates.ParseFS(defaulttheme.Files, "templates/directory.html", "templates/status.html"); err != nil {
-		return nil, fmt.Errorf("add default public templates: %w", err)
+	// default directory and status presentation only when they do not override
+	// it. Parsing the fallback unconditionally would replace a custom template
+	// with the embedded default because both files share the same template name.
+	for _, name := range []string{"theme_shell.html", "directory.html", "status.html"} {
+		if templates.Lookup(name) != nil {
+			continue
+		}
+		if templates, err = templates.ParseFS(defaulttheme.Files, "templates/"+name); err != nil {
+			return nil, fmt.Errorf("add default public template %q: %w", name, err)
+		}
 	}
 	css, err := os.ReadFile(filepath.Join(root, "assets", "theme.css"))
 	if err != nil {
@@ -436,7 +721,50 @@ func NewThemeFromDirectory(root string, manifest ThemeManifest) (*Theme, error) 
 		scriptHash = hex.EncodeToString(digest[:8])
 		scriptURL = "/assets/theme/" + manifest.ID + "/" + scriptHash + "/theme.js"
 	}
-	return &Theme{templates: templates, markdown: NewMarkdown(), css: css, js: js, assetHash: assetHash, scriptHash: scriptHash, assetURL: "/assets/theme/" + manifest.ID + "/" + assetHash + "/theme.css", scriptURL: scriptURL, id: manifest.ID, version: manifest.Version, assetRoot: filepath.Join(root, "assets")}, nil
+	settings, err := validateThemeSettings(manifest.SettingsSchema, defaultThemeSettings(manifest.SettingsSchema))
+	if err != nil {
+		return nil, err
+	}
+	settings = runtimeThemeSettings(manifest.SettingsSchema, settings)
+	return &Theme{templates: templates, markdown: NewMarkdown(), css: css, js: js, assetHash: assetHash, scriptHash: scriptHash, assetURL: "/assets/theme/" + manifest.ID + "/" + assetHash + "/theme.css", scriptURL: scriptURL, id: manifest.ID, version: manifest.Version, assetRoot: filepath.Join(root, "assets"), settings: settings}, nil
+}
+
+func parseThemeTemplates(root string) (*template.Template, error) {
+	filesystem := os.DirFS(root)
+	var nested []string
+	if err := fs.WalkDir(filesystem, "templates", func(name string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if !entry.Type().IsRegular() || !strings.HasSuffix(name, ".html") {
+			return nil
+		}
+		if strings.Count(name, "/") > 1 {
+			nested = append(nested, name)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	templates, err := template.ParseFS(filesystem, "templates/*.html")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(nested)
+	for _, name := range nested {
+		contents, err := fs.ReadFile(filesystem, name)
+		if err != nil {
+			return nil, err
+		}
+		templateName := strings.TrimPrefix(name, "templates/")
+		if _, err := templates.New(templateName).Parse(string(contents)); err != nil {
+			return nil, err
+		}
+	}
+	return templates, nil
 }
 
 type ThemeManager struct {
@@ -482,25 +810,64 @@ func (m *ThemeManager) Activate(theme *Theme) error {
 	if theme == m.fallback {
 		return m.Rollback()
 	}
-	if _, err := os.Stat(theme.assetRoot); err != nil {
-		return fmt.Errorf("theme assets unavailable: %w", err)
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.persistMarker(theme.id, theme.version); err != nil {
+	previous := m.Current()
+	if err := m.ActivateRuntime(theme); err != nil {
 		return err
 	}
+	if err := m.PersistMarker(theme); err != nil {
+		m.setRuntime(previous)
+		return err
+	}
+	return nil
+}
+
+// ActivateRuntime changes only the in-memory renderer. ThemeCatalog uses it
+// after the catalog transaction commits, so a failed database write cannot
+// leave the process serving a theme that the database did not activate.
+func (m *ThemeManager) ActivateRuntime(theme *Theme) error {
+	if theme == nil {
+		return errors.New("theme is required")
+	}
+	if theme != m.fallback {
+		if _, err := os.Stat(theme.assetRoot); err != nil {
+			return fmt.Errorf("theme assets unavailable: %w", err)
+		}
+	}
+	m.setRuntime(theme)
+	return nil
+}
+
+func (m *ThemeManager) setRuntime(theme *Theme) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if theme == nil {
+		theme = m.fallback
+	}
 	m.active = theme
+}
+
+func (m *ThemeManager) PersistMarker(theme *Theme) error {
+	if theme == nil || theme == m.fallback {
+		return m.ClearMarker()
+	}
+	return m.persistMarker(theme.id, theme.version)
+}
+
+func (m *ThemeManager) ClearMarker() error {
+	if m.root == "" {
+		return nil
+	}
+	if err := os.Remove(m.marker); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	return nil
 }
 
 func (m *ThemeManager) Rollback() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.root != "" {
-		_ = os.Remove(m.marker)
+	if err := m.ClearMarker(); err != nil {
+		return err
 	}
-	m.active = m.fallback
+	m.setRuntime(m.fallback)
 	return nil
 }
 

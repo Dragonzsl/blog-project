@@ -10,7 +10,6 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -212,7 +211,9 @@ func (g *Guard) Cleanup(ctx context.Context) (int64, error) {
 	defer tx.Rollback()
 	var removed int64
 	for _, table := range []string{"request_idempotencies", "public_write_fingerprints", "newsletter_tokens"} {
-		result, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE expires_at<=? LIMIT "+fmt.Sprint(cleanupBatchSize), now)
+		// SQLite does not accept a LIMIT clause directly on DELETE in every
+		// supported build. Select a bounded, indexed batch by row id instead.
+		result, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE id IN (SELECT id FROM "+table+" WHERE expires_at<=? ORDER BY id LIMIT ?)", now, cleanupBatchSize)
 		if err != nil {
 			return removed, err
 		}

@@ -26,6 +26,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
 	"github.com/zhushilin/blog-project/internal/platform/httpx"
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	"github.com/zhushilin/blog-project/internal/platform/publicwrite"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
 	"github.com/zhushilin/blog-project/internal/presentation"
@@ -185,6 +186,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	publishingHTTP.SetMediaPicker(mediaService)
 	defaultTheme, err := presentation.NewDefaultTheme(presentation.NewMarkdown())
 	if err != nil {
 		db.Close()
@@ -196,6 +198,27 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		return nil, err
 	}
 	themeCatalog := presentation.NewThemeCatalog(db, themeManager)
+	themeCatalog.SetMediaResolver(func(ctx context.Context, publicID string) (presentation.MediaData, error) {
+		decoded, err := platformid.DecodePublicID(publicID)
+		if err != nil {
+			return presentation.MediaData{}, err
+		}
+		item, err := mediaService.PublicItem(ctx, decoded)
+		if err != nil {
+			return presentation.MediaData{}, err
+		}
+		view, err := item.PublicView()
+		if err != nil {
+			return presentation.MediaData{}, err
+		}
+		return presentation.MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}, nil
+	})
+	if err := themeCatalog.Reconcile(ctx); err != nil {
+		// A broken active package must never prevent the embedded fallback from
+		// serving the site. The catalog remains authoritative for the next
+		// repair/activation attempt.
+		logger.WarnContext(ctx, "theme startup reconciliation failed", "error", err)
+	}
 	themeHTTP, err := presentation.NewThemeHTTPHandler(themeCatalog, themeManager, identityHTTP, identityService, logger, presentation.ThemeInstallOptions{
 		Root: filepath.Join(cfg.Storage.DataDir, "themes"), MaxBytes: int64(cfg.Extensions.ThemePackageMaxBytes), MaxFiles: cfg.Extensions.ThemeMaxFiles, MaxUnpacked: cfg.Extensions.ThemeMaxUnpacked,
 	})
@@ -219,6 +242,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	)
 	presentationHTTP.SetDiscovery(discoveryService)
 	presentationHTTP.SetThemeManager(themeManager)
+	presentationHTTP.SetMediaQueries(mediaService)
 	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration, authSecret)
 	commentService.SetWriteGuard(publicWriteGuard)
 	identityHTTP.SetPendingCommentQueries(commentService)
@@ -305,7 +329,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
-	if err := extensionRegistry.Register(contentapi.NewPlugin(publishingService, identityService, discoveryService, contentapi.Config{Token: cfg.ContentAPI.Token})); err != nil {
+	contentAPIPlugin := contentapi.NewPlugin(publishingService, identityService, discoveryService, contentapi.Config{Token: cfg.ContentAPI.Token})
+	contentAPIPlugin.SetMediaQueries(mediaService)
+	if err := extensionRegistry.Register(contentAPIPlugin); err != nil {
 		db.Close()
 		return nil, err
 	}

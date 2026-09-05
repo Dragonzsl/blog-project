@@ -137,16 +137,16 @@ func (p *NewsletterPlugin) Register(host *extensions.Host) error {
 	if err := host.RegisterSettings(extensions.SettingsSchema{"enabled": {Type: "boolean", Default: true}}); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodPost, "/newsletter/subscribe", p.Handler.subscribe); err != nil {
+	if err := host.RouteSlot("newsletter", http.MethodPost, "/newsletter/subscribe", p.Handler.subscribe); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/newsletter/confirm", p.Handler.confirm); err != nil {
+	if err := host.RouteSlot("newsletter", http.MethodGet, "/newsletter/confirm", p.Handler.confirm); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/newsletter/unsubscribe", p.Handler.unsubscribe); err != nil {
+	if err := host.RouteSlot("newsletter", http.MethodGet, "/newsletter/unsubscribe", p.Handler.unsubscribe); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodPost, "/newsletter/unsubscribe", p.Handler.unsubscribe); err != nil {
+	if err := host.RouteSlot("newsletter", http.MethodPost, "/newsletter/unsubscribe", p.Handler.unsubscribe); err != nil {
 		return err
 	}
 	if err := host.RegisterTask("send_confirmation", service.ProcessConfirmationTask); err != nil {

@@ -168,6 +168,7 @@ type ArticleCard struct {
 	UpdatedAt          string
 	UpdatedISO         string
 	ReadingTime        int
+	Cover              *MediaData
 	Category           *TermData
 	HighlightedTitle   template.HTML
 	HighlightedExcerpt template.HTML
@@ -222,6 +223,7 @@ type Theme struct {
 	id           string
 	version      string
 	assetRoot    string
+	settings     map[string]any
 }
 
 func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
@@ -301,6 +303,25 @@ func (t *Theme) ScriptURL() string  { return t.scriptURL }
 func (t *Theme) ScriptHash() string { return t.scriptHash }
 func (t *Theme) JS() []byte         { return t.js }
 
+func (t *Theme) Settings() map[string]any { return cloneSettings(t.settings) }
+
+func (t *Theme) WithSettings(values map[string]any) *Theme {
+	clone := *t
+	clone.settings = cloneSettings(values)
+	return &clone
+}
+
+func cloneSettings(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return map[string]any{}
+	}
+	clone := make(map[string]any, len(values))
+	for key, value := range values {
+		clone[key] = value
+	}
+	return clone
+}
+
 func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool, backURL string, navigation ...Navigation) ([]byte, error) {
 	return t.RenderArticlePage(siteName, article, preview, backURL, firstNavigation(navigation), PageMetadata{})
 }
@@ -319,7 +340,7 @@ func (t *Theme) RenderArticlePage(siteName string, article ArticleData, preview 
 	if len(toc) == 0 {
 		toc = tableOfContents(body)
 	}
-	view := articleTemplateView{Kind: article.Kind, Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt, BodyHTML: body, Category: article.Category, Tags: article.Tags, ReadingTime: readingTime, TOC: toc, Previous: article.Previous, Next: article.Next, Related: article.Related}
+	view := articleTemplateView{Kind: article.Kind, Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt, BodyHTML: body, Cover: article.Cover, Category: article.Category, Tags: article.Tags, ReadingTime: readingTime, TOC: toc, Previous: article.Previous, Next: article.Next, Related: article.Related}
 	if article.PublishedAt != nil {
 		view.PublishedAt = article.PublishedAt.UTC().Format("2006年01月02日")
 		view.PublishedISO = article.PublishedAt.UTC().Format(time.RFC3339)
@@ -338,6 +359,7 @@ func (t *Theme) RenderArticlePage(siteName string, article ArticleData, preview 
 		"Navigation": navigation,
 		"Context":    pageContext(navigation),
 		"Features":   navigation.Features,
+		"Settings":   t.settings,
 		"Meta":       metadata,
 	}
 	var output bytes.Buffer
@@ -380,6 +402,7 @@ func (t *Theme) RenderHomePageWithView(siteName string, view HomePageData, navig
 		"Navigation": navigation,
 		"Context":    pageContext(navigation),
 		"Features":   navigation.Features,
+		"Settings":   t.settings,
 		"Meta":       metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default home theme: %w", err)
@@ -402,7 +425,7 @@ func (t *Theme) RenderCollectionPage(siteName string, collection CollectionView,
 		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Title": collection.Title,
 		"Description": collection.Description, "Articles": collection.Items, "Collection": collection,
 		"Pagination": collection.Pagination, "Navigation": navigation, "Context": pageContext(navigation),
-		"Features": navigation.Features, "Meta": metadata,
+		"Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default listing theme: %w", err)
 	}
@@ -415,7 +438,7 @@ func (t *Theme) RenderDirectoryPage(siteName string, directory DirectoryView, na
 	if err := t.templates.ExecuteTemplate(&output, "directory.html", map[string]any{
 		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Title": directory.Title,
 		"Description": directory.Description, "Directory": directory, "Navigation": navigation,
-		"Context": pageContext(navigation), "Features": navigation.Features, "Meta": metadata,
+		"Context": pageContext(navigation), "Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render directory theme: %w", err)
 	}
@@ -428,7 +451,7 @@ func (t *Theme) RenderStatusPage(siteName string, status StatusView, navigation 
 	if err := t.templates.ExecuteTemplate(&output, "status.html", map[string]any{
 		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Status": status,
 		"Navigation": navigation, "Context": pageContext(navigation),
-		"Features": navigation.Features, "Meta": metadata,
+		"Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render status theme: %w", err)
 	}
@@ -440,7 +463,7 @@ func (t *Theme) RenderSearch(siteName string, search SearchPageData, navigation 
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "search.html", map[string]any{
 		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Search": search,
-		"Navigation": navigation, "Context": pageContext(navigation), "Features": navigation.Features, "Meta": metadata,
+		"Navigation": navigation, "Context": pageContext(navigation), "Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default search theme: %w", err)
 	}
@@ -460,6 +483,7 @@ type articleTemplateView struct {
 	Slug         string
 	Excerpt      string
 	BodyHTML     template.HTML
+	Cover        *MediaData
 	PublishedAt  string
 	PublishedISO string
 	UpdatedAt    string
@@ -558,7 +582,7 @@ func sidebarPathActive(currentPath, target string) bool {
 func articleCards(articles []ArticleData) []ArticleCard {
 	cards := make([]ArticleCard, 0, len(articles))
 	for _, article := range articles {
-		card := ArticleCard{Kind: article.Kind, Path: contentPath(article.Kind, article.Slug), Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt, ReadingTime: article.ReadingTime, Category: article.Category}
+		card := ArticleCard{Kind: article.Kind, Path: contentPath(article.Kind, article.Slug), Title: article.Title, Slug: article.Slug, Excerpt: article.Excerpt, ReadingTime: article.ReadingTime, Cover: article.Cover, Category: article.Category}
 		if article.PublishedAt != nil {
 			card.PublishedAt = article.PublishedAt.UTC().Format("2006年01月02日")
 			card.PublishedISO = article.PublishedAt.UTC().Format(time.RFC3339)

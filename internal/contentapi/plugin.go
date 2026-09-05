@@ -16,6 +16,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/extensions"
+	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
@@ -39,6 +40,10 @@ type URLQueries interface {
 	AbsoluteURL(string) string
 }
 
+type MediaQueries interface {
+	PublicItem(context.Context, []byte) (media.Item, error)
+}
+
 type Config struct {
 	// Token is optional. With an empty token the API follows ADR-0032 and is
 	// same-origin/public-read by default. When set, callers must send a Bearer
@@ -54,6 +59,12 @@ func NewPlugin(content ContentQueries, site SiteQueries, urls URLQueries, cfg Co
 	return &Plugin{handler: &HTTPHandler{content: content, site: site, urls: urls, token: strings.TrimSpace(cfg.Token)}}
 }
 
+func (p *Plugin) SetMediaQueries(queries MediaQueries) {
+	if p != nil && p.handler != nil {
+		p.handler.media = queries
+	}
+}
+
 func (p *Plugin) Manifest() extensions.Manifest {
 	return extensions.Manifest{ID: PluginID, Name: "只读内容 API", Version: "1.0.0", APIVersion: extensions.HostAPIVersion, Kind: "content_api", Capabilities: []string{"public_route", "read_only"}}
 }
@@ -65,19 +76,19 @@ func (p *Plugin) Register(host *extensions.Host) error {
 	if err := host.RegisterMenu(extensions.MenuItem{Label: "内容 API", Path: "/admin/plugins/" + PluginID + "/status", Section: "settings", Order: 80}); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/api/v1/site", p.handler.siteInfo); err != nil {
+	if err := host.RouteSlot("content_api", http.MethodGet, "/api/v1/site", p.handler.siteInfo); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/api/v1/posts", p.handler.posts); err != nil {
+	if err := host.RouteSlot("content_api", http.MethodGet, "/api/v1/posts", p.handler.posts); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/api/v1/pages", p.handler.pages); err != nil {
+	if err := host.RouteSlot("content_api", http.MethodGet, "/api/v1/pages", p.handler.pages); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/api/v1/posts/{slug}", p.handler.post); err != nil {
+	if err := host.RouteSlot("content_api", http.MethodGet, "/api/v1/posts/{slug}", p.handler.post); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/api/v1/pages/{slug}", p.handler.page); err != nil {
+	if err := host.RouteSlot("content_api", http.MethodGet, "/api/v1/pages/{slug}", p.handler.page); err != nil {
 		return err
 	}
 	return host.AdminRoute(http.MethodGet, "/status", func(w http.ResponseWriter, _ *http.Request) {
@@ -90,6 +101,7 @@ type HTTPHandler struct {
 	site    SiteQueries
 	urls    URLQueries
 	token   string
+	media   MediaQueries
 }
 
 type item struct {
@@ -101,6 +113,7 @@ type item struct {
 	Excerpt      string     `json:"excerpt"`
 	BodyMarkdown string     `json:"body_markdown"`
 	PublishedAt  *time.Time `json:"published_at,omitempty"`
+	Cover        *mediaView `json:"cover,omitempty"`
 	Category     *term      `json:"category,omitempty"`
 	Tags         []term     `json:"tags,omitempty"`
 	SEO          seo        `json:"seo"`
@@ -115,6 +128,14 @@ type term struct {
 type seo struct {
 	Title       string `json:"title,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+type mediaView struct {
+	URL    string `json:"url"`
+	Alt    string `json:"alt,omitempty"`
+	Width  int    `json:"width,omitempty"`
+	Height int    `json:"height,omitempty"`
+	SrcSet string `json:"srcset,omitempty"`
 }
 
 func (h *HTTPHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
@@ -178,7 +199,7 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request, kind string) 
 	}
 	items := make([]item, 0, end-start)
 	for _, value := range values[start:end] {
-		items = append(items, h.toItem(value))
+		items = append(items, h.toItem(r.Context(), value))
 	}
 	writeJSONRequest(w, r, http.StatusOK, map[string]any{"items": items, "page": page, "per_page": limit, "has_more": len(values) > end})
 }
@@ -211,10 +232,10 @@ func (h *HTTPHandler) single(w http.ResponseWriter, r *http.Request, article boo
 		writeJSONRequest(w, r, http.StatusInternalServerError, map[string]string{"error": "content unavailable"})
 		return
 	}
-	writeJSONRequest(w, r, http.StatusOK, h.toItem(value))
+	writeJSONRequest(w, r, http.StatusOK, h.toItem(r.Context(), value))
 }
 
-func (h *HTTPHandler) toItem(value publishing.Article) item {
+func (h *HTTPHandler) toItem(ctx context.Context, value publishing.Article) item {
 	result := item{ID: hex.EncodeToString(value.PublicID), Kind: value.Kind, Title: value.Title, Slug: value.PublishedSlug, Excerpt: value.Excerpt, BodyMarkdown: value.BodyMarkdown, PublishedAt: value.PublishedAt, SEO: seo{Title: value.SEOTitle, Description: value.SEODescription}}
 	if result.Slug == "" {
 		result.Slug = value.Slug
@@ -231,6 +252,13 @@ func (h *HTTPHandler) toItem(value publishing.Article) item {
 	}
 	for _, tag := range value.Tags {
 		result.Tags = append(result.Tags, term{ID: hex.EncodeToString(tag.PublicID), Slug: tag.Slug, Name: tag.Name})
+	}
+	if h.media != nil && len(value.CoverMediaPublicID) > 0 {
+		if mediaItem, err := h.media.PublicItem(ctx, value.CoverMediaPublicID); err == nil {
+			if view, err := mediaItem.PublicView(); err == nil {
+				result.Cover = &mediaView{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
+			}
+		}
 	}
 	return result
 }

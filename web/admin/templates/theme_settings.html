@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>主题设置 · {{.Theme.Manifest.Name}} · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}
+<main class="content-shell">
+  <div class="page-heading"><div><p class="eyebrow">Presentation · {{.Theme.Manifest.ID}}</p><h1>主题设置。</h1></div><p class="heading-note">设置只通过只读视图进入主题模板；敏感值不会回显。</p></div>
+  {{if .Message}}<div class="notice" role="status">{{.Message}}</div>{{end}}
+  <form method="post" action="/admin/themes/{{.Theme.Manifest.ID}}/{{.Theme.Manifest.Version}}/settings" class="settings-form" data-submit-feedback>
+    <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+    {{range .Settings}}
+    <label>{{.Key}} <small>（{{.Type}}{{if .Secret}}，敏感{{end}}）</small>
+      {{$setting := .}}
+      {{if eq .Type "boolean"}}<input type="checkbox" name="setting_{{.Key}}" value="true" {{if eq .Value "true"}}checked{{end}}>
+      {{else if eq .Type "select"}}<select name="setting_{{.Key}}">{{range .Options}}<option value="{{.}}" {{if eq $setting.Value .}}selected{{end}}>{{.}}</option>{{end}}</select>
+      {{else if eq .Type "integer"}}<input name="setting_{{.Key}}" type="number" value="{{.Value}}">
+      {{else if eq .Type "color"}}<input name="setting_{{.Key}}" type="text" value="{{.Value}}" pattern="#[0-9a-fA-F]{3,6}">
+      {{else if eq .Type "url"}}<input name="setting_{{.Key}}" type="url" value="{{.Value}}" {{if .Secret}}placeholder="留空以保留当前值"{{end}}>
+      {{else}}<input name="setting_{{.Key}}" type="{{if .Secret}}password{{else}}text{{end}}" value="{{.Value}}" {{if .Secret}}placeholder="留空以保留当前值"{{end}}>
+      {{end}}
+    </label>
+    {{else}}<p>此主题没有可配置项。</p>{{end}}
+    <div class="form-actions"><button type="submit">保存设置 →</button><a class="text-link" href="/admin/themes">返回主题列表</a></div>
+  </form>
+</main>{{template "admin_footer" .}}</body></html>

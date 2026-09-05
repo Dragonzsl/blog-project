@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -47,6 +50,8 @@ func (h *ThemeHTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/themes", h.index)
 	router.Post("/themes/upload", h.upload)
 	router.Post("/themes/{themeID}/{version}/activate", h.activate)
+	router.Get("/themes/{themeID}/{version}/settings", h.settings)
+	router.Post("/themes/{themeID}/{version}/settings", h.saveSettings)
 	router.Get("/themes/{themeID}/{version}/preview", h.preview)
 	router.Get("/themes/{themeID}/{version}/preview-image", h.previewImage)
 	router.Post("/themes/rollback", h.rollback)
@@ -102,6 +107,64 @@ func (h *ThemeHTTPHandler) activate(w http.ResponseWriter, r *http.Request) {
 	h.redirect(w, r, "activated")
 }
 
+type themeSettingView struct {
+	Key     string
+	Type    string
+	Value   string
+	Secret  bool
+	Options []string
+}
+
+func (h *ThemeHTTPHandler) settings(w http.ResponseWriter, r *http.Request) {
+	record, values, err := h.catalog.Settings(r.Context(), chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
+	if err != nil {
+		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	siteName, err := h.siteNamer.SiteName(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	h.renderSettings(w, r, siteName, record, values, "", http.StatusOK)
+}
+
+func (h *ThemeHTTPHandler) saveSettings(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		h.renderError(w, r, "Invalid theme settings", http.StatusBadRequest)
+		return
+	}
+	if !h.security.VerifyParsedCSRF(w, r) {
+		return
+	}
+	record, err := h.catalog.Resolve(chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
+	if err != nil {
+		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	values := make(map[string]any, len(record.Manifest.SettingsSchema))
+	for key, definition := range record.Manifest.SettingsSchema {
+		raw := r.FormValue("setting_" + key)
+		if definition.Type == "boolean" {
+			values[key] = raw == "true" || raw == "1" || raw == "on"
+		} else if definition.Type == "integer" {
+			value, parseErr := strconv.ParseInt(strings.TrimSpace(raw), 10, 64)
+			if parseErr != nil {
+				h.renderSettingsError(w, r, record, values, fmt.Sprintf("主题设置 %q 必须是整数。", key), http.StatusUnprocessableEntity)
+				return
+			}
+			values[key] = value
+		} else {
+			values[key] = raw
+		}
+	}
+	if err := h.catalog.SaveSettings(r.Context(), record.Manifest.ID, record.Manifest.Version, values); err != nil {
+		h.renderSettingsError(w, r, record, values, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	h.redirect(w, r, "settings-saved")
+}
+
 func (h *ThemeHTTPHandler) rollback(w http.ResponseWriter, r *http.Request) {
 	if !h.verifyAction(w, r) {
 		return
@@ -114,12 +177,7 @@ func (h *ThemeHTTPHandler) rollback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ThemeHTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
-	record, err := h.catalog.Resolve(chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
-	if err != nil {
-		h.internalError(w, r, err)
-		return
-	}
-	theme, err := NewThemeFromDirectory(record.Path, record.Manifest)
+	theme, err := h.catalog.Theme(r.Context(), chi.URLParam(r, "themeID"), chi.URLParam(r, "version"))
 	if err != nil {
 		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
 		return
@@ -199,6 +257,32 @@ func (h *ThemeHTTPHandler) render(w http.ResponseWriter, r *http.Request, data m
 	}
 }
 
+func (h *ThemeHTTPHandler) renderSettings(w http.ResponseWriter, r *http.Request, siteName string, record ThemeRecord, values map[string]any, message string, status int) {
+	views := make([]themeSettingView, 0, len(record.Manifest.SettingsSchema))
+	keys := make([]string, 0, len(record.Manifest.SettingsSchema))
+	for key := range record.Manifest.SettingsSchema {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		definition := record.Manifest.SettingsSchema[key]
+		value := values[key]
+		views = append(views, themeSettingView{Key: key, Type: definition.Type, Value: fmt.Sprint(value), Secret: definition.Secret, Options: definition.Options})
+	}
+	data := map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Theme": record, "Settings": views, "Message": message, "AdminSection": "themes"}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	if err := h.templates.ExecuteTemplate(w, "theme_settings.html", data); err != nil {
+		h.logger.ErrorContext(r.Context(), "render theme settings", "error", err)
+	}
+}
+
+func (h *ThemeHTTPHandler) renderSettingsError(w http.ResponseWriter, r *http.Request, record ThemeRecord, values map[string]any, message string, status int) {
+	siteName, _ := h.siteNamer.SiteName(r.Context())
+	h.renderSettings(w, r, siteName, record, values, message, status)
+}
+
 func (h *ThemeHTTPHandler) renderError(w http.ResponseWriter, r *http.Request, message string, status int) {
 	records, _ := h.catalog.List(r.Context())
 	views := themeViews(records)
@@ -214,7 +298,8 @@ func themeViews(records []ThemeRecord) []map[string]any {
 			_ = file.Close()
 		}
 		preview := "/admin/themes/" + record.Manifest.ID + "/" + record.Manifest.Version + "/preview-image"
-		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid", "Path": filepath.Base(record.Path), "PreviewURL": preview, "PreviewAvailable": err == nil})
+		settingsURL := "/admin/themes/" + record.Manifest.ID + "/" + record.Manifest.Version + "/settings"
+		views = append(views, map[string]any{"ID": record.Manifest.ID, "Name": record.Manifest.Name, "Version": record.Manifest.Version, "Active": record.Active, "Valid": record.ValidationStatus == "valid", "Path": filepath.Base(record.Path), "PreviewURL": preview, "SettingsURL": settingsURL, "HasSettings": len(record.Manifest.SettingsSchema) > 0, "PreviewAvailable": err == nil})
 	}
 	return views
 }

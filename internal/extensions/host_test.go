@@ -144,6 +144,227 @@ func TestDisabledPluginDoesNotReceiveEventsOrTasks(t *testing.T) {
 	}
 }
 
+func TestFailedRegistrationLeavesNoHostState(t *testing.T) {
+	db := openExtensionsDatabase(t)
+	router := chi.NewRouter()
+	registry := NewRegistry(db, router, nil)
+	plugin := &partialPlugin{}
+	if err := registry.Register(plugin); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Enable(context.Background(), "partial"); err == nil {
+		t.Fatal("partial registration unexpectedly succeeded")
+	}
+	if len(registry.Menus()) != 0 {
+		t.Fatalf("menus leaked after failed registration: %+v", registry.Menus())
+	}
+	if _, err := registry.Settings(context.Background(), "partial"); !errors.Is(err, ErrPluginNotFound) {
+		t.Fatalf("settings leaked: %v", err)
+	}
+	registry.Dispatch(context.Background(), Event{Name: "partial.event.v1", Version: 1})
+	if plugin.events != 0 {
+		t.Fatalf("event handler leaked: %d", plugin.events)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/plugins/partial/ping", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("route leaked with status=%d", response.Code)
+	}
+	if registry.Enabled("partial") {
+		t.Fatal("failed plugin is enabled")
+	}
+}
+
+func TestPluginPublicNamespaceVersionAndPayloadContracts(t *testing.T) {
+	db := openExtensionsDatabase(t)
+	router := chi.NewRouter()
+	registry := NewRegistry(db, router, nil)
+	plugin := &contractPlugin{}
+	if err := registry.Register(plugin); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Enable(context.Background(), "contract"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/plugins/contract/ping", nil)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("namespaced route status=%d", response.Code)
+	}
+	host := &Host{registry: registry, pluginID: "contract"}
+	if err := host.Route(http.MethodGet, "/admin/escape", func(http.ResponseWriter, *http.Request) {}); !errors.Is(err, ErrCapabilityDenied) {
+		t.Fatalf("unscoped route err=%v", err)
+	}
+	registry.Dispatch(context.Background(), Event{Name: "contract.event.v2", Version: 2})
+	if plugin.events != 0 {
+		t.Fatalf("wrong event version dispatched: %d", plugin.events)
+	}
+	registry.Dispatch(context.Background(), Event{Name: "contract.event.v1", Version: 1})
+	if plugin.events != 1 {
+		t.Fatalf("matching event version not dispatched: %d", plugin.events)
+	}
+	if err := host.EnqueueTask(context.Background(), "small", "too-long", "small-1", time.Now()); err == nil {
+		t.Fatal("oversized task payload was accepted")
+	}
+	if err := host.EnqueueTask(context.Background(), "small", "ok", "small-2", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := registry.ProcessOne(context.Background()); err != nil || !processed || plugin.tasks != 1 {
+		t.Fatalf("task processed=%v tasks=%d err=%v", processed, plugin.tasks, err)
+	}
+}
+
+func TestPluginSecretSettingsAreMaskedAndPlaceholderPreservesValue(t *testing.T) {
+	db := openExtensionsDatabase(t)
+	registry := NewRegistry(db, chi.NewRouter(), nil)
+	if err := registry.Register(secretPlugin{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Enable(context.Background(), "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SaveSettings(context.Background(), "secret", map[string]any{"token": "private-value"}); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := registry.Settings(context.Background(), "secret")
+	if err != nil || settings["token"] != "••••••" {
+		t.Fatalf("masked settings=%v err=%v", settings, err)
+	}
+	if err := registry.SaveSettings(context.Background(), "secret", map[string]any{"token": "••••••"}); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := db.Reader.QueryRowContext(context.Background(), "SELECT json_extract(values_json,'$.token') FROM plugin_settings WHERE plugin_id='secret'").Scan(&stored); err != nil || stored != "private-value" {
+		t.Fatalf("stored secret=%q err=%v", stored, err)
+	}
+}
+
+func TestPluginSettingsMigrationIsVersionedAndFailureIsolated(t *testing.T) {
+	t.Run("migrates before enable", func(t *testing.T) {
+		db := openExtensionsDatabase(t)
+		registry := NewRegistry(db, chi.NewRouter(), nil)
+		if err := registry.Register(migrationPlugin{id: "migrate"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Writer.ExecContext(context.Background(), `INSERT INTO plugin_settings(plugin_id,schema_version,values_json,updated_at) VALUES('migrate',1,'{"name":"legacy"}',0)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := registry.Enable(context.Background(), "migrate"); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := registry.Settings(context.Background(), "migrate")
+		if err != nil || settings["label"] != "legacy" {
+			t.Fatalf("settings=%v err=%v", settings, err)
+		}
+		var version int
+		if err := db.Reader.QueryRowContext(context.Background(), "SELECT schema_version FROM plugin_settings WHERE plugin_id='migrate'").Scan(&version); err != nil || version != 2 {
+			t.Fatalf("schema version=%d err=%v", version, err)
+		}
+		states, err := registry.States(context.Background())
+		if err != nil || len(states) != 1 || states[0].Manifest.SettingsVersion != 2 {
+			t.Fatalf("states=%+v err=%v", states, err)
+		}
+	})
+
+	t.Run("keeps old value after migration failure", func(t *testing.T) {
+		db := openExtensionsDatabase(t)
+		registry := NewRegistry(db, chi.NewRouter(), nil)
+		if err := registry.Register(migrationPlugin{id: "broken-migrate", fail: true}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Writer.ExecContext(context.Background(), `INSERT INTO plugin_settings(plugin_id,schema_version,values_json,updated_at) VALUES('broken-migrate',1,'{"name":"legacy"}',0)`); err != nil {
+			t.Fatal(err)
+		}
+		if err := registry.Enable(context.Background(), "broken-migrate"); err == nil {
+			t.Fatal("migration failure was not reported")
+		}
+		var version int
+		var values string
+		if err := db.Reader.QueryRowContext(context.Background(), "SELECT schema_version,values_json FROM plugin_settings WHERE plugin_id='broken-migrate'").Scan(&version, &values); err != nil || version != 1 || values != `{"name":"legacy"}` {
+			t.Fatalf("old settings changed: version=%d values=%q err=%v", version, values, err)
+		}
+		if _, err := registry.Settings(context.Background(), "broken-migrate"); !errors.Is(err, ErrPluginNotFound) {
+			t.Fatalf("failed migration leaked schema: %v", err)
+		}
+	})
+}
+
+type partialPlugin struct{ events int }
+
+func (p *partialPlugin) Manifest() Manifest {
+	return Manifest{ID: "partial", Name: "partial", Version: "1.0.0", APIVersion: HostAPIVersion}
+}
+
+func (p *partialPlugin) Register(h *Host) error {
+	if err := h.RegisterSettings(SettingsSchema{"enabled": {Type: "boolean", Default: true}}); err != nil {
+		return err
+	}
+	if err := h.RegisterMenu(MenuItem{Label: "partial", Path: "/partial"}); err != nil {
+		return err
+	}
+	if err := h.Route(http.MethodGet, "/plugins/partial/ping", func(http.ResponseWriter, *http.Request) {}); err != nil {
+		return err
+	}
+	if err := h.Subscribe("partial.event.v1", func(context.Context, Event) error { p.events++; return nil }); err != nil {
+		return err
+	}
+	return errors.New("registration failed after declarations")
+}
+
+type contractPlugin struct {
+	events int
+	tasks  int
+}
+
+func (p *contractPlugin) Manifest() Manifest {
+	return Manifest{ID: "contract", Name: "contract", Version: "1.0.0", APIVersion: HostAPIVersion}
+}
+
+func (p *contractPlugin) Register(h *Host) error {
+	if err := h.Route(http.MethodGet, "/plugins/contract/ping", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }); err != nil {
+		return err
+	}
+	if err := h.Subscribe("contract.event.v1", func(context.Context, Event) error { p.events++; return nil }); err != nil {
+		return err
+	}
+	return h.RegisterTaskVersion("small", 2, 4, func(context.Context, []byte) error { p.tasks++; return nil })
+}
+
+type secretPlugin struct{}
+
+func (secretPlugin) Manifest() Manifest {
+	return Manifest{ID: "secret", Name: "secret", Version: "1.0.0", APIVersion: HostAPIVersion, SettingsVersion: 1}
+}
+
+func (secretPlugin) Register(h *Host) error {
+	return h.RegisterSettingsVersion(SettingsSchema{"token": {Type: "text", Secret: true}}, 1, nil)
+}
+
+type migrationPlugin struct {
+	id   string
+	fail bool
+}
+
+func (p migrationPlugin) Manifest() Manifest {
+	return Manifest{ID: p.id, Name: p.id, Version: "1.0.0", APIVersion: HostAPIVersion, SettingsVersion: 2}
+}
+
+func (p migrationPlugin) Register(h *Host) error {
+	return h.RegisterSettingsVersion(SettingsSchema{"label": {Type: "text", Required: true}}, 2, func(_ context.Context, values map[string]any, from, to int) (map[string]any, error) {
+		if p.fail {
+			return nil, errors.New("migration failed")
+		}
+		if from != 1 || to != 2 {
+			return nil, errors.New("unexpected migration versions")
+		}
+		values["label"] = values["name"]
+		delete(values, "name")
+		return values, nil
+	})
+}
+
 type countingPlugin struct {
 	events int
 	tasks  int

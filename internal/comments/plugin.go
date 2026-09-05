@@ -35,10 +35,10 @@ func (p *LocalPlugin) Register(host *extensions.Host) error {
 	if err := host.RegisterMenu(extensions.MenuItem{Label: "评论", Path: "/admin/plugins/comments.local/comments", Section: "content", Order: 30}); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodGet, "/posts/{slug}/comments", p.handler.list); err != nil {
+	if err := host.RouteSlot("comments", http.MethodGet, "/posts/{slug}/comments", p.handler.list); err != nil {
 		return err
 	}
-	if err := host.Route(http.MethodPost, "/posts/{slug}/comments", p.handler.create); err != nil {
+	if err := host.RouteSlot("comments", http.MethodPost, "/posts/{slug}/comments", p.handler.create); err != nil {
 		return err
 	}
 	if err := host.AdminRoute(http.MethodGet, "/comments", p.handler.pending); err != nil {
@@ -74,5 +74,5 @@ func (p *ExternalPlugin) Register(host *extensions.Host) error {
 	}); err != nil {
 		return err
 	}
-	return host.Route(http.MethodGet, "/posts/{slug}/comments", p.handler.show)
+	return host.RouteSlot("comments", http.MethodGet, "/posts/{slug}/comments", p.handler.show)
 }
