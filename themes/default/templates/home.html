@@ -36,8 +36,9 @@
       <div class="article-list-items">
         {{range .Home.Recent}}
         <article class="article-card">
-          <div class="article-meta"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{if .ReadingTime}}<span>· {{.ReadingTime}} 分钟</span>{{end}}{{with .Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}</div>
+          <div class="article-meta"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{if .ReadingTime}}<span class="article-reading-time">· {{.ReadingTime}} 分钟</span>{{end}}{{with .Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}</div>
           <div class="article-card-content">
+            {{with .Cover}}<img class="article-card-cover" src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="lazy">{{end}}
             <h3><a href="{{.Path}}">{{.Title}}</a></h3>
             {{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}
           </div>

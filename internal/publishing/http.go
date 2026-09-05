@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/pagination"
 	adminweb "github.com/zhushilin/blog-project/web/admin"
@@ -37,6 +38,17 @@ type HTTPHandler struct {
 	siteNamer SiteNamer
 	logger    *slog.Logger
 	templates *template.Template
+	media     MediaPicker
+}
+
+type MediaPicker interface {
+	Items(context.Context) ([]media.Item, error)
+}
+
+type adminMediaOption struct {
+	ID    int64
+	Label string
+	URL   string
 }
 
 type contentDescriptor struct {
@@ -90,6 +102,8 @@ func NewHTTPHandler(service *Service, security AdminSecurity, siteNamer SiteName
 	}
 	return &HTTPHandler{service: service, security: security, siteNamer: siteNamer, logger: logger, templates: templates}, nil
 }
+
+func (h *HTTPHandler) SetMediaPicker(picker MediaPicker) { h.media = picker }
 
 func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/trash", h.trashList)
@@ -539,6 +553,14 @@ func (h *HTTPHandler) parseContentForm(w http.ResponseWriter, r *http.Request, k
 		SEOTitle: r.FormValue("seo_title"), SEODescription: r.FormValue("seo_description"),
 		BodyMarkdown: r.FormValue("body_markdown"),
 	}
+	if value := strings.TrimSpace(r.FormValue("cover_media_id")); value != "" {
+		coverMediaID, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || coverMediaID < 1 {
+			http.Error(w, "Invalid cover media", http.StatusBadRequest)
+			return DraftInput{}, false
+		}
+		input.CoverMediaID = coverMediaID
+	}
 	if kind == "article" {
 		if value := r.FormValue("category_id"); value != "" {
 			categoryID, err := strconv.ParseInt(value, 10, 64)
@@ -600,6 +622,7 @@ func (h *HTTPHandler) renderEditor(w http.ResponseWriter, r *http.Request, kind 
 		"WordCount":                    editorialWordCount(content.BodyMarkdown),
 		"ReadingMinutes":               editorialReadingMinutes(content.BodyMarkdown),
 		"AdminSection":                 kind + "s",
+		"MediaOptions":                 []adminMediaOption{},
 	}
 	var siteLocation *time.Location
 	if content.ID > 0 {
@@ -643,6 +666,21 @@ func (h *HTTPHandler) renderEditor(w http.ResponseWriter, r *http.Request, kind 
 		data["Categories"] = categories
 		data["Tags"] = tags
 	}
+	if h.media != nil {
+		items, err := h.media.Items(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		options := make([]adminMediaOption, 0, len(items))
+		for _, item := range items {
+			if item.MIMEType != "image/jpeg" && item.MIMEType != "image/png" {
+				continue
+			}
+			options = append(options, adminMediaOption{ID: item.ID, Label: item.OriginalName, URL: item.OriginalURL()})
+		}
+		data["MediaOptions"] = options
+	}
 	h.renderAdminWithStatus(w, r, "content_edit.html", data, status)
 }
 
@@ -655,7 +693,7 @@ func contentTagIDs(content Article) []int64 {
 }
 
 func postedContent(kind string, id, version int64, input DraftInput) Article {
-	content := Article{ID: id, Kind: kind, Title: input.Title, Slug: input.Slug, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, LockVersion: version}
+	content := Article{ID: id, Kind: kind, Title: input.Title, Slug: input.Slug, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, CoverMediaID: input.CoverMediaID, LockVersion: version}
 	if input.CategoryID > 0 {
 		content.Category = &organization.Category{ID: input.CategoryID}
 	}

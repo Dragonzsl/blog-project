@@ -166,8 +166,8 @@ func (r *Repository) SearchPage(ctx context.Context, query SearchQuery) (SearchP
 	if match == "" {
 		return SearchPage{}, ErrInvalidQuery
 	}
-	statement := `SELECT d.kind,d.path,d.title,d.excerpt,d.published_at
-		FROM search_documents d WHERE search_documents MATCH ?`
+	statement := `SELECT d.kind,d.path,d.title,d.excerpt,r.cover_media_public_id,d.published_at
+		FROM search_documents d JOIN contents c ON c.id=d.rowid JOIN content_revisions r ON r.id=c.published_revision_id WHERE search_documents MATCH ?`
 	args := []any{match}
 	statement, args = addSearchFilters(statement, args, query)
 	if query.Sort == "newest" {
@@ -217,8 +217,8 @@ func (r *Repository) searchCount(ctx context.Context, query SearchQuery, grams [
 
 func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams []string) ([]SearchResult, error) {
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(grams)), ",")
-	statement := `SELECT d.kind,d.path,d.title,d.excerpt,d.published_at
-		FROM search_documents d JOIN search_grams g ON g.content_id=d.rowid
+	statement := `SELECT d.kind,d.path,d.title,d.excerpt,r.cover_media_public_id,d.published_at
+		FROM search_documents d JOIN contents c ON c.id=d.rowid JOIN content_revisions r ON r.id=c.published_revision_id JOIN search_grams g ON g.content_id=d.rowid
 		WHERE g.gram IN (` + placeholders + `)`
 	args := make([]any, 0, len(grams)+4)
 	for _, gram := range grams {
@@ -268,7 +268,7 @@ func scanSearchResults(rows *sql.Rows, err error) ([]SearchResult, error) {
 	for rows.Next() {
 		var result SearchResult
 		var publishedAt int64
-		if err := rows.Scan(&result.Kind, &result.Path, &result.Title, &result.Excerpt, &publishedAt); err != nil {
+		if err := rows.Scan(&result.Kind, &result.Path, &result.Title, &result.Excerpt, &result.CoverMediaPublicID, &publishedAt); err != nil {
 			return nil, err
 		}
 		result.PublishedAt = time.UnixMilli(publishedAt).UTC()
@@ -280,7 +280,7 @@ func scanSearchResults(rows *sql.Rows, err error) ([]SearchResult, error) {
 func (r *Repository) Feed(ctx context.Context, limit int) ([]FeedItem, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT '/posts/' || c.published_slug,revision.title,revision.excerpt,
-		       c.published_at,revision.created_at
+		       revision.cover_media_public_id,c.published_at,revision.created_at
 		FROM contents c JOIN content_revisions revision ON revision.id=c.published_revision_id
 		WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
 		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`, limit)
@@ -292,7 +292,7 @@ func (r *Repository) Feed(ctx context.Context, limit int) ([]FeedItem, error) {
 	for rows.Next() {
 		var item FeedItem
 		var publishedAt, updatedAt int64
-		if err := rows.Scan(&item.Path, &item.Title, &item.Excerpt, &publishedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.Path, &item.Title, &item.Excerpt, &item.CoverMediaPublicID, &publishedAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.PublishedAt = time.UnixMilli(publishedAt).UTC()
@@ -347,7 +347,7 @@ func (r *Repository) ArchiveMonthPage(ctx context.Context, year, month int, requ
 	info := pagination.NewInfo(total, request)
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT '/posts/' || c.published_slug, revision.title, revision.excerpt,
-		       c.published_at
+		       revision.cover_media_public_id,c.published_at
 		FROM contents c
 		JOIN content_revisions revision ON revision.id=c.published_revision_id
 		WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
@@ -361,7 +361,7 @@ func (r *Repository) ArchiveMonthPage(ctx context.Context, year, month int, requ
 	for rows.Next() {
 		var result SearchResult
 		var publishedAt int64
-		if err := rows.Scan(&result.Path, &result.Title, &result.Excerpt, &publishedAt); err != nil {
+		if err := rows.Scan(&result.Path, &result.Title, &result.Excerpt, &result.CoverMediaPublicID, &publishedAt); err != nil {
 			return ArchivePage{}, fmt.Errorf("scan archive article: %w", err)
 		}
 		result.Kind = "article"

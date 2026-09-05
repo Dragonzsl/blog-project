@@ -30,6 +30,9 @@ func (ghostParser) Parse(data []byte, source string) ([]Item, []string, error) {
 		if strings.TrimSpace(asString(value["html"])) != "" || strings.TrimSpace(asString(value["mobiledoc"])) != "" {
 			warnings = append(warnings, "Ghost HTML/Mobiledoc converted to Markdown; every item is imported as a draft")
 		}
+		if image := firstString(value, "feature_image", "og_image"); image != "" && len(item.CoverMediaPublicID) == 0 {
+			warnings = append(warnings, "Ghost remote feature images are not downloaded; provide cover_media_public_id to preserve a local cover")
+		}
 		result = append(result, item)
 	})
 	return result, uniqueStrings(warnings), nil
@@ -82,6 +85,9 @@ func walkJSON(value any, collection string, visit func(map[string]any, string)) 
 
 func ghostItem(value map[string]any, collection string) Item {
 	item := Item{Kind: "article", SourceID: firstString(value, "uuid", "id", "slug"), Title: firstString(value, "title", "name"), Slug: importSlug(firstString(value, "slug", "title")), Excerpt: firstString(value, "custom_excerpt", "excerpt", "description"), SEOTitle: firstString(value, "meta_title"), SEODescription: firstString(value, "meta_description"), OriginalStatus: firstString(value, "status")}
+	if publicID, err := decodeCoverMediaPublicID(firstString(value, "cover_media_public_id", "cover_media_id")); err == nil {
+		item.CoverMediaPublicID = publicID
+	}
 	if collection == "pages" || strings.EqualFold(firstString(value, "type"), "page") {
 		item.Kind = "page"
 	}

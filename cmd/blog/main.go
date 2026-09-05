@@ -576,11 +576,14 @@ func archiveCommand(arguments []string) error {
 		if *archivePath == "" {
 			return fmt.Errorf("--archive is required")
 		}
-		created, err := contentarchive.Import(context.Background(), service, *archivePath)
+		result, err := contentarchive.ImportWithReport(context.Background(), service, *archivePath)
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "Content archive imported: %d drafts\n", created)
+		fmt.Fprintf(os.Stdout, "Content archive imported: %d drafts, %d conflicts\n", result.Created, result.Conflicts)
+		for _, warning := range result.Warnings {
+			fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
+		}
 		return nil
 	default:
 		return fmt.Errorf("usage: blog archive <export|verify|import> [options]")

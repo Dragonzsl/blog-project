@@ -16,17 +16,22 @@ var (
 )
 
 type Article struct {
-	ID                        int64
-	PublicID                  []byte
-	Kind                      string
-	Status                    string
-	Slug                      string
-	PublishedSlug             string
-	Title                     string
-	Excerpt                   string
-	SEOTitle                  string
-	SEODescription            string
-	BodyMarkdown              string
+	ID             int64
+	PublicID       []byte
+	Kind           string
+	Status         string
+	Slug           string
+	PublishedSlug  string
+	Title          string
+	Excerpt        string
+	SEOTitle       string
+	SEODescription string
+	BodyMarkdown   string
+	// CoverMediaID is used only by the admin/editor side of the application.
+	// Public views use the immutable cover snapshot below instead.
+	CoverMediaID              int64
+	CoverMediaPublicID        []byte
+	CoverSnapshotVersion      int
 	CurrentRevisionID         int64
 	PublishedRevisionID       int64
 	PublishedAt               *time.Time
@@ -103,6 +108,8 @@ type Revision struct {
 	SEOTitle                string
 	SEODescription          string
 	BodyMarkdown            string
+	CoverMediaPublicID      []byte
+	CoverSnapshotVersion    int
 	CategoryPublicID        []byte
 	TagPublicIDsJSON        string
 	Reason                  string
@@ -126,9 +133,14 @@ type DraftInput struct {
 	SEOTitle       string
 	SEODescription string
 	BodyMarkdown   string
-	CategoryID     int64
-	TagIDs         []int64
-	slugKey        string
+	CoverMediaID   int64
+	// CoverMediaPublicID is accepted by offline archive/import adapters. The
+	// repository resolves it inside the content write transaction and never
+	// exposes it to public templates.
+	CoverMediaPublicID []byte
+	CategoryID         int64
+	TagIDs             []int64
+	slugKey            string
 }
 
 type ValidationError struct {
@@ -138,15 +150,18 @@ type ValidationError struct {
 func (err ValidationError) Error() string { return err.Message }
 
 type revisionInput struct {
-	PublicID         []byte
-	Title            string
-	Slug             string
-	SlugKey          string
-	Excerpt          string
-	SEOTitle         string
-	SEODescription   string
-	BodyMarkdown     string
-	CategoryPublicID []byte
-	TagPublicIDsJSON string
-	Reason           string
+	PublicID             []byte
+	Title                string
+	Slug                 string
+	SlugKey              string
+	Excerpt              string
+	SEOTitle             string
+	SEODescription       string
+	BodyMarkdown         string
+	CoverMediaID         int64
+	CoverMediaPublicID   []byte
+	CoverSnapshotVersion int
+	CategoryPublicID     []byte
+	TagPublicIDsJSON     string
+	Reason               string
 }

@@ -29,10 +29,13 @@ func TestParsersReadWordPressGhostAndMarkdown(t *testing.T) {
 	if items[0].BodyMarkdown == "" || items[1].Kind != "page" {
 		t.Fatalf("Ghost items=%+v", items)
 	}
-	markdown := []byte("---\ntitle: Markdown 文章\nslug: markdown-post\ntags: Go, SQLite\n---\n\n正文。\n")
+	markdown := []byte("---\ntitle: Markdown 文章\nslug: markdown-post\ntags: Go, SQLite\ncover_media_public_id: 0102030405060708090a0b0c0d0e0f10\n---\n\n正文。\n")
 	items, _, err = Parse(FormatMarkdown, markdown, "one.md")
 	if err != nil || len(items) != 1 || items[0].Title != "Markdown 文章" || len(items[0].Tags) != 2 {
 		t.Fatalf("Markdown items=%+v err=%v", items, err)
+	}
+	if len(items[0].CoverMediaPublicID) != 16 || items[0].CoverMediaPublicID[0] != 1 {
+		t.Fatalf("Markdown cover=%x", items[0].CoverMediaPublicID)
 	}
 }
 

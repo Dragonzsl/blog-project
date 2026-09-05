@@ -1,4 +1,17 @@
 /* Stage six: adaptive navigation and compact reading layout. */
+
+/* Keep metadata units intact on narrow screens; flex wrapping may move an
+   entire item to the next line, but must not split a date or "分钟". */
+.article-meta time,
+.article-meta .article-reading-time,
+.article-meta a,
+.featured-card-meta time,
+.related-articles .article-reading-time,
+.taxonomy a,
+.comment-meta time {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 :root {
   --site-sidebar-expanded: 248px;
   --site-sidebar-collapsed: 76px;
@@ -136,6 +149,25 @@ html[data-toc-collapsed="true"] .article-toc-trigger {
   border: 0 !important;
   opacity: 0 !important;
   pointer-events: none !important;
+}
+
+/* Keep the action and its explanation separated on narrow comment forms. */
+.comments-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 18px;
+}
+
+.comments-form-actions button {
+  flex: 0 0 auto;
+}
+
+.comments-form-actions > span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: .78rem;
+  line-height: 1.5;
 }
 
 .back-to-top:hover,
@@ -773,6 +805,12 @@ html[data-sidebar-open] .back-to-top {
     margin-top: 18px;
   }
 
+  .comments-form-actions {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
+  }
+
   .taxonomy {
     gap: 6px;
   }
@@ -1116,4 +1154,31 @@ html[data-sidebar-open] .back-to-top {
   .article-toc-trigger {
     transition: none;
   }
+}
+
+.article-cover {
+  margin: 0 0 42px;
+}
+
+.article-cover img {
+  width: 100%;
+  max-height: 620px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  object-fit: cover;
+}
+
+.article-cover figcaption {
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: .75rem;
+}
+
+.article-card-cover {
+  width: 100%;
+  max-height: 180px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  object-fit: cover;
 }

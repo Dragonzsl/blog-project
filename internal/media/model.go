@@ -2,12 +2,18 @@ package media
 
 import (
 	"errors"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
+
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 )
 
 var (
 	ErrNotFound = errors.New("media not found")
 	ErrInUse    = errors.New("media is referenced by content")
+	ErrNotImage = errors.New("media item is not an image")
 )
 
 type Item struct {
@@ -36,6 +42,49 @@ type Variant struct {
 	SizeBytes   int64
 	ContentHash []byte
 	ObjectKey   string
+}
+
+// PublicView is the deliberately small media shape that may cross into public
+// templates, feeds, or extension responses. It contains URLs and presentation
+// metadata only; storage keys, hashes, and database ids stay private.
+type PublicView struct {
+	URL    string
+	Alt    string
+	Width  int
+	Height int
+	SrcSet string
+}
+
+func (item Item) PublicView() (PublicView, error) {
+	if !strings.HasPrefix(strings.ToLower(item.MIMEType), "image/") {
+		return PublicView{}, ErrNotImage
+	}
+	publicText := item.PublicIDText
+	if publicText == "" {
+		var err error
+		publicText, err = platformid.EncodePublicID(item.PublicID)
+		if err != nil {
+			return PublicView{}, ErrNotFound
+		}
+	}
+	name := url.PathEscape(item.OriginalName)
+	view := PublicView{
+		URL:    "/media/" + publicText + "/original/" + name,
+		Alt:    item.AltText,
+		Width:  item.Width,
+		Height: item.Height,
+	}
+	var sources []string
+	for _, variant := range item.Variants {
+		if variant.Width < 1 {
+			continue
+		}
+		sources = append(sources, "/media/"+publicText+"/"+variant.Key+"/"+name+" "+strconv.Itoa(variant.Width)+"w")
+	}
+	if len(sources) > 0 {
+		view.SrcSet = strings.Join(sources, ", ")
+	}
+	return view, nil
 }
 
 type Asset struct {

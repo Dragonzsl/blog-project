@@ -23,6 +23,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/discovery"
+	"github.com/zhushilin/blog-project/internal/media"
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/platform/database"
@@ -105,6 +106,11 @@ type HTTPHandler struct {
 	analytics    AnalyticsRecorder
 	features     FeatureProvider
 	clientIP     *clientip.Resolver
+	media        MediaQueries
+}
+
+type MediaQueries interface {
+	PublicItem(context.Context, []byte) (media.Item, error)
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
@@ -121,6 +127,8 @@ func (h *HTTPHandler) SetClientIPResolver(resolver *clientip.Resolver) {
 }
 
 func (h *HTTPHandler) SetFeatureProvider(provider FeatureProvider) { h.features = provider }
+
+func (h *HTTPHandler) SetMediaQueries(queries MediaQueries) { h.media = queries }
 
 func (h *HTTPHandler) currentTheme() *Theme {
 	if h.themeManager != nil {
@@ -187,7 +195,7 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		cards := articleCards(articleDataList(articles))
+		cards := h.articleCardsWithMedia(ctx, articles)
 		homeView := HomePageData{}
 		if len(cards) > 0 {
 			homeView.Featured = &cards[0]
@@ -212,7 +220,7 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 		if h.content != nil {
 			about, aboutErr := h.content.PublicPage(ctx, "about")
 			if aboutErr == nil {
-				homeView.About = toArticleCard(articleData(about))
+				homeView.About = toArticleCard(h.articleDataWithMedia(ctx, about))
 			} else if !errors.Is(aboutErr, publishing.ErrNotFound) {
 				return nil, "", aboutErr
 			}
@@ -262,7 +270,7 @@ func (h *HTTPHandler) articles(w http.ResponseWriter, r *http.Request) {
 		}
 		metadata := h.metadata(siteName, "文章 · "+siteName, "浏览"+siteName+"的全部公开文章。", basePath, "website", nil)
 		collection := CollectionView{
-			Title: "文章", Description: "按发布时间浏览所有公开文章。", Items: articleCards(articleDataList(page.Articles)),
+			Title: "文章", Description: "按发布时间浏览所有公开文章。", Items: h.articleCardsWithMedia(ctx, page.Articles),
 			Pagination:   paginationView(page.Pagination, func(number int) string { return pagePath("/articles", number) }),
 			CanonicalURL: h.absoluteURL("/articles"),
 		}
@@ -393,7 +401,7 @@ func (h *HTTPHandler) archiveMonth(w http.ResponseWriter, r *http.Request) {
 		metadata := h.metadata(siteName, title+" · "+siteName, "浏览"+title+"发布的公开文章。", basePath, "website", nil)
 		items := make([]ArticleCard, 0, len(page.Results))
 		for _, result := range page.Results {
-			items = append(items, articleCardFromSearchResult(result))
+			items = append(items, h.articleCardFromSearchResult(ctx, result))
 		}
 		collection := CollectionView{
 			Title:        title,
@@ -428,13 +436,13 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 			return nil, "", err
 		}
 		metadata := h.articleMetadata(siteName, article, path)
-		view := articleData(article)
+		view := h.articleDataWithMedia(ctx, article)
 		if article.Kind == "article" {
 			articleNavigation, err := h.content.PublicArticleNavigation(ctx, article.ID, 3)
 			if err != nil {
 				return nil, "", err
 			}
-			view = withArticleNavigation(view, articleNavigation)
+			view = h.withArticleNavigation(ctx, view, articleNavigation)
 		}
 		theme := h.currentTheme()
 		body, err := theme.RenderArticlePage(siteName, view, false, "", navigation, metadata)
@@ -464,7 +472,7 @@ func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
 		path := "/" + page.Slug
 		metadata := h.articleMetadata(siteName, page, path)
 		theme := h.currentTheme()
-		body, err := theme.RenderArticlePage(siteName, articleData(page), false, "", navigation, metadata)
+		body, err := theme.RenderArticlePage(siteName, h.articleDataWithMedia(ctx, page), false, "", navigation, metadata)
 		lastModified := ""
 		if page.PublishedRevisionAt != nil {
 			lastModified = page.PublishedRevisionAt.UTC().Format(http.TimeFormat)
@@ -529,7 +537,7 @@ func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, ki
 			"url": h.absoluteURL(basePath), "description": description,
 		})
 		theme := h.currentTheme()
-		collection := CollectionView{Title: title, Description: description, Items: articleCards(articleDataList(articles)), Pagination: paginationView(pageInfo, func(number int) string { return pagePath(basePath, number) }), CanonicalURL: h.absoluteURL(basePath)}
+		collection := CollectionView{Title: title, Description: description, Items: h.articleCardsWithMedia(ctx, articles), Pagination: paginationView(pageInfo, func(number int) string { return pagePath(basePath, number) }), CanonicalURL: h.absoluteURL(basePath)}
 		body, err := theme.RenderCollectionPage(siteName, collection, navigation, metadata)
 		lastModified := ""
 		if len(articles) > 0 && articles[0].PublishedRevisionAt != nil {
@@ -587,7 +595,7 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 				page.Total = results.Pagination.Total
 				page.Pagination = paginationView(results.Pagination, func(number int) string { return searchPageURL(query, kind, categoryRaw, tagRaw, sortOrder, number) })
 				for _, result := range results.Results {
-					card := articleCardFromSearchResult(result)
+					card := h.articleCardFromSearchResult(r.Context(), result)
 					card.HighlightedTitle = highlightText(result.Title, query)
 					card.HighlightedExcerpt = highlightText(result.Excerpt, query)
 					page.Results = append(page.Results, card)
@@ -636,11 +644,17 @@ type rssChannel struct {
 	Items         []rssItem `xml:"item"`
 }
 type rssItem struct {
-	Title       string  `xml:"title"`
-	Link        string  `xml:"link"`
-	Description string  `xml:"description"`
-	Published   string  `xml:"pubDate"`
-	GUID        rssGUID `xml:"guid"`
+	Title       string        `xml:"title"`
+	Link        string        `xml:"link"`
+	Description string        `xml:"description"`
+	Published   string        `xml:"pubDate"`
+	GUID        rssGUID       `xml:"guid"`
+	Enclosure   *rssEnclosure `xml:"enclosure,omitempty"`
+}
+type rssEnclosure struct {
+	URL    string `xml:"url,attr"`
+	Length int64  `xml:"length,attr"`
+	Type   string `xml:"type,attr"`
 }
 type rssGUID struct {
 	Permalink string `xml:"isPermaLink,attr"`
@@ -672,10 +686,18 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 			if description == "" {
 				description = item.Title
 			}
-			document.Channel.Items = append(document.Channel.Items, rssItem{
+			rssEntry := rssItem{
 				Title: item.Title, Link: absolute, Description: description,
 				Published: item.PublishedAt.Format(time.RFC1123Z), GUID: rssGUID{Permalink: "true", Value: absolute},
-			})
+			}
+			if h.media != nil && len(item.CoverMediaPublicID) > 0 {
+				if mediaItem, mediaErr := h.media.PublicItem(ctx, item.CoverMediaPublicID); mediaErr == nil {
+					if view, viewErr := mediaItem.PublicView(); viewErr == nil {
+						rssEntry.Enclosure = &rssEnclosure{URL: h.absoluteURL(view.URL), Length: mediaItem.SizeBytes, Type: mediaItem.MIMEType}
+					}
+				}
+			}
+			document.Channel.Items = append(document.Channel.Items, rssEntry)
 			if item.UpdatedAt.After(latest) {
 				latest = item.UpdatedAt
 			}
@@ -835,7 +857,7 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	body, err := h.currentTheme().RenderArticlePage(siteName, articleData(article), true, backURL, navigation, PageMetadata{NoIndex: true})
+	body, err := h.currentTheme().RenderArticlePage(siteName, h.articleDataWithMedia(r.Context(), article), true, backURL, navigation, PageMetadata{NoIndex: true})
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -1267,6 +1289,54 @@ func articleData(article publishing.Article) ArticleData {
 	return data
 }
 
+func (h *HTTPHandler) articleDataWithMedia(ctx context.Context, article publishing.Article) ArticleData {
+	data := articleData(article)
+	if h.media == nil || len(article.CoverMediaPublicID) == 0 {
+		return data
+	}
+	item, err := h.media.PublicItem(ctx, article.CoverMediaPublicID)
+	if err != nil {
+		h.logger.WarnContext(ctx, "resolve public cover media", "error", err)
+		return data
+	}
+	view, err := item.PublicView()
+	if err != nil {
+		h.logger.WarnContext(ctx, "build public cover media view", "error", err)
+		return data
+	}
+	data.Cover = &MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
+	return data
+}
+
+func (h *HTTPHandler) articleDataListWithMedia(ctx context.Context, articles []publishing.Article) []ArticleData {
+	result := make([]ArticleData, 0, len(articles))
+	for _, article := range articles {
+		result = append(result, h.articleDataWithMedia(ctx, article))
+	}
+	return result
+}
+
+func (h *HTTPHandler) articleCardsWithMedia(ctx context.Context, articles []publishing.Article) []ArticleCard {
+	return articleCards(h.articleDataListWithMedia(ctx, articles))
+}
+
+func (h *HTTPHandler) articleCardFromSearchResult(ctx context.Context, result discovery.SearchResult) ArticleCard {
+	card := articleCardFromSearchResult(result)
+	if h.media == nil || len(result.CoverMediaPublicID) == 0 {
+		return card
+	}
+	item, err := h.media.PublicItem(ctx, result.CoverMediaPublicID)
+	if err != nil {
+		h.logger.WarnContext(ctx, "resolve search cover media", "error", err)
+		return card
+	}
+	view, err := item.PublicView()
+	if err == nil {
+		card.Cover = &MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
+	}
+	return card
+}
+
 func articleDataList(articles []publishing.Article) []ArticleData {
 	result := make([]ArticleData, 0, len(articles))
 	for _, article := range articles {
@@ -1442,6 +1512,19 @@ func articleCardFromSearchResult(result discovery.SearchResult) ArticleCard {
 		PublishedAt: result.PublishedAt.Format("2006年01月02日"), PublishedISO: result.PublishedAt.Format(time.RFC3339),
 	}
 	return card
+}
+
+func (h *HTTPHandler) withArticleNavigation(ctx context.Context, data ArticleData, navigation publishing.PublicArticleNavigation) ArticleData {
+	if navigation.Previous != nil {
+		data.Previous = toArticleCard(h.articleDataWithMedia(ctx, *navigation.Previous))
+	}
+	if navigation.Next != nil {
+		data.Next = toArticleCard(h.articleDataWithMedia(ctx, *navigation.Next))
+	}
+	if len(navigation.Related) > 0 {
+		data.Related = h.articleCardsWithMedia(ctx, navigation.Related)
+	}
+	return data
 }
 
 func formatDate(value time.Time) string {

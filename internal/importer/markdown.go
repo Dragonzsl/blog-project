@@ -87,7 +87,9 @@ func parseMarkdownDocument(name string, data []byte) (Item, []string) {
 		end := strings.Index(text[4:], "\n---")
 		if end >= 0 {
 			frontmatter := text[4 : 4+end]
-			item = parseMarkdownFrontmatter(frontmatter)
+			var frontmatterWarnings []string
+			item, frontmatterWarnings = parseMarkdownFrontmatter(frontmatter)
+			warnings = append(warnings, frontmatterWarnings...)
 			item.BodyMarkdown = strings.TrimLeft(text[4+end+len("\n---"):], "\n")
 		}
 	}
@@ -114,8 +116,9 @@ func parseMarkdownDocument(name string, data []byte) (Item, []string) {
 	return item, warnings
 }
 
-func parseMarkdownFrontmatter(raw string) Item {
+func parseMarkdownFrontmatter(raw string) (Item, []string) {
 	item := Item{Kind: "article"}
+	var warnings []string
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -156,9 +159,15 @@ func parseMarkdownFrontmatter(raw string) Item {
 			if parsed, err := parseImportTime(value); err == nil {
 				item.PublishedAt = &parsed
 			}
+		case "cover_media_public_id", "cover_media_id", "cover":
+			if publicID, err := decodeCoverMediaPublicID(value); err == nil {
+				item.CoverMediaPublicID = publicID
+			} else {
+				warnings = append(warnings, "invalid cover media public ID was ignored")
+			}
 		}
 	}
-	return item
+	return item, warnings
 }
 
 func firstParagraph(body string) string {

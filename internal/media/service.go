@@ -236,6 +236,25 @@ func (s *Service) Items(ctx context.Context) ([]Item, error) {
 	return items, nil
 }
 
+// PublicItem resolves an immutable media public id for public rendering. The
+// returned item is still an internal value; callers should convert it with
+// Item.PublicView before exposing it outside the media module.
+func (s *Service) PublicItem(ctx context.Context, publicID []byte) (Item, error) {
+	item, err := s.repository.ItemByPublicID(ctx, publicID)
+	if err != nil {
+		return Item{}, err
+	}
+	item.PublicIDText, err = platformid.EncodePublicID(item.PublicID)
+	if err != nil {
+		return Item{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *Service) ItemByPublicID(ctx context.Context, publicID []byte) (Item, error) {
+	return s.PublicItem(ctx, publicID)
+}
+
 func (s *Service) Delete(ctx context.Context, id int64) error {
 	existing, err := s.repository.Item(ctx, id)
 	if err != nil {

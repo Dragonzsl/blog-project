@@ -38,16 +38,17 @@ type Manifest struct {
 }
 
 type Entry struct {
-	PublicID       string `json:"public_id"`
-	Kind           string `json:"kind"`
-	Title          string `json:"title"`
-	Slug           string `json:"slug"`
-	Excerpt        string `json:"excerpt"`
-	SEOTitle       string `json:"seo_title"`
-	SEODescription string `json:"seo_description"`
-	BodyPath       string `json:"body_path"`
-	BodySize       int64  `json:"body_size"`
-	BodySHA256     string `json:"body_sha256"`
+	PublicID           string `json:"public_id"`
+	Kind               string `json:"kind"`
+	Title              string `json:"title"`
+	Slug               string `json:"slug"`
+	Excerpt            string `json:"excerpt"`
+	SEOTitle           string `json:"seo_title"`
+	SEODescription     string `json:"seo_description"`
+	CoverMediaPublicID string `json:"cover_media_public_id,omitempty"`
+	BodyPath           string `json:"body_path"`
+	BodySize           int64  `json:"body_size"`
+	BodySHA256         string `json:"body_sha256"`
 }
 
 type Verified struct {
@@ -79,7 +80,14 @@ func Export(ctx context.Context, service *publishing.Service, output string) (Ma
 		}
 		bodyPath := "content/" + publicID + ".md"
 		hash := sha256.Sum256([]byte(item.BodyMarkdown))
-		manifest.Entries = append(manifest.Entries, Entry{PublicID: publicID, Kind: item.Kind, Title: item.Title, Slug: item.Slug, Excerpt: item.Excerpt, SEOTitle: item.SEOTitle, SEODescription: item.SEODescription, BodyPath: bodyPath, BodySize: int64(len(item.BodyMarkdown)), BodySHA256: hex.EncodeToString(hash[:])})
+		coverPublicID := ""
+		if len(item.CoverMediaPublicID) > 0 {
+			coverPublicID, err = platformid.EncodePublicID(item.CoverMediaPublicID)
+			if err != nil {
+				return Manifest{}, fmt.Errorf("encode cover media ID for %q: %w", item.Slug, err)
+			}
+		}
+		manifest.Entries = append(manifest.Entries, Entry{PublicID: publicID, Kind: item.Kind, Title: item.Title, Slug: item.Slug, Excerpt: item.Excerpt, SEOTitle: item.SEOTitle, SEODescription: item.SEODescription, CoverMediaPublicID: coverPublicID, BodyPath: bodyPath, BodySize: int64(len(item.BodyMarkdown)), BodySHA256: hex.EncodeToString(hash[:])})
 	}
 	if _, err := os.Lstat(output); err == nil {
 		return Manifest{}, errors.New("archive output already exists")
@@ -222,7 +230,7 @@ func Verify(ctx context.Context, archivePath string) (Verified, error) {
 		return Verified{}, errors.New("archive contains files not listed in manifest")
 	}
 	for _, expected := range manifest.Entries {
-		if _, err := platformid.DecodePublicID(expected.PublicID); err != nil || expected.Kind != "article" && expected.Kind != "page" || !safePath(expected.BodyPath) || expected.BodySize < 0 || expected.BodySize > maxFileSize || len(expected.BodySHA256) != sha256.Size*2 {
+		if _, err := platformid.DecodePublicID(expected.PublicID); err != nil || expected.Kind != "article" && expected.Kind != "page" || expected.CoverMediaPublicID != "" && !validPublicID(expected.CoverMediaPublicID) || !safePath(expected.BodyPath) || expected.BodySize < 0 || expected.BodySize > maxFileSize || len(expected.BodySHA256) != sha256.Size*2 {
 			return Verified{}, fmt.Errorf("invalid archive manifest entry")
 		}
 		file, ok := findZip(reader.File, expected.BodyPath)
@@ -247,50 +255,75 @@ func Verify(ctx context.Context, archivePath string) (Verified, error) {
 }
 
 func Import(ctx context.Context, service *publishing.Service, archivePath string) (int, error) {
+	report, err := ImportWithReport(ctx, service, archivePath)
+	return report.Created, err
+}
+
+type ImportReport struct {
+	Created   int
+	Conflicts int
+	Warnings  []string
+}
+
+func ImportWithReport(ctx context.Context, service *publishing.Service, archivePath string) (ImportReport, error) {
 	if service == nil {
-		return 0, errors.New("publishing service is required")
+		return ImportReport{}, errors.New("publishing service is required")
 	}
 	verified, err := Verify(ctx, archivePath)
 	if err != nil {
-		return 0, err
+		return ImportReport{}, err
 	}
 	file, err := os.Open(archivePath)
 	if err != nil {
-		return 0, err
+		return ImportReport{}, err
 	}
 	defer file.Close()
 	info, _ := file.Stat()
 	reader, err := zip.NewReader(file, info.Size())
 	if err != nil {
-		return 0, err
+		return ImportReport{}, err
 	}
-	created := 0
+	result := ImportReport{}
 	for _, entry := range verified.Manifest.Entries {
 		if err := ctx.Err(); err != nil {
-			return created, err
+			return result, err
+		}
+		var coverMediaPublicID []byte
+		if entry.CoverMediaPublicID != "" {
+			coverMediaPublicID, err = platformid.DecodePublicID(entry.CoverMediaPublicID)
+			if err != nil {
+				return result, err
+			}
+			if _, err := service.ResolveMediaPublicID(ctx, coverMediaPublicID); err != nil {
+				result.Conflicts++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("entry %q skipped: cover media %s is not available", entry.Slug, entry.CoverMediaPublicID))
+				continue
+			}
 		}
 		bodyFile, _ := findZip(reader.File, entry.BodyPath)
 		input, err := bodyFile.Open()
 		if err != nil {
-			return created, err
+			return result, err
 		}
 		body, err := io.ReadAll(io.LimitReader(input, maxFileSize+1))
 		input.Close()
 		if err != nil {
-			return created, err
+			return result, err
 		}
-		inputData := publishing.DraftInput{Title: entry.Title, Slug: entry.Slug, Excerpt: entry.Excerpt, SEOTitle: entry.SEOTitle, SEODescription: entry.SEODescription, BodyMarkdown: string(body)}
+		inputData := publishing.DraftInput{Title: entry.Title, Slug: entry.Slug, Excerpt: entry.Excerpt, SEOTitle: entry.SEOTitle, SEODescription: entry.SEODescription, BodyMarkdown: string(body), CoverMediaPublicID: coverMediaPublicID}
 		if entry.Kind == "page" {
 			_, err = service.CreatePageDraft(ctx, inputData)
 		} else {
 			_, err = service.CreateDraft(ctx, inputData)
 		}
 		if err != nil {
-			return created, err
+			result.Conflicts++
+			result.Warnings = append(result.Warnings, fmt.Sprintf("entry %q was not imported: %v", entry.Slug, err))
+			continue
 		}
-		created++
+		result.Created++
 	}
-	return created, nil
+	return result, nil
 }
 
 func findZip(files []*zip.File, name string) (*zip.File, bool) {
@@ -303,4 +336,9 @@ func findZip(files []*zip.File, name string) (*zip.File, bool) {
 }
 func safePath(value string) bool {
 	return value != "" && !strings.HasPrefix(value, "/") && !strings.Contains(value, "\\") && path.Clean(value) == value && !strings.HasPrefix(value, "../") && !strings.Contains(value, "\x00")
+}
+
+func validPublicID(value string) bool {
+	_, err := platformid.DecodePublicID(value)
+	return err == nil
 }

@@ -22,6 +22,7 @@ import (
 
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	platformslug "github.com/zhushilin/blog-project/internal/platform/slug"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
@@ -36,18 +37,19 @@ const (
 )
 
 type Item struct {
-	SourceID       string
-	Kind           string
-	Title          string
-	Slug           string
-	Excerpt        string
-	SEOTitle       string
-	SEODescription string
-	BodyMarkdown   string
-	Category       string
-	Tags           []string
-	OriginalStatus string
-	PublishedAt    *time.Time
+	SourceID           string
+	Kind               string
+	Title              string
+	Slug               string
+	Excerpt            string
+	SEOTitle           string
+	SEODescription     string
+	BodyMarkdown       string
+	CoverMediaPublicID []byte
+	Category           string
+	Tags               []string
+	OriginalStatus     string
+	PublishedAt        *time.Time
 }
 
 type ItemReport struct {
@@ -83,6 +85,14 @@ type Service struct {
 	content *publishing.Service
 	org     *organization.Service
 	now     func() time.Time
+}
+
+func decodeCoverMediaPublicID(value string) ([]byte, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	return platformid.DecodePublicID(value)
 }
 
 func NewService(db *database.DB, content *publishing.Service, org *organization.Service) *Service {
@@ -322,7 +332,7 @@ func (s *Service) ImportPath(ctx context.Context, format, input string, dryRun b
 			report.Items = append(report.Items, itemReport)
 			continue
 		}
-		input := publishing.DraftInput{Title: item.Title, Slug: item.Slug, Excerpt: item.Excerpt, SEOTitle: item.SEOTitle, SEODescription: item.SEODescription, BodyMarkdown: item.BodyMarkdown}
+		input := publishing.DraftInput{Title: item.Title, Slug: item.Slug, Excerpt: item.Excerpt, SEOTitle: item.SEOTitle, SEODescription: item.SEODescription, BodyMarkdown: item.BodyMarkdown, CoverMediaPublicID: item.CoverMediaPublicID}
 		if item.Kind == "article" && s.org != nil {
 			input.CategoryID = s.categoryID(ctx, item.Category, categoryCache, &report)
 			for _, tag := range item.Tags {

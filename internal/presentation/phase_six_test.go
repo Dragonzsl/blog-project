@@ -73,6 +73,10 @@ func TestStageSixAdaptiveReadingContracts(t *testing.T) {
 		`.public-sidebar .sidebar-nav`,
 		`overflow-y: auto`,
 		`.back-to-top`,
+		`.article-meta .article-reading-time`,
+		`.related-articles .article-reading-time`,
+		`.comments-form-actions`,
+		`white-space: nowrap`,
 	} {
 		if !strings.Contains(css, expected) {
 			t.Fatalf("stage six stylesheet missing %q", expected)

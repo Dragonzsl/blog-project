@@ -29,7 +29,7 @@
           <div class="article-meta">
             {{if and (ne .Article.Kind "page") .Article.PublishedAt}}<time datetime="{{.Article.PublishedISO}}">发布于 {{.Article.PublishedAt}}</time>{{end}}
             {{if .Article.UpdatedAt}}<time datetime="{{.Article.UpdatedISO}}">更新于 {{.Article.UpdatedAt}}</time>{{end}}
-            {{if .Article.ReadingTime}}<span>{{.Article.ReadingTime}} 分钟阅读</span>{{end}}
+            {{if .Article.ReadingTime}}<span class="article-reading-time">{{.Article.ReadingTime}} 分钟阅读</span>{{end}}
             {{if or .Article.Category .Article.Tags}}<div class="taxonomy">{{with .Article.Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}{{range .Article.Tags}}<a href="{{.URL}}"># {{.Name}}</a>{{end}}</div>{{end}}
           </div>
         </div>
@@ -37,6 +37,7 @@
       </header>
       <div class="article-layout">
       <div class="article-reading-column">
+      {{with .Article.Cover}}<figure class="article-cover"><img src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="eager"><figcaption>{{if .Alt}}{{.Alt}}{{else}}文章配图{{end}}</figcaption></figure>{{end}}
       <div class="prose">{{.Article.BodyHTML}}</div>
       <section class="article-actions" aria-label="文章操作">
         {{if .Meta.CanonicalURL}}<button type="button" class="action-button" data-copy-link="{{.Meta.CanonicalURL}}">复制链接</button>{{else}}<button type="button" class="action-button" data-copy-link="">复制链接</button>{{end}}
@@ -54,7 +55,7 @@
       <section class="related-articles" aria-labelledby="related-heading">
         <p class="kicker">Keep reading</p>
         <h2 id="related-heading">继续阅读</h2>
-        <div>{{range .Article.Related}}<a href="{{.Path}}"><span>{{if .Category}}{{.Category.Name}}{{else}}Essay{{end}}</span><strong>{{.Title}}</strong>{{if .ReadingTime}}<small>{{.ReadingTime}} 分钟阅读</small>{{end}}</a>{{end}}</div>
+        <div>{{range .Article.Related}}<a href="{{.Path}}"><span>{{if .Category}}{{.Category.Name}}{{else}}Essay{{end}}</span><strong>{{.Title}}</strong>{{if .ReadingTime}}<small class="article-reading-time">{{.ReadingTime}} 分钟阅读</small>{{end}}</a>{{end}}</div>
       </section>
       {{end}}
       {{if .Features.Comments}}{{template "comments_slot" .}}{{end}}

@@ -22,11 +22,12 @@ type SearchQuery struct {
 }
 
 type SearchResult struct {
-	Kind        string
-	Path        string
-	Title       string
-	Excerpt     string
-	PublishedAt time.Time
+	Kind               string
+	Path               string
+	Title              string
+	Excerpt            string
+	CoverMediaPublicID []byte
+	PublishedAt        time.Time
 }
 
 type SearchPage struct {
@@ -35,11 +36,12 @@ type SearchPage struct {
 }
 
 type FeedItem struct {
-	Path        string
-	Title       string
-	Excerpt     string
-	PublishedAt time.Time
-	UpdatedAt   time.Time
+	Path               string
+	Title              string
+	Excerpt            string
+	CoverMediaPublicID []byte
+	PublishedAt        time.Time
+	UpdatedAt          time.Time
 }
 
 type SitemapEntry struct {

@@ -41,13 +41,16 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 		return Article{}, fmt.Errorf("begin %s creation: %w", kind, err)
 	}
 	defer tx.Rollback()
+	if err := r.resolveCoverMediaTx(ctx, tx, &revision); err != nil {
+		return Article{}, err
+	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO contents (
-			public_id, kind, status, slug, slug_key, title, excerpt, seo_title, seo_description, body_markdown,
+			public_id, kind, status, slug, slug_key, title, excerpt, seo_title, seo_description, body_markdown, cover_media_id,
 			lock_version, created_at, updated_at
-		) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+		) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
 	`, publicID, kind, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt,
-		revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, millis(now), millis(now))
+		revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, nullableInt64(revision.CoverMediaID), millis(now), millis(now))
 	if err != nil {
 		return Article{}, mapWriteError(err)
 	}
@@ -63,7 +66,13 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 	} else {
 		revision.TagPublicIDsJSON = "[]"
 	}
-	if err := r.replaceMediaReferences(ctx, tx, contentID, revision.BodyMarkdown, now); err != nil {
+	coverPublicID, err := validateCoverMediaTx(ctx, tx, revision.CoverMediaID)
+	if err != nil {
+		return Article{}, err
+	}
+	revision.CoverMediaPublicID = coverPublicID
+	revision.CoverSnapshotVersion = 1
+	if err := r.replaceMediaReferences(ctx, tx, contentID, revision.BodyMarkdown, revision.CoverMediaID, now); err != nil {
 		return Article{}, err
 	}
 	revisionID, err := insertRevision(ctx, tx, contentID, 1, revision, now)
@@ -93,12 +102,13 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	defer tx.Rollback()
 	var currentSlugKey string
 	var currentVersion, nextRevision int64
+	var currentCoverID sql.NullInt64
 	var publicID []byte
 	err = tx.QueryRowContext(ctx, `
-		SELECT slug_key, lock_version, public_id,
+		SELECT slug_key, lock_version, public_id, cover_media_id,
 		       (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM content_revisions WHERE content_id = contents.id)
 		FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL
-	`, id, kind).Scan(&currentSlugKey, &currentVersion, &publicID, &nextRevision)
+	`, id, kind).Scan(&currentSlugKey, &currentVersion, &publicID, &currentCoverID, &nextRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrNotFound
 	}
@@ -121,7 +131,21 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	} else {
 		revision.TagPublicIDsJSON = "[]"
 	}
-	if err := r.replaceMediaReferences(ctx, tx, id, revision.BodyMarkdown, now); err != nil {
+	// A caller that omits the cover field for an older editor payload keeps the
+	// current cover. Explicit zero clears it.
+	if revision.CoverMediaID < 0 {
+		revision.CoverMediaID = currentCoverID.Int64
+	}
+	if err := r.resolveCoverMediaTx(ctx, tx, &revision); err != nil {
+		return Article{}, err
+	}
+	coverPublicID, err := validateCoverMediaTx(ctx, tx, revision.CoverMediaID)
+	if err != nil {
+		return Article{}, err
+	}
+	revision.CoverMediaPublicID = coverPublicID
+	revision.CoverSnapshotVersion = 1
+	if err := r.replaceMediaReferences(ctx, tx, id, revision.BodyMarkdown, revision.CoverMediaID, now); err != nil {
 		return Article{}, err
 	}
 	revisionID, err := insertRevision(ctx, tx, id, nextRevision, revision, now)
@@ -130,11 +154,11 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE contents
-		SET slug = ?, slug_key = ?, title = ?, excerpt = ?, seo_title = ?, seo_description = ?, body_markdown = ?,
+		SET slug = ?, slug_key = ?, title = ?, excerpt = ?, seo_title = ?, seo_description = ?, body_markdown = ?, cover_media_id = ?,
 		    current_revision_id = ?, lock_version = lock_version + 1, updated_at = ?
 		WHERE id = ? AND kind = ? AND lock_version = ?
 	`, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt, revision.SEOTitle,
-		revision.SEODescription, revision.BodyMarkdown, revisionID, millis(now), id, kind, expectedVersion)
+		revision.SEODescription, revision.BodyMarkdown, nullableInt64(revision.CoverMediaID), revisionID, millis(now), id, kind, expectedVersion)
 	if err != nil {
 		return Article{}, mapWriteError(err)
 	}
@@ -172,8 +196,9 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	var currentRevision, currentVersion int64
 	var publicID []byte
 	var slug, slugKey, bodyMarkdown string
+	var coverMediaID sql.NullInt64
 	var publishedSlug, publishedSlugKey sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug, slug_key, published_slug, published_slug_key, body_markdown FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &bodyMarkdown)
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug, slug_key, published_slug, published_slug_key, body_markdown, cover_media_id FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &bodyMarkdown, &coverMediaID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrNotFound
 	}
@@ -221,7 +246,7 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch = render_epoch + 1, updated_at = ? WHERE id = 1", millis(now)); err != nil {
 		return Article{}, fmt.Errorf("invalidate public rendering: %w", err)
 	}
-	if err := r.replaceMediaReferences(ctx, tx, id, bodyMarkdown, now); err != nil {
+	if err := r.replaceMediaReferences(ctx, tx, id, bodyMarkdown, coverMediaID.Int64, now); err != nil {
 		return Article{}, err
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".published", kind, publicID, now); err != nil {
@@ -263,6 +288,16 @@ func (r *Repository) PublicContentByID(ctx context.Context, kind string, id int6
 		return Article{}, err
 	}
 	return r.enrichPublishedTaxonomy(ctx, content)
+}
+
+func (r *Repository) MediaIDByPublicID(ctx context.Context, publicID []byte) (int64, error) {
+	var id int64
+	if err := r.database.Reader.QueryRowContext(ctx, "SELECT id FROM media WHERE public_id=?", publicID).Scan(&id); errors.Is(err, sql.ErrNoRows) {
+		return 0, ValidationError{Message: "修订版本引用的封面媒体不存在"}
+	} else if err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (r *Repository) Contents(ctx context.Context, kind string) ([]Article, error) {
@@ -572,17 +607,18 @@ func (r *Repository) enrichTaxonomy(ctx context.Context, content Article) (Artic
 
 const contentSelect = `
 	SELECT c.id, c.public_id, c.kind, c.status, c.slug, COALESCE(c.published_slug,''), c.title, c.excerpt, c.seo_title, c.seo_description, c.body_markdown,
-	       NULL, NULL,
+	       c.cover_media_id, current_revision.cover_media_public_id, current_revision.cover_snapshot_version, NULL, NULL,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
 	       c.scheduled_at, c.withdrawn_at, c.trashed_at,
 	       c.lock_version, c.created_at, c.updated_at
-	FROM contents c`
+	FROM contents c
+	LEFT JOIN content_revisions current_revision ON current_revision.id = c.current_revision_id`
 
 const publicContentSelect = `
 	SELECT c.id, c.public_id, c.kind, c.status, c.published_slug, c.published_slug,
 	       r.title, r.excerpt, r.seo_title, r.seo_description, r.body_markdown,
-	       r.category_public_id, r.tag_public_ids_json,
+	       NULL, r.cover_media_public_id, r.cover_snapshot_version, r.category_public_id, r.tag_public_ids_json,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       r.created_at, c.scheduled_at, c.withdrawn_at, c.trashed_at,
 	       c.lock_version, c.created_at, c.updated_at
@@ -595,6 +631,8 @@ func scanContent(row scanner) (Article, error) {
 	var content Article
 	var currentRevision, publishedRevision sql.NullInt64
 	var publishedAt, publishedRevisionAt, scheduledAt, withdrawnAt, trashedAt sql.NullInt64
+	var currentCoverID, coverSnapshotVersion sql.NullInt64
+	var coverMediaPublicID []byte
 	var publishedCategoryPublicID []byte
 	var publishedTagPublicIDsJSON sql.NullString
 	var createdAt, updatedAt int64
@@ -602,7 +640,7 @@ func scanContent(row scanner) (Article, error) {
 		&content.ID, &content.PublicID, &content.Kind, &content.Status, &content.Slug,
 		&content.PublishedSlug,
 		&content.Title, &content.Excerpt, &content.SEOTitle, &content.SEODescription, &content.BodyMarkdown,
-		&publishedCategoryPublicID, &publishedTagPublicIDsJSON,
+		&currentCoverID, &coverMediaPublicID, &coverSnapshotVersion, &publishedCategoryPublicID, &publishedTagPublicIDsJSON,
 		&currentRevision, &publishedRevision, &publishedAt, &publishedRevisionAt,
 		&scheduledAt, &withdrawnAt, &trashedAt,
 		&content.LockVersion, &createdAt, &updatedAt,
@@ -614,6 +652,9 @@ func scanContent(row scanner) (Article, error) {
 		return Article{}, fmt.Errorf("scan content: %w", err)
 	}
 	content.CurrentRevisionID = currentRevision.Int64
+	content.CoverMediaID = currentCoverID.Int64
+	content.CoverMediaPublicID = coverMediaPublicID
+	content.CoverSnapshotVersion = int(coverSnapshotVersion.Int64)
 	content.publishedCategoryPublicID = publishedCategoryPublicID
 	content.publishedTagPublicIDsJSON = publishedTagPublicIDsJSON.String
 	content.PublishedRevisionID = publishedRevision.Int64
@@ -659,10 +700,10 @@ func insertRevision(ctx context.Context, tx *sql.Tx, contentID, revisionNumber i
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO content_revisions (
 			public_id, content_id, revision_number, title, slug, excerpt, seo_title, seo_description,
-			body_markdown, reason, category_public_id, tag_public_ids_json, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			body_markdown, cover_media_public_id, cover_snapshot_version, reason, category_public_id, tag_public_ids_json, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, revision.PublicID, contentID, revisionNumber, revision.Title, revision.Slug,
-		revision.Excerpt, revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, revision.Reason, nullableBytes(revision.CategoryPublicID),
+		revision.Excerpt, revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, nullableBytes(revision.CoverMediaPublicID), revision.CoverSnapshotVersion, revision.Reason, nullableBytes(revision.CategoryPublicID),
 		revision.TagPublicIDsJSON, millis(now))
 	if err != nil {
 		return 0, fmt.Errorf("save content revision: %w", err)
@@ -740,13 +781,55 @@ func nullableBytes(value []byte) any {
 	return value
 }
 
-func (r *Repository) replaceMediaReferences(ctx context.Context, tx *sql.Tx, contentID int64, markdown string, now time.Time) error {
-	err := r.mediaReferences.ReplaceBodyReferencesTx(ctx, tx, contentID, markdown, now)
+func (r *Repository) replaceMediaReferences(ctx context.Context, tx *sql.Tx, contentID int64, markdown string, coverMediaID int64, now time.Time) error {
+	err := r.mediaReferences.ReplaceReferencesTx(ctx, tx, contentID, markdown, coverMediaID, now)
 	var validation media.ValidationError
 	if errors.As(err, &validation) {
 		return ValidationError{Message: validation.Message}
 	}
 	return err
+}
+
+func validateCoverMediaTx(ctx context.Context, tx *sql.Tx, mediaID int64) ([]byte, error) {
+	if mediaID == 0 {
+		return nil, nil
+	}
+	if mediaID < 0 {
+		return nil, ValidationError{Message: "封面媒体无效"}
+	}
+	var publicID []byte
+	var mimeType string
+	if err := tx.QueryRowContext(ctx, "SELECT public_id,mime_type FROM media WHERE id=?", mediaID).Scan(&publicID, &mimeType); errors.Is(err, sql.ErrNoRows) {
+		return nil, ValidationError{Message: "封面媒体不存在"}
+	} else if err != nil {
+		return nil, err
+	}
+	if mimeType != "image/jpeg" && mimeType != "image/png" {
+		return nil, ValidationError{Message: "封面只能使用 JPEG 或 PNG 图片"}
+	}
+	return publicID, nil
+}
+
+func (r *Repository) resolveCoverMediaTx(ctx context.Context, tx *sql.Tx, revision *revisionInput) error {
+	if revision == nil || len(revision.CoverMediaPublicID) == 0 {
+		return nil
+	}
+	if len(revision.CoverMediaPublicID) != 16 {
+		return ValidationError{Message: "封面媒体公共 ID 无效"}
+	}
+	var mediaID int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM media WHERE public_id=?", revision.CoverMediaPublicID).Scan(&mediaID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ValidationError{Message: "封面媒体不存在"}
+	}
+	if err != nil {
+		return err
+	}
+	if revision.CoverMediaID > 0 && revision.CoverMediaID != mediaID {
+		return ValidationError{Message: "封面媒体引用不一致"}
+	}
+	revision.CoverMediaID = mediaID
+	return nil
 }
 
 func mapWriteError(err error) error {

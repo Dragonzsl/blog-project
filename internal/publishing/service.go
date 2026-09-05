@@ -103,15 +103,17 @@ func (s *Service) createDraft(ctx context.Context, kind string, input DraftInput
 			}
 		}
 		article, createErr := s.repository.CreateDraft(ctx, kind, contentPublicID, revisionInput{
-			PublicID:       revisionPublicID,
-			Title:          candidate.Title,
-			Slug:           candidate.Slug,
-			SlugKey:        candidate.slugKey,
-			Excerpt:        candidate.Excerpt,
-			SEOTitle:       candidate.SEOTitle,
-			SEODescription: candidate.SEODescription,
-			BodyMarkdown:   candidate.BodyMarkdown,
-			Reason:         "create",
+			PublicID:           revisionPublicID,
+			Title:              candidate.Title,
+			Slug:               candidate.Slug,
+			SlugKey:            candidate.slugKey,
+			Excerpt:            candidate.Excerpt,
+			SEOTitle:           candidate.SEOTitle,
+			SEODescription:     candidate.SEODescription,
+			BodyMarkdown:       candidate.BodyMarkdown,
+			CoverMediaID:       candidate.CoverMediaID,
+			CoverMediaPublicID: candidate.CoverMediaPublicID,
+			Reason:             "create",
 		}, candidate.CategoryID, candidate.TagIDs, now)
 		if createErr == nil || !input.AutoSlug || !errors.Is(createErr, ErrSlugUnavailable) {
 			return article, createErr
@@ -150,15 +152,17 @@ func (s *Service) updateDraft(ctx context.Context, kind string, id, expectedVers
 			}
 		}
 		article, updateErr := s.repository.UpdateDraft(ctx, kind, id, expectedVersion, revisionInput{
-			PublicID:       revisionPublicID,
-			Title:          candidate.Title,
-			Slug:           candidate.Slug,
-			SlugKey:        candidate.slugKey,
-			Excerpt:        candidate.Excerpt,
-			SEOTitle:       candidate.SEOTitle,
-			SEODescription: candidate.SEODescription,
-			BodyMarkdown:   candidate.BodyMarkdown,
-			Reason:         "save",
+			PublicID:           revisionPublicID,
+			Title:              candidate.Title,
+			Slug:               candidate.Slug,
+			SlugKey:            candidate.slugKey,
+			Excerpt:            candidate.Excerpt,
+			SEOTitle:           candidate.SEOTitle,
+			SEODescription:     candidate.SEODescription,
+			BodyMarkdown:       candidate.BodyMarkdown,
+			CoverMediaID:       candidate.CoverMediaID,
+			CoverMediaPublicID: candidate.CoverMediaPublicID,
+			Reason:             "save",
 		}, candidate.CategoryID, candidate.TagIDs, now, s.options.RevisionLimit)
 		if updateErr == nil || !input.AutoSlug || !errors.Is(updateErr, ErrSlugUnavailable) {
 			return article, updateErr
@@ -232,6 +236,16 @@ func (s *Service) Articles(ctx context.Context) ([]Article, error) {
 
 func (s *Service) Pages(ctx context.Context) ([]Article, error) {
 	return s.repository.Contents(ctx, "page")
+}
+
+// ResolveMediaPublicID validates an archive/import cover reference without
+// exposing the media table to adapters. The final content write resolves the
+// same public ID again inside its transaction.
+func (s *Service) ResolveMediaPublicID(ctx context.Context, publicID []byte) (int64, error) {
+	if len(publicID) != 16 {
+		return 0, ValidationError{Message: "封面媒体公共 ID 无效"}
+	}
+	return s.repository.MediaIDByPublicID(ctx, publicID)
 }
 
 func (s *Service) TrashedContents(ctx context.Context) ([]Article, error) {
@@ -384,7 +398,17 @@ func (s *Service) RestoreRevision(ctx context.Context, kind string, contentID, r
 	if err != nil {
 		return Article{}, err
 	}
-	input := DraftInput{Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, SEOTitle: revision.SEOTitle, SEODescription: revision.SEODescription, BodyMarkdown: revision.BodyMarkdown}
+	coverMediaID := current.CoverMediaID
+	if revision.CoverSnapshotVersion > 0 {
+		coverMediaID = 0
+		if len(revision.CoverMediaPublicID) > 0 {
+			coverMediaID, err = s.repository.MediaIDByPublicID(ctx, revision.CoverMediaPublicID)
+			if err != nil {
+				return Article{}, err
+			}
+		}
+	}
+	input := DraftInput{Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, SEOTitle: revision.SEOTitle, SEODescription: revision.SEODescription, BodyMarkdown: revision.BodyMarkdown, CoverMediaID: coverMediaID}
 	if current.PublishedRevisionID > 0 {
 		input.Slug = current.Slug
 	}
@@ -403,7 +427,7 @@ func (s *Service) RestoreRevision(ctx context.Context, kind string, contentID, r
 	if err != nil {
 		return Article{}, err
 	}
-	return s.repository.UpdateDraft(ctx, kind, contentID, expectedVersion, revisionInput{PublicID: publicID, Title: input.Title, Slug: input.Slug, SlugKey: input.slugKey, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, Reason: "restore"}, input.CategoryID, input.TagIDs, now, s.options.RevisionLimit)
+	return s.repository.UpdateDraft(ctx, kind, contentID, expectedVersion, revisionInput{PublicID: publicID, Title: input.Title, Slug: input.Slug, SlugKey: input.slugKey, Excerpt: input.Excerpt, SEOTitle: input.SEOTitle, SEODescription: input.SEODescription, BodyMarkdown: input.BodyMarkdown, CoverMediaID: input.CoverMediaID, Reason: "restore"}, input.CategoryID, input.TagIDs, now, s.options.RevisionLimit)
 }
 
 func (s *Service) SaveEditingSnapshot(ctx context.Context, kind string, snapshot EditingSnapshot) error {
@@ -509,6 +533,9 @@ func validateSnapshotInput(kind string, input DraftInput) error {
 	}
 	if input.CategoryID < 0 {
 		return ValidationError{Message: "编辑快照分类无效"}
+	}
+	if input.CoverMediaID < 0 {
+		return ValidationError{Message: "编辑快照封面无效"}
 	}
 	for _, tagID := range input.TagIDs {
 		if tagID < 1 {
@@ -625,6 +652,12 @@ func validateInput(kind string, input DraftInput) (DraftInput, error) {
 	}
 	if !utf8.ValidString(input.BodyMarkdown) || len(input.BodyMarkdown) > 2<<20 {
 		return DraftInput{}, ValidationError{Message: "Markdown 正文不能超过 2 MiB"}
+	}
+	if input.CoverMediaID < 0 {
+		return DraftInput{}, ValidationError{Message: "封面媒体无效"}
+	}
+	if len(input.CoverMediaPublicID) > 0 && len(input.CoverMediaPublicID) != 16 {
+		return DraftInput{}, ValidationError{Message: "封面媒体公共 ID 无效"}
 	}
 	if kind == "page" && (input.CategoryID != 0 || len(input.TagIDs) != 0) {
 		return DraftInput{}, ValidationError{Message: "页面不能使用文章分类或标签"}

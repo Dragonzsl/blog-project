@@ -15,6 +15,7 @@ func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
 		       revision.title, revision.slug, revision.excerpt, '', '', '',
+		       revision.cover_media_public_id, revision.cover_snapshot_version,
 		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
 		       revision.is_publication_checkpoint, revision.created_at
 		FROM content_revisions revision
@@ -46,6 +47,7 @@ func (r *Repository) Revision(ctx context.Context, kind string, contentID, revis
 	revision, err := scanRevision(r.database.Reader.QueryRowContext(ctx, `
 		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
 		       revision.title, revision.slug, revision.excerpt, revision.seo_title, revision.seo_description, revision.body_markdown,
+		       revision.cover_media_public_id, revision.cover_snapshot_version,
 		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
 		       revision.is_publication_checkpoint, revision.created_at
 		FROM content_revisions revision
@@ -59,12 +61,15 @@ func (r *Repository) Revision(ctx context.Context, kind string, contentID, revis
 
 func scanRevision(row scanner) (Revision, error) {
 	var revision Revision
+	var coverSnapshotVersion sql.NullInt64
+	var coverMediaPublicID []byte
 	var categoryPublicID []byte
 	var tagPublicIDs sql.NullString
 	var checkpoint bool
 	var createdAt int64
 	err := row.Scan(&revision.ID, &revision.PublicID, &revision.ContentID, &revision.Number,
 		&revision.Title, &revision.Slug, &revision.Excerpt, &revision.SEOTitle, &revision.SEODescription, &revision.BodyMarkdown,
+		&coverMediaPublicID, &coverSnapshotVersion,
 		&categoryPublicID, &tagPublicIDs, &revision.Reason, &checkpoint, &createdAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Revision{}, ErrNotFound
@@ -73,6 +78,8 @@ func scanRevision(row scanner) (Revision, error) {
 		return Revision{}, fmt.Errorf("scan content revision: %w", err)
 	}
 	revision.CategoryPublicID = categoryPublicID
+	revision.CoverMediaPublicID = coverMediaPublicID
+	revision.CoverSnapshotVersion = int(coverSnapshotVersion.Int64)
 	revision.TagPublicIDsJSON = tagPublicIDs.String
 	revision.IsPublicationCheckpoint = checkpoint
 	revision.CreatedAt = fromMillis(createdAt)
@@ -87,9 +94,9 @@ func (r *Repository) SaveEditingSnapshot(ctx context.Context, kind string, snaps
 	result, err := r.database.Writer.ExecContext(ctx, `
 		INSERT INTO editing_snapshots (
 			content_id, base_lock_version, browser_version, title, slug, excerpt,
-			seo_title, seo_description, body_markdown, category_id, tag_ids_json, updated_at
+			seo_title, seo_description, body_markdown, cover_media_id, category_id, tag_ids_json, updated_at
 		)
-		SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+		SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 		FROM contents
 		WHERE id = ? AND kind = ? AND lock_version = ? AND trashed_at IS NULL
 		ON CONFLICT(content_id) DO UPDATE SET
@@ -97,13 +104,13 @@ func (r *Repository) SaveEditingSnapshot(ctx context.Context, kind string, snaps
 			browser_version=excluded.browser_version,
 			title=excluded.title, slug=excluded.slug, excerpt=excluded.excerpt,
 			seo_title=excluded.seo_title, seo_description=excluded.seo_description,
-			body_markdown=excluded.body_markdown, category_id=excluded.category_id,
+			body_markdown=excluded.body_markdown, cover_media_id=excluded.cover_media_id, category_id=excluded.category_id,
 			tag_ids_json=excluded.tag_ids_json, updated_at=excluded.updated_at
 		WHERE editing_snapshots.base_lock_version < excluded.base_lock_version
 		   OR (editing_snapshots.base_lock_version = excluded.base_lock_version
 		       AND editing_snapshots.browser_version < excluded.browser_version)`,
 		snapshot.BaseLockVersion, snapshot.BrowserVersion, snapshot.Input.Title, snapshot.Input.Slug,
-		snapshot.Input.Excerpt, snapshot.Input.SEOTitle, snapshot.Input.SEODescription, snapshot.Input.BodyMarkdown, nullableInt64(snapshot.Input.CategoryID),
+		snapshot.Input.Excerpt, snapshot.Input.SEOTitle, snapshot.Input.SEODescription, snapshot.Input.BodyMarkdown, nullableInt64(snapshot.Input.CoverMediaID), nullableInt64(snapshot.Input.CategoryID),
 		string(tagIDs), millis(now), snapshot.ContentID, kind, snapshot.BaseLockVersion)
 	if err != nil {
 		return fmt.Errorf("save editing snapshot: %w", err)
@@ -120,25 +127,27 @@ func (r *Repository) SaveEditingSnapshot(ctx context.Context, kind string, snaps
 
 func (r *Repository) EditingSnapshot(ctx context.Context, kind string, contentID int64) (EditingSnapshot, error) {
 	var snapshot EditingSnapshot
+	var coverMediaID sql.NullInt64
 	var categoryID sql.NullInt64
 	var tagIDsJSON string
 	var updatedAt int64
 	err := r.database.Reader.QueryRowContext(ctx, `
 		SELECT snapshot.content_id, snapshot.base_lock_version, snapshot.browser_version,
 		       snapshot.title, snapshot.slug, snapshot.excerpt, snapshot.seo_title, snapshot.seo_description, snapshot.body_markdown,
-		       snapshot.category_id, snapshot.tag_ids_json, snapshot.updated_at
+		       snapshot.cover_media_id, snapshot.category_id, snapshot.tag_ids_json, snapshot.updated_at
 		FROM editing_snapshots snapshot
 		JOIN contents content ON content.id = snapshot.content_id
 		WHERE snapshot.content_id = ? AND content.kind = ? AND content.trashed_at IS NULL`, contentID, kind).Scan(
 		&snapshot.ContentID, &snapshot.BaseLockVersion, &snapshot.BrowserVersion,
 		&snapshot.Input.Title, &snapshot.Input.Slug, &snapshot.Input.Excerpt,
-		&snapshot.Input.SEOTitle, &snapshot.Input.SEODescription, &snapshot.Input.BodyMarkdown, &categoryID, &tagIDsJSON, &updatedAt)
+		&snapshot.Input.SEOTitle, &snapshot.Input.SEODescription, &snapshot.Input.BodyMarkdown, &coverMediaID, &categoryID, &tagIDsJSON, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EditingSnapshot{}, ErrNotFound
 	}
 	if err != nil {
 		return EditingSnapshot{}, fmt.Errorf("read editing snapshot: %w", err)
 	}
+	snapshot.Input.CoverMediaID = coverMediaID.Int64
 	snapshot.Input.CategoryID = categoryID.Int64
 	if err := json.Unmarshal([]byte(tagIDsJSON), &snapshot.Input.TagIDs); err != nil {
 		return EditingSnapshot{}, fmt.Errorf("decode editing snapshot tags: %w", err)
@@ -189,8 +198,9 @@ func (r *Repository) Unpublish(ctx context.Context, kind string, id, expectedVer
 	}
 	defer tx.Rollback()
 	var status, body string
+	var coverMediaID sql.NullInt64
 	var publicID []byte
-	if err := tx.QueryRowContext(ctx, `SELECT status,public_id,body_markdown FROM contents WHERE id=? AND kind=? AND lock_version=? AND trashed_at IS NULL`, id, kind, expectedVersion).Scan(&status, &publicID, &body); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT status,public_id,body_markdown,cover_media_id FROM contents WHERE id=? AND kind=? AND lock_version=? AND trashed_at IS NULL`, id, kind, expectedVersion).Scan(&status, &publicID, &body, &coverMediaID); errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrConflict
 	} else if err != nil {
 		return Article{}, err
@@ -211,7 +221,7 @@ func (r *Repository) Unpublish(ctx context.Context, kind string, id, expectedVer
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
 		return Article{}, err
 	}
-	if err := r.replaceMediaReferences(ctx, tx, id, body, now); err != nil {
+	if err := r.replaceMediaReferences(ctx, tx, id, body, coverMediaID.Int64, now); err != nil {
 		return Article{}, err
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".unpublished", kind, publicID, now); err != nil {
@@ -372,9 +382,10 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	var revisionID int64
 	var publicID []byte
 	var body, slug, slugKey string
+	var coverMediaID sql.NullInt64
 	var publishedSlug, publishedSlugKey sql.NullString
 	var scheduledAt, lockVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,slug,slug_key,published_slug,published_slug_key,scheduled_at,lock_version FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &scheduledAt, &lockVersion)
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,cover_media_id,slug,slug_key,published_slug,published_slug_key,scheduled_at,lock_version FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &coverMediaID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &scheduledAt, &lockVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -408,7 +419,7 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
 		return false, err
 	}
-	if err := r.replaceMediaReferences(ctx, tx, id, body, now); err != nil {
+	if err := r.replaceMediaReferences(ctx, tx, id, body, coverMediaID.Int64, now); err != nil {
 		return false, err
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".scheduled_published", kind, publicID, now); err != nil {
