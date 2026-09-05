@@ -8,6 +8,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,12 +19,28 @@ import (
 )
 
 type Service struct {
-	repository *Repository
-	now        func() time.Time
+	repository     *Repository
+	database       *database.DB
+	now            func() time.Time
+	cacheMu        sync.RWMutex
+	cacheEpoch     int64
+	categories     []PublicCategorySummary
+	tags           []PublicTagSummary
+	taxonomyReady  bool
+	taxonomyFlight *publicTaxonomyFlight
+	navigation     map[string][]NavigationItem
+}
+
+type publicTaxonomyFlight struct {
+	epoch      int64
+	done       chan struct{}
+	categories []PublicCategorySummary
+	tags       []PublicTagSummary
+	err        error
 }
 
 func NewService(db *database.DB) *Service {
-	return &Service{repository: NewRepository(db), now: func() time.Time { return time.Now().UTC() }}
+	return &Service{repository: NewRepository(db), database: db, now: func() time.Time { return time.Now().UTC() }, navigation: make(map[string][]NavigationItem)}
 }
 
 func (s *Service) Categories(ctx context.Context) ([]Category, error) {
@@ -32,11 +49,134 @@ func (s *Service) Categories(ctx context.Context) ([]Category, error) {
 func (s *Service) Tags(ctx context.Context) ([]Tag, error) { return s.repository.Tags(ctx) }
 
 func (s *Service) PublicCategories(ctx context.Context) ([]PublicCategorySummary, error) {
-	return s.repository.PublicCategories(ctx)
+	categories, _, err := s.publicTaxonomySnapshot(ctx)
+	return categories, err
 }
 
 func (s *Service) PublicTags(ctx context.Context) ([]PublicTagSummary, error) {
-	return s.repository.PublicTags(ctx)
+	_, tags, err := s.publicTaxonomySnapshot(ctx)
+	return tags, err
+}
+
+// publicTaxonomySnapshot loads both public term lists together. The source
+// repository already provides bounded queries; this shared, epoch-scoped
+// flight prevents the first home/search/directory requests after an epoch
+// change from repeating the same category and tag scans.
+func (s *Service) publicTaxonomySnapshot(ctx context.Context) ([]PublicCategorySummary, []PublicTagSummary, error) {
+	for {
+		epoch := s.database.RenderEpoch()
+		s.cacheMu.Lock()
+		if s.cacheEpoch == epoch && s.taxonomyReady {
+			categories := clonePublicCategories(s.categories)
+			tags := clonePublicTags(s.tags)
+			s.cacheMu.Unlock()
+			return categories, tags, nil
+		}
+		if flight := s.taxonomyFlight; flight != nil {
+			done := flight.done
+			matchingEpoch := flight.epoch == epoch
+			s.cacheMu.Unlock()
+			select {
+			case <-done:
+				if !matchingEpoch {
+					continue
+				}
+				if flight.err != nil {
+					return nil, nil, flight.err
+				}
+				return clonePublicCategories(flight.categories), clonePublicTags(flight.tags), nil
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+		flight := &publicTaxonomyFlight{epoch: epoch, done: make(chan struct{})}
+		s.taxonomyFlight = flight
+		s.cacheMu.Unlock()
+
+		loadContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		categories, loadErr := s.repository.PublicCategories(loadContext)
+		var tags []PublicTagSummary
+		if loadErr == nil {
+			tags, loadErr = s.repository.PublicTags(loadContext)
+		}
+		cancel()
+		s.cacheMu.Lock()
+		if loadErr == nil {
+			categoryCacheable := publicCategoryCacheSize(categories) <= publicTaxonomyCacheMaxBytes
+			tagCacheable := publicTagCacheSize(tags) <= publicTaxonomyCacheMaxBytes
+			if epoch == s.database.RenderEpoch() && categoryCacheable && tagCacheable {
+				if s.cacheEpoch != epoch {
+					s.categories, s.tags = nil, nil
+					s.navigation = make(map[string][]NavigationItem)
+					s.cacheEpoch = epoch
+				}
+				s.categories = clonePublicCategories(categories)
+				s.tags = clonePublicTags(tags)
+				s.taxonomyReady = true
+			}
+		}
+		flight.categories = clonePublicCategories(categories)
+		flight.tags = clonePublicTags(tags)
+		flight.err = loadErr
+		if s.taxonomyFlight == flight {
+			s.taxonomyFlight = nil
+		}
+		close(flight.done)
+		s.cacheMu.Unlock()
+		return categories, tags, loadErr
+	}
+}
+
+const publicTaxonomyCacheMaxBytes = 512 << 10
+
+func publicCategoryCacheSize(values []PublicCategorySummary) int {
+	size := 0
+	for _, value := range values {
+		size += len(value.Category.PublicID) + len(value.Category.Slug) + len(value.Category.Name) + len(value.Category.Description) + len(value.LatestTitle) + len(value.LatestPath) + 128
+	}
+	return size
+}
+
+func publicTagCacheSize(values []PublicTagSummary) int {
+	size := 0
+	for _, value := range values {
+		size += len(value.Tag.PublicID) + len(value.Tag.Slug) + len(value.Tag.Name) + len(value.Tag.Description) + len(value.LatestTitle) + len(value.LatestPath) + 128
+	}
+	return size
+}
+
+func clonePublicCategories(values []PublicCategorySummary) []PublicCategorySummary {
+	result := make([]PublicCategorySummary, len(values))
+	copy(result, values)
+	for index := range result {
+		result[index].Category.PublicID = append([]byte(nil), values[index].Category.PublicID...)
+	}
+	return result
+}
+
+func clonePublicTags(values []PublicTagSummary) []PublicTagSummary {
+	result := make([]PublicTagSummary, len(values))
+	copy(result, values)
+	for index := range result {
+		result[index].Tag.PublicID = append([]byte(nil), values[index].Tag.PublicID...)
+	}
+	return result
+}
+
+func (s *Service) PublicTaxonomyRebuildState(ctx context.Context) (PublicTaxonomyRebuildState, error) {
+	return s.repository.PublicTaxonomyRebuildState(ctx)
+}
+
+func (s *Service) RebuildPublicTaxonomy(ctx context.Context, batchSize int) (int, bool, error) {
+	return s.repository.RebuildPublicTaxonomy(ctx, batchSize)
+}
+
+func (s *Service) ReplacePublishedTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID, revisionID int64, kind string, categoryPublicID []byte, tagPublicIDsJSON, title, slug string, publishedAt time.Time) error {
+	return s.repository.ReplacePublishedTaxonomyTx(ctx, tx, contentID, revisionID, kind, categoryPublicID, tagPublicIDsJSON, title, slug, publishedAt)
+}
+
+func (s *Service) ClearPublishedTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID int64) error {
+	return s.repository.ClearPublishedTaxonomyTx(ctx, tx, contentID)
 }
 
 func (s *Service) CreateCategory(ctx context.Context, input TermInput) (Category, error) {
@@ -164,7 +304,32 @@ func (s *Service) PublicNavigation(ctx context.Context, location string) ([]Navi
 	if location != "primary" && location != "footer" {
 		return nil, ErrNotFound
 	}
-	return s.repository.NavigationItems(ctx, location, true)
+	epoch := s.database.RenderEpoch()
+	s.cacheMu.RLock()
+	if s.cacheEpoch == epoch {
+		if value, ok := s.navigation[location]; ok {
+			result := append([]NavigationItem(nil), value...)
+			s.cacheMu.RUnlock()
+			return result, nil
+		}
+	}
+	s.cacheMu.RUnlock()
+	result, err := s.repository.NavigationItems(ctx, location, true)
+	if err != nil {
+		return nil, err
+	}
+	s.cacheMu.Lock()
+	if epoch == s.database.RenderEpoch() {
+		if s.cacheEpoch != epoch {
+			s.categories, s.tags = nil, nil
+			s.taxonomyReady = false
+			s.navigation = make(map[string][]NavigationItem)
+			s.cacheEpoch = epoch
+		}
+		s.navigation[location] = append([]NavigationItem(nil), result...)
+	}
+	s.cacheMu.Unlock()
+	return result, nil
 }
 
 func (s *Service) CreateNavigationItem(ctx context.Context, input NavigationInput) (NavigationItem, error) {
@@ -196,6 +361,22 @@ func (s *Service) ArticleTaxonomy(ctx context.Context, contentID int64) (Taxonom
 
 func (s *Service) TaxonomyBySnapshot(ctx context.Context, categoryPublicID []byte, tagPublicIDsJSON string) (Taxonomy, error) {
 	return s.repository.TaxonomyBySnapshot(ctx, categoryPublicID, tagPublicIDsJSON)
+}
+
+// TaxonomiesByContentIDs resolves the current editorial taxonomy for a
+// bounded page with two fixed-shape queries. The result map contains an empty
+// taxonomy for an article with no terms, so callers can safely enrich a page
+// without probing every row independently.
+func (s *Service) TaxonomiesByContentIDs(ctx context.Context, contentIDs []int64) (map[int64]Taxonomy, error) {
+	return s.repository.TaxonomiesByContentIDs(ctx, contentIDs)
+}
+
+// TaxonomiesBySnapshot resolves published taxonomy snapshots in bounded
+// batches. Snapshot identities remain authoritative for public rendering,
+// while missing historical terms degrade to an empty term rather than a
+// draft/current taxonomy.
+func (s *Service) TaxonomiesBySnapshot(ctx context.Context, snapshots []TaxonomySnapshot) (map[int64]Taxonomy, error) {
+	return s.repository.TaxonomiesBySnapshot(ctx, snapshots)
 }
 
 func (s *Service) ReplaceArticleTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID, categoryID int64, tagIDs []int64, now time.Time) ([]byte, string, error) {
@@ -249,6 +430,10 @@ func (s *Service) PublicTagPage(ctx context.Context, slug string, request pagina
 	}
 	request = pagination.Normalize(request, 20, 50)
 	return s.repository.PublicTagPage(ctx, key, request)
+}
+
+func (s *Service) PublicRelatedArticleIDs(ctx context.Context, currentID int64, categoryPublicID []byte, tagPublicIDs [][]byte, limit int) ([]int64, bool, error) {
+	return s.repository.PublicRelatedArticleIDs(ctx, currentID, categoryPublicID, tagPublicIDs, limit)
 }
 
 func validateTerm(input TermInput, category bool) (TermInput, string, error) {

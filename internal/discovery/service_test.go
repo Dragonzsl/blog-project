@@ -51,6 +51,9 @@ func TestSearchProjectionLifecycleChineseAndFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := service.SyncAllDirty(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	results, err := service.Search(ctx, SearchQuery{Text: "低开销", Limit: 20})
 	if err != nil {
@@ -58,6 +61,10 @@ func TestSearchProjectionLifecycleChineseAndFilters(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Path != "/posts/small-blog" {
 		t.Fatalf("Chinese results = %+v", results)
+	}
+	results, err = service.Search(ctx, SearchQuery{Text: "低开销", Limit: 20})
+	if err != nil || len(results) != 2 || results[0].Path != "/posts/small-blog" || results[0].Title != "低开销博客系统" {
+		t.Fatalf("cached Chinese results = %+v err=%v", results, err)
 	}
 	results, err = service.Search(ctx, SearchQuery{Text: "Golan", Kind: "article", CategorySlug: "architecture", TagSlug: "golang", Limit: 20})
 	if err != nil || len(results) != 1 || results[0].Title != "低开销博客系统" {
@@ -76,6 +83,9 @@ func TestSearchProjectionLifecycleChineseAndFilters(t *testing.T) {
 	}
 
 	if _, err := publisher.Unpublish(ctx, "article", article.ID, article.LockVersion); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SyncAllDirty(ctx); err != nil {
 		t.Fatal(err)
 	}
 	results, err = service.Search(ctx, SearchQuery{Text: "Golang", Limit: 20})
@@ -150,5 +160,43 @@ func TestNewServiceRejectsCredentialBearingBaseURL(t *testing.T) {
 	db := openDiscoveryTestDatabase(t)
 	if _, err := NewService(NewRepository(db), Options{BaseURL: "https://owner:secret@blog.example"}); err == nil {
 		t.Fatal("credential-bearing discovery base URL was accepted")
+	}
+}
+
+func TestSearchFlightCoalescesAndBoundsMisses(t *testing.T) {
+	service := &Service{searchFlights: make(map[string]*searchFlight)}
+	leaderFlight, leader := service.beginSearchFlight("same-query")
+	if !leader || leaderFlight == nil {
+		t.Fatal("first search miss did not become a flight leader")
+	}
+	followerFlight, followerLeader := service.beginSearchFlight("same-query")
+	if followerLeader || followerFlight != leaderFlight {
+		t.Fatal("concurrent search miss did not join the existing flight")
+	}
+
+	page := SearchPage{Results: []SearchResult{{Path: "/posts/result", CoverMediaPublicID: []byte("media")}}}
+	service.finishSearchFlight("same-query", leaderFlight, page, nil)
+	select {
+	case <-followerFlight.done:
+	default:
+		t.Fatal("search flight was not completed")
+	}
+	if followerFlight.err != nil || string(followerFlight.page.Results[0].CoverMediaPublicID) != "media" {
+		t.Fatalf("completed search flight = %+v", followerFlight)
+	}
+
+	flights := make([]*searchFlight, 0, searchFlightMax)
+	for index := 0; index < searchFlightMax; index++ {
+		flight, leader := service.beginSearchFlight("distinct-" + string(rune('a'+index)))
+		if !leader || flight == nil {
+			t.Fatalf("distinct flight %d was not admitted", index)
+		}
+		flights = append(flights, flight)
+	}
+	if flight, leader := service.beginSearchFlight("overflow"); !leader || flight != nil {
+		t.Fatal("search flight table exceeded its bound")
+	}
+	for index, flight := range flights {
+		service.finishSearchFlight("distinct-"+string(rune('a'+index)), flight, SearchPage{}, nil)
 	}
 }

@@ -122,6 +122,73 @@ func TestTaxonomyNavigationAndRenderInvalidation(t *testing.T) {
 	}
 }
 
+func TestPublicTaxonomyProjectionRebuildAndPublicationUpdates(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, config.Database{Path: filepath.Join(t.TempDir(), "blog.sqlite"), BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service := organization.NewService(db)
+	category, err := service.CreateCategory(ctx, organization.TermInput{Name: "性能", Slug: "performance"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag, err := service.CreateTag(ctx, organization.TermInput{Name: "SQLite", Slug: "sqlite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := publishing.NewService(publishing.NewRepository(db))
+	article, err := publisher.CreateDraft(ctx, publishing.DraftInput{Title: "投影一", Slug: "projection-one", BodyMarkdown: "正文", CategoryID: category.ID, TagIDs: []int64{tag.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published, err := publisher.Publish(ctx, article.ID, article.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, complete, err := service.RebuildPublicTaxonomy(ctx, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if complete {
+			break
+		}
+	}
+	state, err := service.PublicTaxonomyRebuildState(ctx)
+	if err != nil || state.Status != "ready" {
+		t.Fatalf("projection state=%+v err=%v", state, err)
+	}
+	summaries, err := service.PublicCategories(ctx)
+	if err != nil || len(summaries) != 1 || summaries[0].ArticleCount != 1 || summaries[0].LatestTitle != "投影一" {
+		t.Fatalf("category summaries=%+v err=%v", summaries, err)
+	}
+	tagSummaries, err := service.PublicTags(ctx)
+	if err != nil || len(tagSummaries) != 1 || tagSummaries[0].ArticleCount != 1 {
+		t.Fatalf("tag summaries=%+v err=%v", tagSummaries, err)
+	}
+	article, err = publisher.Unpublish(ctx, "article", published.ID, published.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ids, err := service.PublicCategory(ctx, category.Slug, 20)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("unpublished projection ids=%v err=%v", ids, err)
+	}
+	article, err = publisher.Publish(ctx, article.ID, article.LockVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if article.Status != "published" {
+		t.Fatalf("republished article status=%q", article.Status)
+	}
+	_, ids, err = service.PublicCategory(ctx, category.Slug, 20)
+	if err != nil || len(ids) != 1 || ids[0] != article.ID {
+		t.Fatalf("republished projection ids=%v err=%v", ids, err)
+	}
+}
+
 func TestTaxonomyRedirectChainsAreFlattenedAndHistoricalPathsStayReserved(t *testing.T) {
 	ctx := context.Background()
 	db, err := database.Open(ctx, config.Database{Path: filepath.Join(t.TempDir(), "blog.sqlite"), BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})

@@ -21,6 +21,10 @@ type ContentView struct {
 	Slug         string
 	Excerpt      string
 	BodyMarkdown string
+	// BodyCacheKey is populated only for immutable public revisions. It lets
+	// the theme reuse sanitized Markdown HTML without making that HTML an
+	// authoritative content field.
+	BodyCacheKey string
 	PublishedAt  *time.Time
 	UpdatedAt    *time.Time
 	Cover        *MediaData
@@ -328,7 +332,7 @@ func (t *Theme) RenderArticle(siteName string, article ArticleData, preview bool
 
 func (t *Theme) RenderArticlePage(siteName string, article ArticleData, preview bool, backURL string, navigation Navigation, metadata PageMetadata) ([]byte, error) {
 	navigation = withSidebar(navigation)
-	body, err := t.markdown.Render(article.BodyMarkdown)
+	body, err := t.markdown.RenderCached(article.BodyCacheKey, article.BodyMarkdown)
 	if err != nil {
 		return nil, err
 	}

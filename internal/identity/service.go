@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -28,6 +29,9 @@ type Service struct {
 	dummyHash       string
 	limiter         *attemptLimiter
 	authSlot        chan struct{}
+	siteNameMu      sync.RWMutex
+	siteName        string
+	siteNameLoaded  bool
 	now             func() time.Time
 }
 
@@ -54,7 +58,26 @@ func (s *Service) Initialized(ctx context.Context) (bool, error) {
 }
 
 func (s *Service) SiteName(ctx context.Context) (string, error) {
-	return s.repository.SiteName(ctx)
+	s.siteNameMu.RLock()
+	if s.siteNameLoaded {
+		name := s.siteName
+		s.siteNameMu.RUnlock()
+		return name, nil
+	}
+	s.siteNameMu.RUnlock()
+
+	s.siteNameMu.Lock()
+	defer s.siteNameMu.Unlock()
+	if s.siteNameLoaded {
+		return s.siteName, nil
+	}
+	name, err := s.repository.SiteName(ctx)
+	if err != nil {
+		return "", err
+	}
+	s.siteName = name
+	s.siteNameLoaded = true
+	return name, nil
 }
 
 func (s *Service) Timezone(ctx context.Context) (string, error) {
@@ -157,6 +180,10 @@ func (s *Service) CompleteSetup(ctx context.Context, token, code string) (SetupC
 	if err := s.repository.CompleteSetup(ctx, challenge, hashes, session, now); err != nil {
 		return SetupCompleteResult{}, err
 	}
+	s.siteNameMu.Lock()
+	s.siteName = challenge.SiteName
+	s.siteNameLoaded = true
+	s.siteNameMu.Unlock()
 	return SetupCompleteResult{Session: session, RecoveryCodes: codes}, nil
 }
 

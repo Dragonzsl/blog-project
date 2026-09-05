@@ -198,7 +198,8 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	var slug, slugKey, bodyMarkdown string
 	var coverMediaID sql.NullInt64
 	var publishedSlug, publishedSlugKey sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug, slug_key, published_slug, published_slug_key, body_markdown, cover_media_id FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &bodyMarkdown, &coverMediaID)
+	var existingPublishedAt sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id, lock_version, public_id, slug, slug_key, published_slug, published_slug_key, body_markdown, cover_media_id, published_at FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL`, id, kind).Scan(&currentRevision, &currentVersion, &publicID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &bodyMarkdown, &coverMediaID, &existingPublishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Article{}, ErrNotFound
 	}
@@ -211,15 +212,19 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	if _, err := tx.ExecContext(ctx, "UPDATE content_revisions SET is_publication_checkpoint = 1 WHERE id = ? AND content_id = ?", currentRevision, id); err != nil {
 		return Article{}, fmt.Errorf("mark publication revision: %w", err)
 	}
+	publishedAtMillis := millis(now)
+	if existingPublishedAt.Valid {
+		publishedAtMillis = existingPublishedAt.Int64
+	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE contents
 		SET status = 'published', published_revision_id = current_revision_id,
 		    published_slug = slug, published_slug_key = slug_key,
-		    published_at = COALESCE(published_at, ?), scheduled_at = NULL,
+		    published_at = ?, scheduled_at = NULL,
 		    withdrawn_at = NULL,
 		    lock_version = lock_version + 1, updated_at = ?
 		WHERE id = ? AND kind = ? AND lock_version = ?
-	`, millis(now), millis(now), id, kind, expectedVersion)
+	`, publishedAtMillis, millis(now), id, kind, expectedVersion)
 	if err != nil {
 		return Article{}, fmt.Errorf("publish %s: %w", kind, err)
 	}
@@ -245,6 +250,14 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch = render_epoch + 1, updated_at = ? WHERE id = 1", millis(now)); err != nil {
 		return Article{}, fmt.Errorf("invalidate public rendering: %w", err)
+	}
+	var revisionTitle, tagPublicIDsJSON string
+	var categoryPublicID []byte
+	if err := tx.QueryRowContext(ctx, `SELECT title,category_public_id,tag_public_ids_json FROM content_revisions WHERE id=? AND content_id=?`, currentRevision, id).Scan(&revisionTitle, &categoryPublicID, &tagPublicIDsJSON); err != nil {
+		return Article{}, fmt.Errorf("read published taxonomy: %w", err)
+	}
+	if err := r.organization.ReplacePublishedTaxonomyTx(ctx, tx, id, currentRevision, kind, categoryPublicID, tagPublicIDsJSON, revisionTitle, slug, time.UnixMilli(publishedAtMillis).UTC()); err != nil {
+		return Article{}, fmt.Errorf("update public taxonomy projection: %w", err)
 	}
 	if err := r.replaceMediaReferences(ctx, tx, id, bodyMarkdown, coverMediaID.Int64, now); err != nil {
 		return Article{}, err
@@ -276,6 +289,14 @@ func (r *Repository) Content(ctx context.Context, kind string, id int64) (Articl
 
 func (r *Repository) PublicContent(ctx context.Context, kind, slugKey string) (Article, error) {
 	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, publicContentSelect+` WHERE c.published_slug_key = ? AND c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL`, slugKey, kind))
+	if err != nil {
+		return Article{}, err
+	}
+	return r.enrichPublishedTaxonomy(ctx, content)
+}
+
+func (r *Repository) PublicContentCard(ctx context.Context, kind, slugKey string) (Article, error) {
+	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, publicCardSelect+` WHERE c.published_slug_key = ? AND c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL`, slugKey, kind))
 	if err != nil {
 		return Article{}, err
 	}
@@ -328,7 +349,7 @@ func (r *Repository) CountAdminContents(ctx context.Context, kind string, filter
 
 func (r *Repository) AdminContents(ctx context.Context, kind string, filter AdminContentFilter, info pagination.Info) ([]Article, error) {
 	where, args := adminContentWhere(kind, filter)
-	query := contentSelect + " " + where + " ORDER BY " + adminContentOrder(filter.Sort) + " LIMIT ? OFFSET ?"
+	query := contentListSelect + " " + where + " ORDER BY " + adminContentOrder(filter.Sort) + " LIMIT ? OFFSET ?"
 	args = append(args, info.PerPage, info.Offset())
 	rows, err := r.database.Reader.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -346,11 +367,8 @@ func (r *Repository) AdminContents(ctx context.Context, kind string, filter Admi
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	for index := range contents {
-		contents[index], err = r.enrichTaxonomy(ctx, contents[index])
-		if err != nil {
-			return nil, err
-		}
+	if err := r.enrichTaxonomyBatch(ctx, contents); err != nil {
+		return nil, err
 	}
 	return contents, nil
 }
@@ -417,7 +435,7 @@ func escapeLikePattern(value string) string {
 }
 
 func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
-	rows, err := r.database.Reader.QueryContext(ctx, contentSelect+" WHERE c.trashed_at IS NOT NULL ORDER BY c.trashed_at DESC, c.id DESC")
+	rows, err := r.database.Reader.QueryContext(ctx, contentListSelect+" WHERE c.trashed_at IS NOT NULL ORDER BY c.trashed_at DESC, c.id DESC LIMIT ?", maxContentListRows)
 	if err != nil {
 		return nil, fmt.Errorf("list trashed contents: %w", err)
 	}
@@ -431,6 +449,52 @@ func (r *Repository) TrashedContents(ctx context.Context) ([]Article, error) {
 		contents = append(contents, content)
 	}
 	return contents, rows.Err()
+}
+
+// Dashboard returns bounded metadata and aggregate counters. It intentionally
+// does not load article bodies; archive/export callers keep using the detail
+// collection methods when a complete body is required.
+func (r *Repository) Dashboard(ctx context.Context, cutoff time.Time) (DashboardSummary, error) {
+	var summary DashboardSummary
+	if err := r.database.Reader.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(CASE WHEN status='draft' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='scheduled' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='published' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN excerpt='' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN status='published' AND published_at>=? THEN 1 ELSE 0 END),0)
+		FROM contents WHERE trashed_at IS NULL`, cutoff.UTC().UnixMilli()).Scan(&summary.DraftCount, &summary.ScheduledCount, &summary.PublishedCount, &summary.WithoutExcerptCount, &summary.PublishedThisWeek); err != nil {
+		return DashboardSummary{}, err
+	}
+	if err := r.database.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM contents WHERE trashed_at IS NOT NULL").Scan(&summary.TrashedCount); err != nil {
+		return DashboardSummary{}, err
+	}
+	queries := []string{
+		contentListSelect + " WHERE c.trashed_at IS NULL ORDER BY c.updated_at DESC,c.id DESC LIMIT 5",
+		contentListSelect + " WHERE c.status='published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC,c.id DESC LIMIT 5",
+	}
+	for index, query := range queries {
+		rows, err := r.database.Reader.QueryContext(ctx, query)
+		if err != nil {
+			return DashboardSummary{}, err
+		}
+		for rows.Next() {
+			content, err := scanContent(rows)
+			if err != nil {
+				rows.Close()
+				return DashboardSummary{}, err
+			}
+			item := summarizeAdminContent(content)
+			if index == 0 {
+				summary.RecentEdits = append(summary.RecentEdits, item)
+			} else {
+				summary.RecentPublished = append(summary.RecentPublished, item)
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return DashboardSummary{}, err
+		}
+	}
+	return summary, nil
 }
 
 func (r *Repository) PublishedArticles(ctx context.Context, limit int) ([]Article, error) {
@@ -450,6 +514,50 @@ func (r *Repository) PublicArticlesPage(ctx context.Context, request pagination.
 	return PublicArticlePage{Articles: articles, Pagination: info}, nil
 }
 
+// PublicArticleCardsByIDs loads only the published card projection for one
+// bounded taxonomy page. The input order is retained so a taxonomy query and
+// the subsequent rendering cannot accidentally reorder the public page.
+func (r *Repository) PublicArticleCardsByIDs(ctx context.Context, ids []int64) ([]Article, error) {
+	ids = uniquePositiveContentIDs(ids)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	if len(ids) > 50 {
+		ids = ids[:50]
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, publicCardSelect+` WHERE c.id IN (`+placeholders+`) AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC,c.id DESC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list public article cards: %w", err)
+	}
+	defer rows.Close()
+	byID := make(map[int64]Article, len(ids))
+	ordered := make([]Article, 0, len(ids))
+	for rows.Next() {
+		article, err := scanContent(rows)
+		if err != nil {
+			return nil, err
+		}
+		byID[article.ID] = article
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if article, ok := byID[id]; ok {
+			ordered = append(ordered, article)
+		}
+	}
+	if err := r.enrichPublishedTaxonomyBatch(ctx, ordered); err != nil {
+		return nil, err
+	}
+	return ordered, nil
+}
+
 func (r *Repository) PublishedPages(ctx context.Context, limit int) ([]Article, error) {
 	return r.publishedContents(ctx, "page", limit)
 }
@@ -461,7 +569,7 @@ func (r *Repository) publishedContents(ctx context.Context, kind string, limit i
 	if limit > 100 {
 		limit = 100
 	}
-	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ?`, kind, limit)
+	rows, err := r.database.Reader.QueryContext(ctx, publicCardSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ?`, kind, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list published %ss: %w", kind, err)
 	}
@@ -474,17 +582,14 @@ func (r *Repository) publishedContents(ctx context.Context, kind string, limit i
 		}
 		articles = append(articles, article)
 	}
-	for index := range articles {
-		articles[index], err = r.enrichPublishedTaxonomy(ctx, articles[index])
-		if err != nil {
-			return nil, err
-		}
+	if err := r.enrichPublishedTaxonomyBatch(ctx, articles); err != nil {
+		return nil, err
 	}
 	return articles, rows.Err()
 }
 
 func (r *Repository) publishedContentsPage(ctx context.Context, kind string, info pagination.Info) ([]Article, error) {
-	rows, err := r.database.Reader.QueryContext(ctx, publicContentSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ? OFFSET ?`, kind, info.PerPage, info.Offset())
+	rows, err := r.database.Reader.QueryContext(ctx, publicCardSelect+` WHERE c.kind = ? AND c.status = 'published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC, c.id DESC LIMIT ? OFFSET ?`, kind, info.PerPage, info.Offset())
 	if err != nil {
 		return nil, fmt.Errorf("list published %ss page: %w", kind, err)
 	}
@@ -497,11 +602,8 @@ func (r *Repository) publishedContentsPage(ctx context.Context, kind string, inf
 		}
 		articles = append(articles, article)
 	}
-	for index := range articles {
-		articles[index], err = r.enrichPublishedTaxonomy(ctx, articles[index])
-		if err != nil {
-			return nil, err
-		}
+	if err := r.enrichPublishedTaxonomyBatch(ctx, articles); err != nil {
+		return nil, err
 	}
 	return articles, rows.Err()
 }
@@ -517,30 +619,51 @@ func (r *Repository) PublicArticleNavigation(ctx context.Context, articleID int6
 	if err != nil {
 		return PublicArticleNavigation{}, err
 	}
+	return r.PublicArticleNavigationForArticle(ctx, current, relatedLimit)
+}
+
+// PublicArticleNavigationForArticle reuses the already loaded public article.
+// The ID-based method remains for callers that do not have the article view;
+// public HTTP detail rendering uses this method to avoid a duplicate article read.
+func (r *Repository) PublicArticleNavigationForArticle(ctx context.Context, current Article, relatedLimit int) (PublicArticleNavigation, error) {
 	if current.PublishedRevisionID < 1 || current.PublishedAt == nil {
 		return PublicArticleNavigation{}, ErrNotFound
 	}
-	previous, err := r.neighbor(ctx, current, true)
-	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, sql.ErrNoRows) {
-		return PublicArticleNavigation{}, err
+	previous, previousErr := r.neighbor(ctx, current, true)
+	if previousErr != nil && !errors.Is(previousErr, ErrNotFound) && !errors.Is(previousErr, sql.ErrNoRows) {
+		return PublicArticleNavigation{}, previousErr
 	}
-	var previousArticle *Article
-	if err == nil {
-		previousArticle = &previous
-	}
-	next, err := r.neighbor(ctx, current, false)
-	if err != nil && !errors.Is(err, ErrNotFound) && !errors.Is(err, sql.ErrNoRows) {
-		return PublicArticleNavigation{}, err
-	}
-	var nextArticle *Article
-	if err == nil {
-		nextArticle = &next
+	next, nextErr := r.neighbor(ctx, current, false)
+	if nextErr != nil && !errors.Is(nextErr, ErrNotFound) && !errors.Is(nextErr, sql.ErrNoRows) {
+		return PublicArticleNavigation{}, nextErr
 	}
 	related, err := r.related(ctx, current, relatedLimit)
 	if err != nil {
 		return PublicArticleNavigation{}, err
 	}
-	return PublicArticleNavigation{Previous: previousArticle, Next: nextArticle, Related: related}, nil
+	cards := make([]Article, 0, 2+len(related))
+	previousIndex, nextIndex := -1, -1
+	if previousErr == nil {
+		previousIndex = len(cards)
+		cards = append(cards, previous)
+	}
+	if nextErr == nil {
+		nextIndex = len(cards)
+		cards = append(cards, next)
+	}
+	relatedStart := len(cards)
+	cards = append(cards, related...)
+	if err := r.enrichPublishedTaxonomyBatch(ctx, cards); err != nil {
+		return PublicArticleNavigation{}, err
+	}
+	var previousArticle, nextArticle *Article
+	if previousIndex >= 0 {
+		previousArticle = &cards[previousIndex]
+	}
+	if nextIndex >= 0 {
+		nextArticle = &cards[nextIndex]
+	}
+	return PublicArticleNavigation{Previous: previousArticle, Next: nextArticle, Related: cards[relatedStart:]}, nil
 }
 
 func (r *Repository) neighbor(ctx context.Context, current Article, older bool) (Article, error) {
@@ -548,13 +671,22 @@ func (r *Repository) neighbor(ctx context.Context, current Article, older bool) 
 	if !older {
 		operator, order = ">", "ASC"
 	}
-	query := publicContentSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
-		AND (c.published_at ` + operator + ` ? OR (c.published_at = ? AND c.id ` + operator + ` ?))
+	query := publicCardSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		AND (c.published_at,c.id) ` + operator + ` (?,?)
 		ORDER BY c.published_at ` + order + `, c.id ` + order + ` LIMIT 1`
-	return scanContent(r.database.Reader.QueryRowContext(ctx, query, current.PublishedAt.UnixMilli(), current.PublishedAt.UnixMilli(), current.ID))
+	return scanContent(r.database.Reader.QueryRowContext(ctx, query, current.PublishedAt.UnixMilli(), current.ID))
 }
 
 func (r *Repository) related(ctx context.Context, current Article, limit int) ([]Article, error) {
+	tagPublicIDs := make([][]byte, 0, len(current.Tags))
+	for _, tag := range current.Tags {
+		tagPublicIDs = append(tagPublicIDs, tag.PublicID)
+	}
+	if ids, ready, err := r.organization.PublicRelatedArticleIDs(ctx, current.ID, current.publishedCategoryPublicID, tagPublicIDs, limit); err != nil {
+		return nil, err
+	} else if ready {
+		return r.PublicArticleCardsByIDs(ctx, ids)
+	}
 	conditions := make([]string, 0, 2)
 	args := make([]any, 0, 6)
 	if len(current.publishedCategoryPublicID) > 0 {
@@ -571,7 +703,7 @@ func (r *Repository) related(ctx context.Context, current Article, limit int) ([
 	if len(conditions) == 0 {
 		return nil, nil
 	}
-	query := publicContentSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL AND c.id <> ? AND (` + strings.Join(conditions, " OR ") + `)
+	query := publicCardSelect + ` WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL AND c.id <> ? AND (` + strings.Join(conditions, " OR ") + `)
 		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`
 	queryArgs := []any{current.ID}
 	queryArgs = append(queryArgs, args...)
@@ -605,8 +737,42 @@ func (r *Repository) enrichTaxonomy(ctx context.Context, content Article) (Artic
 	return content, nil
 }
 
+func (r *Repository) enrichTaxonomyBatch(ctx context.Context, contents []Article) error {
+	ids := make([]int64, 0, len(contents))
+	for _, content := range contents {
+		if content.Kind == "article" {
+			ids = append(ids, content.ID)
+		}
+	}
+	taxonomies, err := r.organization.TaxonomiesByContentIDs(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("read article taxonomy batch: %w", err)
+	}
+	for index := range contents {
+		if taxonomy, ok := taxonomies[contents[index].ID]; ok {
+			contents[index].Category = taxonomy.Category
+			contents[index].Tags = taxonomy.Tags
+		}
+	}
+	return nil
+}
+
 const contentSelect = `
 	SELECT c.id, c.public_id, c.kind, c.status, c.slug, COALESCE(c.published_slug,''), c.title, c.excerpt, c.seo_title, c.seo_description, c.body_markdown,
+	       c.cover_media_id, current_revision.cover_media_public_id, current_revision.cover_snapshot_version, NULL, NULL,
+	       c.current_revision_id, c.published_revision_id, c.published_at,
+	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
+	       c.scheduled_at, c.withdrawn_at, c.trashed_at,
+	       c.lock_version, c.created_at, c.updated_at
+	FROM contents c
+	LEFT JOIN content_revisions current_revision ON current_revision.id = c.current_revision_id`
+
+// contentListSelect intentionally keeps the same scanner shape as
+// contentSelect while replacing the potentially large canonical body with a
+// constant. Editorial list pages only need metadata; detail/edit/archive
+// paths continue to use contentSelect and receive the full body.
+const contentListSelect = `
+	SELECT c.id, c.public_id, c.kind, c.status, c.slug, COALESCE(c.published_slug,''), c.title, c.excerpt, c.seo_title, c.seo_description, '',
 	       c.cover_media_id, current_revision.cover_media_public_id, current_revision.cover_snapshot_version, NULL, NULL,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       (SELECT r.created_at FROM content_revisions r WHERE r.id = c.published_revision_id),
@@ -618,6 +784,20 @@ const contentSelect = `
 const publicContentSelect = `
 	SELECT c.id, c.public_id, c.kind, c.status, c.published_slug, c.published_slug,
 	       r.title, r.excerpt, r.seo_title, r.seo_description, r.body_markdown,
+	       NULL, r.cover_media_public_id, r.cover_snapshot_version, r.category_public_id, r.tag_public_ids_json,
+	       c.current_revision_id, c.published_revision_id, c.published_at,
+	       r.created_at, c.scheduled_at, c.withdrawn_at, c.trashed_at,
+	       c.lock_version, c.created_at, c.updated_at
+	FROM contents c
+	JOIN content_revisions r ON r.id = c.published_revision_id`
+
+// publicCardSelect is the public list projection. Published revision
+// metadata and immutable cover/taxonomy snapshots are retained; Markdown is
+// deliberately not selected. A public article/page detail uses
+// publicContentSelect instead.
+const publicCardSelect = `
+	SELECT c.id, c.public_id, c.kind, c.status, c.published_slug, c.published_slug,
+	       r.title, r.excerpt, r.seo_title, r.seo_description, '',
 	       NULL, r.cover_media_public_id, r.cover_snapshot_version, r.category_public_id, r.tag_public_ids_json,
 	       c.current_revision_id, c.published_revision_id, c.published_at,
 	       r.created_at, c.scheduled_at, c.withdrawn_at, c.trashed_at,
@@ -694,6 +874,47 @@ func (r *Repository) enrichPublishedTaxonomy(ctx context.Context, content Articl
 	content.Category = taxonomy.Category
 	content.Tags = taxonomy.Tags
 	return content, nil
+}
+
+func (r *Repository) enrichPublishedTaxonomyBatch(ctx context.Context, contents []Article) error {
+	snapshots := make([]organization.TaxonomySnapshot, 0, len(contents))
+	for _, content := range contents {
+		if content.Kind != "article" {
+			continue
+		}
+		snapshots = append(snapshots, organization.TaxonomySnapshot{
+			ContentID: content.ID, CategoryPublicID: content.publishedCategoryPublicID, TagPublicIDsJSON: content.publishedTagPublicIDsJSON,
+		})
+	}
+	taxonomies, err := r.organization.TaxonomiesBySnapshot(ctx, snapshots)
+	if err != nil {
+		return fmt.Errorf("read published taxonomy batch: %w", err)
+	}
+	for index := range contents {
+		if taxonomy, ok := taxonomies[contents[index].ID]; ok {
+			contents[index].Category = taxonomy.Category
+			contents[index].Tags = taxonomy.Tags
+		}
+	}
+	return nil
+}
+
+const maxContentListRows = 500
+
+func uniquePositiveContentIDs(values []int64) []int64 {
+	result := make([]int64, 0, len(values))
+	seen := make(map[int64]struct{}, len(values))
+	for _, value := range values {
+		if value < 1 {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func insertRevision(ctx context.Context, tx *sql.Tx, contentID, revisionNumber int64, revision revisionInput, now time.Time) (int64, error) {

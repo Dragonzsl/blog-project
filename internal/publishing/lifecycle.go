@@ -221,6 +221,9 @@ func (r *Repository) Unpublish(ctx context.Context, kind string, id, expectedVer
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
 		return Article{}, err
 	}
+	if err := r.organization.ClearPublishedTaxonomyTx(ctx, tx, id); err != nil {
+		return Article{}, fmt.Errorf("clear public taxonomy projection: %w", err)
+	}
 	if err := r.replaceMediaReferences(ctx, tx, id, body, coverMediaID.Int64, now); err != nil {
 		return Article{}, err
 	}
@@ -295,6 +298,11 @@ func (r *Repository) Trash(ctx context.Context, kind string, id, expectedVersion
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
 		return err
+	}
+	if status == "published" {
+		if err := r.organization.ClearPublishedTaxonomyTx(ctx, tx, id); err != nil {
+			return fmt.Errorf("clear public taxonomy projection: %w", err)
+		}
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".trashed", kind, publicID, now); err != nil {
 		return err
@@ -385,7 +393,8 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	var coverMediaID sql.NullInt64
 	var publishedSlug, publishedSlugKey sql.NullString
 	var scheduledAt, lockVersion int64
-	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,cover_media_id,slug,slug_key,published_slug,published_slug_key,scheduled_at,lock_version FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &coverMediaID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &scheduledAt, &lockVersion)
+	var existingPublishedAt sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT current_revision_id,public_id,body_markdown,cover_media_id,slug,slug_key,published_slug,published_slug_key,scheduled_at,lock_version,published_at FROM contents WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, id, kind, millis(now)).Scan(&revisionID, &publicID, &body, &coverMediaID, &slug, &slugKey, &publishedSlug, &publishedSlugKey, &scheduledAt, &lockVersion, &existingPublishedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -395,7 +404,11 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	if _, err := tx.ExecContext(ctx, `UPDATE content_revisions SET is_publication_checkpoint=1 WHERE id=? AND content_id=?`, revisionID, id); err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE contents SET status='published',published_revision_id=current_revision_id,published_slug=slug,published_slug_key=slug_key,published_at=COALESCE(published_at,?),scheduled_at=NULL,withdrawn_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, scheduledAt, millis(now), id, kind, millis(now))
+	publishedAtMillis := scheduledAt
+	if existingPublishedAt.Valid {
+		publishedAtMillis = existingPublishedAt.Int64
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE contents SET status='published',published_revision_id=current_revision_id,published_slug=slug,published_slug_key=slug_key,published_at=?,scheduled_at=NULL,withdrawn_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND kind=? AND status='scheduled' AND scheduled_at<=? AND trashed_at IS NULL`, publishedAtMillis, millis(now), id, kind, millis(now))
 	if err != nil {
 		return false, err
 	}
@@ -418,6 +431,14 @@ func (r *Repository) publishScheduled(ctx context.Context, kind string, id int64
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
 		return false, err
+	}
+	var revisionTitle, tagPublicIDsJSON string
+	var categoryPublicID []byte
+	if err := tx.QueryRowContext(ctx, `SELECT title,category_public_id,tag_public_ids_json FROM content_revisions WHERE id=? AND content_id=?`, revisionID, id).Scan(&revisionTitle, &categoryPublicID, &tagPublicIDsJSON); err != nil {
+		return false, fmt.Errorf("read scheduled published taxonomy: %w", err)
+	}
+	if err := r.organization.ReplacePublishedTaxonomyTx(ctx, tx, id, revisionID, kind, categoryPublicID, tagPublicIDsJSON, revisionTitle, slug, time.UnixMilli(publishedAtMillis).UTC()); err != nil {
+		return false, fmt.Errorf("update scheduled public taxonomy projection: %w", err)
 	}
 	if err := r.replaceMediaReferences(ctx, tx, id, body, coverMediaID.Int64, now); err != nil {
 		return false, err

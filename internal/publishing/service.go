@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -230,6 +229,21 @@ func (s *Service) PublicPage(ctx context.Context, slug string) (Article, error) 
 	return s.repository.PublicContent(ctx, "page", slugKey)
 }
 
+func (s *Service) PublicPageCard(ctx context.Context, slug string) (Article, error) {
+	_, slugKey, err := platformslug.Normalize(slug)
+	if err != nil {
+		return Article{}, ErrNotFound
+	}
+	return s.repository.PublicContentCard(ctx, "page", slugKey)
+}
+
+func (s *Service) PublicArticleCardsByIDs(ctx context.Context, ids []int64) ([]Article, error) {
+	if len(ids) > 50 {
+		ids = ids[:50]
+	}
+	return s.repository.PublicArticleCardsByIDs(ctx, ids)
+}
+
 func (s *Service) Articles(ctx context.Context) ([]Article, error) {
 	return s.repository.Contents(ctx, "article")
 }
@@ -281,62 +295,7 @@ func (s *Service) AdminContentsPage(ctx context.Context, kind string, filter Adm
 // lists intentionally small. It uses the service clock so the result remains
 // deterministic in tests and during scheduled lifecycle work.
 func (s *Service) Dashboard(ctx context.Context) (DashboardSummary, error) {
-	articles, err := s.Articles(ctx)
-	if err != nil {
-		return DashboardSummary{}, err
-	}
-	pages, err := s.Pages(ctx)
-	if err != nil {
-		return DashboardSummary{}, err
-	}
-	trashed, err := s.TrashedContents(ctx)
-	if err != nil {
-		return DashboardSummary{}, err
-	}
-	all := append(append(make([]Article, 0, len(articles)+len(pages)), articles...), pages...)
-	summary := DashboardSummary{TrashedCount: len(trashed)}
-	cutoff := s.now().UTC().Add(-7 * 24 * time.Hour)
-	for _, content := range all {
-		switch content.Status {
-		case "draft":
-			summary.DraftCount++
-		case "scheduled":
-			summary.ScheduledCount++
-		case "published":
-			summary.PublishedCount++
-		}
-		if strings.TrimSpace(content.Excerpt) == "" {
-			summary.WithoutExcerptCount++
-		}
-		if content.PublishedAt != nil && !content.PublishedAt.Before(cutoff) {
-			summary.PublishedThisWeek++
-		}
-	}
-	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].UpdatedAt.Equal(all[j].UpdatedAt) {
-			return all[i].ID > all[j].ID
-		}
-		return all[i].UpdatedAt.After(all[j].UpdatedAt)
-	})
-	for _, content := range all[:minDashboardItems(len(all))] {
-		summary.RecentEdits = append(summary.RecentEdits, summarizeAdminContent(content))
-	}
-	published := make([]Article, 0, len(all))
-	for _, content := range all {
-		if content.PublishedAt != nil && content.Status == "published" {
-			published = append(published, content)
-		}
-	}
-	sort.SliceStable(published, func(i, j int) bool {
-		if published[i].PublishedAt.Equal(*published[j].PublishedAt) {
-			return published[i].ID > published[j].ID
-		}
-		return published[i].PublishedAt.After(*published[j].PublishedAt)
-	})
-	for _, content := range published[:minDashboardItems(len(published))] {
-		summary.RecentPublished = append(summary.RecentPublished, summarizeAdminContent(content))
-	}
-	return summary, nil
+	return s.repository.Dashboard(ctx, s.now().UTC().Add(-7*24*time.Hour))
 }
 
 func summarizeAdminContent(content Article) AdminContentSummary {
@@ -574,6 +533,19 @@ func (s *Service) PublicArticleNavigation(ctx context.Context, articleID int64, 
 		relatedLimit = 10
 	}
 	return s.repository.PublicArticleNavigation(ctx, articleID, relatedLimit)
+}
+
+func (s *Service) PublicArticleNavigationForArticle(ctx context.Context, article Article, relatedLimit int) (PublicArticleNavigation, error) {
+	if article.ID < 1 {
+		return PublicArticleNavigation{}, ErrNotFound
+	}
+	if relatedLimit < 1 {
+		relatedLimit = 3
+	}
+	if relatedLimit > 10 {
+		relatedLimit = 10
+	}
+	return s.repository.PublicArticleNavigationForArticle(ctx, article, relatedLimit)
 }
 
 // PublishedPages returns only the currently published page revisions. It is

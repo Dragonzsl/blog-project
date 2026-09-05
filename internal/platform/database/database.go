@@ -8,17 +8,19 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	"github.com/mattn/go-sqlite3"
 	"github.com/pressly/goose/v3"
 	"github.com/zhushilin/blog-project/db/migrations"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 )
 
 type DB struct {
-	Writer *sql.DB
-	Reader *sql.DB
+	Writer      *sql.DB
+	Reader      *sql.DB
+	renderEpoch atomic.Int64
 }
 
 func Open(ctx context.Context, cfg config.Database) (*DB, error) {
@@ -59,7 +61,65 @@ func Open(ctx context.Context, cfg config.Database) (*DB, error) {
 		return nil, fmt.Errorf("connect database reader: %w", err)
 	}
 
-	return &DB{Writer: writer, Reader: reader}, nil
+	db := &DB{Writer: writer, Reader: reader}
+	var epoch int64
+	if err := reader.QueryRowContext(ctx, "SELECT render_epoch FROM system_state WHERE id = 1").Scan(&epoch); err != nil || epoch < 1 {
+		reader.Close()
+		writer.Close()
+		if err != nil {
+			return nil, fmt.Errorf("initialize render epoch: %w", err)
+		}
+		return nil, fmt.Errorf("initialize render epoch: invalid value %d", epoch)
+	}
+	db.renderEpoch.Store(epoch)
+	if err := db.registerRenderEpochHooks(ctx); err != nil {
+		reader.Close()
+		writer.Close()
+		return nil, err
+	}
+	return db, nil
+}
+
+// RenderEpoch is maintained in-process by SQLite's commit hook. Public page
+// reads therefore do not need a system_state query on every request, while a
+// rolled-back transaction cannot invalidate the page cache.
+func (db *DB) RenderEpoch() int64 {
+	if db == nil {
+		return 0
+	}
+	return db.renderEpoch.Load()
+}
+
+func (db *DB) registerRenderEpochHooks(ctx context.Context) error {
+	connection, err := db.Writer.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("open render epoch hook connection: %w", err)
+	}
+	defer connection.Close()
+	if err := connection.Raw(func(driverConnection any) error {
+		sqliteConnection, ok := driverConnection.(*sqlite3.SQLiteConn)
+		if !ok {
+			return fmt.Errorf("unexpected SQLite driver connection %T", driverConnection)
+		}
+		pending := false
+		sqliteConnection.RegisterUpdateHook(func(_ int, _ string, table string, _ int64) {
+			if table == "system_state" {
+				pending = true
+			}
+		})
+		sqliteConnection.RegisterCommitHook(func() int {
+			if pending {
+				db.renderEpoch.Add(1)
+				pending = false
+			}
+			return 0
+		})
+		sqliteConnection.RegisterRollbackHook(func() { pending = false })
+		return nil
+	}); err != nil {
+		return fmt.Errorf("register render epoch hooks: %w", err)
+	}
+	return nil
 }
 
 func (db *DB) Close() error {

@@ -47,6 +47,39 @@ func TestOpenMigratesAndConfiguresSQLite(t *testing.T) {
 	}
 }
 
+func TestRenderEpochHookTracksCommittedInvalidationsOnly(t *testing.T) {
+	ctx := context.Background()
+	db, err := Open(ctx, config.Database{
+		Path: filepath.Join(t.TempDir(), "epoch.sqlite"), BusyTimeout: config.Duration{Duration: time.Second},
+		CacheSizeKiB: 4096, ReadConnections: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	before := db.RenderEpoch()
+	tx, err := db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.RenderEpoch(); got != before {
+		t.Fatalf("rolled-back render epoch=%d, want %d", got, before)
+	}
+	if _, err := db.Writer.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1 WHERE id=1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := db.RenderEpoch(); got != before+1 {
+		t.Fatalf("committed render epoch=%d, want %d", got, before+1)
+	}
+}
+
 func TestPhaseOneMigrationUpgradesVersionTenDatabaseAndIsRestartSafe(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "upgrade.sqlite")

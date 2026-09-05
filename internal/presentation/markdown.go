@@ -2,10 +2,12 @@ package presentation
 
 import (
 	"bytes"
+	"container/list"
 	"fmt"
 	"html/template"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
@@ -16,8 +18,22 @@ import (
 )
 
 type Markdown struct {
-	engine goldmark.Markdown
-	policy *bluemonday.Policy
+	engine        goldmark.Markdown
+	policy        *bluemonday.Policy
+	mu            sync.Mutex
+	cache         map[string]*list.Element
+	recent        *list.List
+	cacheBytes    int64
+	maxEntries    int
+	maxCacheBytes int64
+}
+
+const MarkdownRendererVersion = "goldmark-gfm-bm-code-v1"
+
+type markdownCacheEntry struct {
+	key  string
+	body template.HTML
+	size int64
 }
 
 func NewMarkdown() *Markdown {
@@ -43,6 +59,54 @@ func NewMarkdown() *Markdown {
 			goldmark.WithParserOptions(parser.WithAutoHeadingID()),
 		),
 		policy: policy,
+		cache:  make(map[string]*list.Element), recent: list.New(), maxEntries: 256, maxCacheBytes: 8 << 20,
+	}
+}
+
+func (m *Markdown) RenderCached(key, source string) (template.HTML, error) {
+	if strings.TrimSpace(key) == "" {
+		return m.Render(source)
+	}
+	m.mu.Lock()
+	if element, ok := m.cache[key]; ok {
+		m.recent.MoveToFront(element)
+		body := element.Value.(*markdownCacheEntry).body
+		m.mu.Unlock()
+		return body, nil
+	}
+	m.mu.Unlock()
+	body, err := m.Render(source)
+	if err != nil {
+		return "", err
+	}
+	m.addCached(key, body)
+	return body, nil
+}
+
+func (m *Markdown) addCached(key string, body template.HTML) {
+	size := int64(len(body) + len(key) + 64)
+	if size > m.maxCacheBytes {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if existing, ok := m.cache[key]; ok {
+		m.cacheBytes -= existing.Value.(*markdownCacheEntry).size
+		m.recent.Remove(existing)
+		delete(m.cache, key)
+	}
+	element := m.recent.PushFront(&markdownCacheEntry{key: key, body: body, size: size})
+	m.cache[key] = element
+	m.cacheBytes += size
+	for m.recent.Len() > m.maxEntries || m.cacheBytes > m.maxCacheBytes {
+		oldest := m.recent.Back()
+		if oldest == nil {
+			break
+		}
+		item := oldest.Value.(*markdownCacheEntry)
+		m.cacheBytes -= item.size
+		delete(m.cache, item.key)
+		m.recent.Remove(oldest)
 	}
 }
 
@@ -62,6 +126,11 @@ func (m *Markdown) Render(source string) (template.HTML, error) {
 var codeLanguagePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+#.-]{0,31}$`)
 
 func enhanceCodeBlocks(source []byte) ([]byte, error) {
+	// Most articles do not contain fenced code. Avoid reparsing and
+	// reserializing the entire sanitized fragment in that common path.
+	if !bytes.Contains(source, []byte("<pre")) {
+		return source, nil
+	}
 	root := &xhtml.Node{Type: xhtml.ElementNode, DataAtom: atom.Div, Data: "div"}
 	nodes, err := xhtml.ParseFragment(bytes.NewReader(source), root)
 	if err != nil {

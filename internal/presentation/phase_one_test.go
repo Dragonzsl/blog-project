@@ -67,6 +67,9 @@ func TestPhaseOnePublicCollectionsAndArticleComposition(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := discoveryService.SyncAllDirty(ctx); err != nil {
+		t.Fatal(err)
+	}
 	theme, err := NewDefaultTheme(NewMarkdown())
 	if err != nil {
 		t.Fatal(err)

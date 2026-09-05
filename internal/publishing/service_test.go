@@ -236,6 +236,22 @@ func TestPublicArticlePagesAndNavigation(t *testing.T) {
 	if page.Pagination.Total != 21 || page.Pagination.PageCount != 2 || page.Pagination.Page != 2 || len(page.Articles) != 1 || page.Articles[0].Title != "文章 01" {
 		t.Fatalf("public page = %+v articles=%+v", page.Pagination, page.Articles)
 	}
+	if page.Articles[0].BodyMarkdown != "" {
+		t.Fatal("public article list loaded the canonical body")
+	}
+	detail, err := service.PublicArticle(ctx, "article-01")
+	if err != nil || detail.BodyMarkdown != "## 目录标题\n\n正文内容。" {
+		t.Fatalf("public detail body=%q err=%v", detail.BodyMarkdown, err)
+	}
+	cards, err := service.PublicArticleCardsByIDs(ctx, []int64{articles[2].ID, articles[0].ID})
+	if err != nil || len(cards) != 2 || cards[0].ID != articles[2].ID || cards[1].ID != articles[0].ID {
+		t.Fatalf("public card projection=%+v err=%v", cards, err)
+	}
+	for _, card := range cards {
+		if card.BodyMarkdown != "" {
+			t.Fatal("public card projection loaded the canonical body")
+		}
+	}
 	for _, article := range page.Articles {
 		if article.Title == "只存在于草稿箱" {
 			t.Fatal("draft leaked into public article page")

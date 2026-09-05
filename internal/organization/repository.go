@@ -18,6 +18,8 @@ import (
 
 type Repository struct{ database *database.DB }
 
+const taxonomyBatchSize = 64
+
 func NewRepository(db *database.DB) *Repository { return &Repository{database: db} }
 
 func (r *Repository) Categories(ctx context.Context) ([]Category, error) {
@@ -61,43 +63,38 @@ func (r *Repository) Tags(ctx context.Context) ([]Tag, error) {
 }
 
 func (r *Repository) PublicCategories(ctx context.Context) ([]PublicCategorySummary, error) {
+	ready, err := r.publicTaxonomyReady(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read public taxonomy projection state: %w", err)
+	}
+	if ready {
+		return r.publicCategoriesFromProjection(ctx)
+	}
 	rows, err := r.database.Reader.QueryContext(ctx, `
+		WITH published AS MATERIALIZED (
+			SELECT c.id AS content_id, c.published_slug, c.published_at,
+			       revision.category_public_id, revision.title,
+			       ROW_NUMBER() OVER (
+				       PARTITION BY revision.category_public_id
+				       ORDER BY c.published_at DESC, c.id DESC
+			       ) AS latest_rank
+			FROM contents c
+			JOIN content_revisions revision ON revision.id=c.published_revision_id
+			WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		), summary AS (
+			SELECT category_public_id,
+			       COUNT(*) AS article_count,
+			       MAX(CASE WHEN latest_rank=1 THEN title ELSE '' END) AS latest_title,
+			       MAX(CASE WHEN latest_rank=1 THEN '/posts/' || published_slug ELSE '' END) AS latest_path,
+			       MAX(CASE WHEN latest_rank=1 THEN published_at ELSE 0 END) AS latest_publish
+			FROM published
+			GROUP BY category_public_id
+		)
 		SELECT category.id, category.public_id, category.slug, category.name, category.description,
-		       category.sort_order, category.created_at, category.updated_at, COUNT(content.id),
-		       COALESCE((
-		           SELECT revision_latest.title
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND revision_latest.category_public_id=category.public_id
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), ''),
-		       COALESCE((
-		           SELECT '/posts/' || content_latest.published_slug
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND revision_latest.category_public_id=category.public_id
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), ''),
-		       COALESCE((
-		           SELECT content_latest.published_at
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND revision_latest.category_public_id=category.public_id
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), 0)
+		       category.sort_order, category.created_at, category.updated_at,
+		       summary.article_count, summary.latest_title, summary.latest_path, summary.latest_publish
 		FROM categories category
-		LEFT JOIN content_revisions revision ON revision.category_public_id=category.public_id
-		LEFT JOIN contents content ON content.published_revision_id=revision.id
-		  AND content.kind='article' AND content.status='published' AND content.trashed_at IS NULL
-		GROUP BY category.id, category.public_id, category.slug, category.name, category.description,
-		         category.sort_order, category.created_at, category.updated_at
-		HAVING COUNT(content.id) > 0
+		JOIN summary ON summary.category_public_id=category.public_id
 		ORDER BY category.sort_order, category.name, category.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list public category summaries: %w", err)
@@ -121,44 +118,46 @@ func (r *Repository) PublicCategories(ctx context.Context) ([]PublicCategorySumm
 }
 
 func (r *Repository) PublicTags(ctx context.Context) ([]PublicTagSummary, error) {
+	ready, err := r.publicTaxonomyReady(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read public taxonomy projection state: %w", err)
+	}
+	if ready {
+		return r.publicTagsFromProjection(ctx)
+	}
 	rows, err := r.database.Reader.QueryContext(ctx, `
-		SELECT tag.id, tag.public_id, tag.slug, tag.name, tag.description, tag.created_at, tag.updated_at,
-		       COUNT(content.id),
-		       COALESCE((
-		           SELECT revision_latest.title
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), ''),
-		       COALESCE((
-		           SELECT '/posts/' || content_latest.published_slug
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), ''),
-		       COALESCE((
-		           SELECT content_latest.published_at
-		           FROM contents content_latest
-		           JOIN content_revisions revision_latest ON revision_latest.id=content_latest.published_revision_id
-		           WHERE content_latest.kind='article' AND content_latest.status='published'
-		             AND content_latest.trashed_at IS NULL
-		             AND EXISTS (SELECT 1 FROM json_each(revision_latest.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id)))
-		           ORDER BY content_latest.published_at DESC, content_latest.id DESC LIMIT 1
-		       ), 0)
-		FROM tags tag
-		LEFT JOIN content_revisions revision ON EXISTS (
-			SELECT 1 FROM json_each(revision.tag_public_ids_json) WHERE json_each.value=lower(hex(tag.public_id))
+		WITH published AS MATERIALIZED (
+			SELECT c.id AS content_id, c.published_slug, c.published_at,
+			       revision.title, revision.tag_public_ids_json
+			FROM contents c
+			JOIN content_revisions revision ON revision.id=c.published_revision_id
+			WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		), tagged AS MATERIALIZED (
+			SELECT DISTINCT published.content_id, published.published_slug, published.published_at,
+			       published.title, lower(snapshot.value) AS tag_public_key
+			FROM published
+			JOIN json_each(published.tag_public_ids_json) snapshot
+		), ranked AS (
+			SELECT tag_public_key, content_id, published_slug, published_at, title,
+			       ROW_NUMBER() OVER (
+				       PARTITION BY tag_public_key
+				       ORDER BY published_at DESC, content_id DESC
+			       ) AS latest_rank
+			FROM tagged
+		), summary AS (
+			SELECT tag_public_key,
+			       COUNT(*) AS article_count,
+			       MAX(CASE WHEN latest_rank=1 THEN title ELSE '' END) AS latest_title,
+			       MAX(CASE WHEN latest_rank=1 THEN '/posts/' || published_slug ELSE '' END) AS latest_path,
+			       MAX(CASE WHEN latest_rank=1 THEN published_at ELSE 0 END) AS latest_publish
+			FROM ranked
+			GROUP BY tag_public_key
 		)
-		LEFT JOIN contents content ON content.published_revision_id=revision.id
-		  AND content.kind='article' AND content.status='published' AND content.trashed_at IS NULL
-		GROUP BY tag.id, tag.public_id, tag.slug, tag.name, tag.description, tag.created_at, tag.updated_at
-		HAVING COUNT(content.id) > 0
+		SELECT tag.id, tag.public_id, tag.slug, tag.name, tag.description,
+		       tag.created_at, tag.updated_at, summary.article_count,
+		       summary.latest_title, summary.latest_path, summary.latest_publish
+		FROM tags tag
+		JOIN summary ON summary.tag_public_key=lower(hex(tag.public_id))
 		ORDER BY tag.name, tag.id`)
 	if err != nil {
 		return nil, fmt.Errorf("list public tag summaries: %w", err)
@@ -179,6 +178,275 @@ func (r *Repository) PublicTags(ctx context.Context) ([]PublicTagSummary, error)
 		result = append(result, summary)
 	}
 	return result, rows.Err()
+}
+
+func (r *Repository) publicCategoriesFromProjection(ctx context.Context) ([]PublicCategorySummary, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT taxonomy_public_id,title,published_slug,published_at,
+			       COUNT(*) OVER (PARTITION BY taxonomy_public_id) AS article_count,
+			       ROW_NUMBER() OVER (
+				       PARTITION BY taxonomy_public_id
+				       ORDER BY published_at DESC,content_id DESC
+			       ) AS latest_rank
+			FROM public_taxonomy_members
+			WHERE taxonomy_kind='category'
+		)
+		SELECT category.id,category.public_id,category.slug,category.name,category.description,
+		       category.sort_order,category.created_at,category.updated_at,
+		       ranked.article_count,ranked.title,'/posts/' || ranked.published_slug,ranked.published_at
+		FROM categories category
+		JOIN ranked ON ranked.taxonomy_public_id=category.public_id AND ranked.latest_rank=1
+		ORDER BY category.sort_order,category.name,category.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list projected public category summaries: %w", err)
+	}
+	defer rows.Close()
+	result := make([]PublicCategorySummary, 0)
+	for rows.Next() {
+		var summary PublicCategorySummary
+		var created, updated, latestPublish int64
+		if err := rows.Scan(&summary.Category.ID, &summary.Category.PublicID, &summary.Category.Slug, &summary.Category.Name, &summary.Category.Description, &summary.Category.SortOrder, &created, &updated, &summary.ArticleCount, &summary.LatestTitle, &summary.LatestPath, &latestPublish); err != nil {
+			return nil, fmt.Errorf("scan projected public category summary: %w", err)
+		}
+		summary.Category.CreatedAt = fromMillis(created)
+		summary.Category.UpdatedAt = fromMillis(updated)
+		summary.LatestPublish = fromMillis(latestPublish)
+		result = append(result, summary)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) publicTagsFromProjection(ctx context.Context) ([]PublicTagSummary, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		WITH ranked AS (
+			SELECT taxonomy_public_id,title,published_slug,published_at,
+			       COUNT(*) OVER (PARTITION BY taxonomy_public_id) AS article_count,
+			       ROW_NUMBER() OVER (
+				       PARTITION BY taxonomy_public_id
+				       ORDER BY published_at DESC,content_id DESC
+			       ) AS latest_rank
+			FROM public_taxonomy_members
+			WHERE taxonomy_kind='tag'
+		)
+		SELECT tag.id,tag.public_id,tag.slug,tag.name,tag.description,
+		       tag.created_at,tag.updated_at,
+		       ranked.article_count,ranked.title,'/posts/' || ranked.published_slug,ranked.published_at
+		FROM tags tag
+		JOIN ranked ON ranked.taxonomy_public_id=tag.public_id AND ranked.latest_rank=1
+		ORDER BY tag.name,tag.id`)
+	if err != nil {
+		return nil, fmt.Errorf("list projected public tag summaries: %w", err)
+	}
+	defer rows.Close()
+	result := make([]PublicTagSummary, 0)
+	for rows.Next() {
+		var summary PublicTagSummary
+		var created, updated, latestPublish int64
+		if err := rows.Scan(&summary.Tag.ID, &summary.Tag.PublicID, &summary.Tag.Slug, &summary.Tag.Name, &summary.Tag.Description, &created, &updated, &summary.ArticleCount, &summary.LatestTitle, &summary.LatestPath, &latestPublish); err != nil {
+			return nil, fmt.Errorf("scan projected public tag summary: %w", err)
+		}
+		summary.Tag.CreatedAt = fromMillis(created)
+		summary.Tag.UpdatedAt = fromMillis(updated)
+		summary.LatestPublish = fromMillis(latestPublish)
+		result = append(result, summary)
+	}
+	return result, rows.Err()
+}
+
+func (r *Repository) PublicTaxonomyRebuildState(ctx context.Context) (PublicTaxonomyRebuildState, error) {
+	var state PublicTaxonomyRebuildState
+	var updatedAt int64
+	err := r.database.Reader.QueryRowContext(ctx, `
+		SELECT status,cursor_content_id,schema_version,last_error,updated_at
+		FROM public_taxonomy_rebuild_state WHERE id=1`).Scan(
+		&state.Status, &state.CursorContentID, &state.SchemaVersion, &state.LastError, &updatedAt)
+	if err != nil {
+		return PublicTaxonomyRebuildState{}, err
+	}
+	state.UpdatedAt = fromMillis(updatedAt)
+	return state, nil
+}
+
+func (r *Repository) publicTaxonomyReady(ctx context.Context) (bool, error) {
+	var status string
+	err := r.database.Reader.QueryRowContext(ctx, `SELECT status FROM public_taxonomy_rebuild_state WHERE id=1`).Scan(&status)
+	return status == "ready", err
+}
+
+// ReplacePublishedTaxonomyTx updates only the rebuildable public projection.
+// The caller owns the publication transaction; this method never performs
+// Markdown work or network I/O.
+func (r *Repository) ReplacePublishedTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID, revisionID int64, kind string, categoryPublicID []byte, tagPublicIDsJSON, title, slug string, publishedAt time.Time) error {
+	if contentID < 1 || revisionID < 1 || tx == nil {
+		return errors.New("published taxonomy input is invalid")
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM public_taxonomy_members WHERE content_id=?", contentID); err != nil {
+		return err
+	}
+	if kind != "article" {
+		return nil
+	}
+	insert := func(taxonomyKind string, publicID []byte) error {
+		if len(publicID) == 0 {
+			return nil
+		}
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO public_taxonomy_members(
+				content_id,published_revision_id,taxonomy_kind,taxonomy_public_id,
+				title,published_slug,published_at
+			) VALUES(?,?,?,?,?,?,?)`,
+			contentID, revisionID, taxonomyKind, publicID, title, slug, publishedAt.UnixMilli())
+		return err
+	}
+	if err := insert("category", categoryPublicID); err != nil {
+		return err
+	}
+	var encodedTags []string
+	if strings.TrimSpace(tagPublicIDsJSON) != "" {
+		if err := json.Unmarshal([]byte(tagPublicIDsJSON), &encodedTags); err != nil {
+			return fmt.Errorf("decode published tag IDs: %w", err)
+		}
+	}
+	seen := make(map[string]struct{}, len(encodedTags))
+	for _, encoded := range encodedTags {
+		encoded = strings.ToLower(strings.TrimSpace(encoded))
+		if encoded == "" {
+			continue
+		}
+		if _, ok := seen[encoded]; ok {
+			continue
+		}
+		seen[encoded] = struct{}{}
+		publicID, err := hex.DecodeString(encoded)
+		if err != nil || len(publicID) != 16 {
+			return fmt.Errorf("invalid published tag public ID")
+		}
+		if err := insert("tag", publicID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) ClearPublishedTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID int64) error {
+	if contentID < 1 || tx == nil {
+		return errors.New("published taxonomy clear input is invalid")
+	}
+	_, err := tx.ExecContext(ctx, "DELETE FROM public_taxonomy_members WHERE content_id=?", contentID)
+	return err
+}
+
+type publicTaxonomyRecord struct {
+	ContentID           int64
+	PublishedRevisionID int64
+	PublishedSlug       string
+	PublishedAt         int64
+	Title               string
+	CategoryPublicID    []byte
+	TagPublicIDsJSON    string
+}
+
+// RebuildPublicTaxonomy processes one bounded batch. A call starts a fresh
+// rebuild unless the state is already running, then persists the last content
+// ID after the batch commits. Callers can invoke it again after interruption.
+func (r *Repository) RebuildPublicTaxonomy(ctx context.Context, batchSize int) (processed int, complete bool, err error) {
+	if batchSize < 1 {
+		batchSize = 128
+	}
+	if batchSize > 512 {
+		batchSize = 512
+	}
+	state, err := r.PublicTaxonomyRebuildState(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	cursor := state.CursorContentID
+	if state.Status != "running" {
+		tx, beginErr := r.database.Writer.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return 0, false, beginErr
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, "DELETE FROM public_taxonomy_members"); err != nil {
+			return 0, false, err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE public_taxonomy_rebuild_state
+			SET status='running',cursor_content_id=0,last_error='',updated_at=? WHERE id=1`, time.Now().UTC().UnixMilli()); err != nil {
+			return 0, false, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, false, err
+		}
+		cursor = 0
+	}
+
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT c.id,c.published_revision_id,c.published_slug,c.published_at,
+		       revision.title,revision.category_public_id,revision.tag_public_ids_json
+		FROM contents c
+		JOIN content_revisions revision ON revision.id=c.published_revision_id
+		WHERE c.id>? AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
+		ORDER BY c.id LIMIT ?`, cursor, batchSize)
+	if err != nil {
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	records := make([]publicTaxonomyRecord, 0, batchSize)
+	for rows.Next() {
+		var record publicTaxonomyRecord
+		if err := rows.Scan(&record.ContentID, &record.PublishedRevisionID, &record.PublishedSlug, &record.PublishedAt, &record.Title, &record.CategoryPublicID, &record.TagPublicIDsJSON); err != nil {
+			rows.Close()
+			return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+		}
+		records = append(records, record)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	if len(records) == 0 {
+		if _, err := r.database.Writer.ExecContext(ctx, `
+			UPDATE public_taxonomy_rebuild_state
+			SET status='ready',last_error='',updated_at=? WHERE id=1`, time.Now().UTC().UnixMilli()); err != nil {
+			return 0, false, err
+		}
+		return 0, true, nil
+	}
+
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	defer tx.Rollback()
+	for _, record := range records {
+		if err := r.ReplacePublishedTaxonomyTx(ctx, tx, record.ContentID, record.PublishedRevisionID, "article", record.CategoryPublicID, record.TagPublicIDsJSON, record.Title, record.PublishedSlug, fromMillis(record.PublishedAt)); err != nil {
+			_ = tx.Rollback()
+			return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE public_taxonomy_rebuild_state
+		SET status='running',cursor_content_id=?,last_error='',updated_at=? WHERE id=1`, records[len(records)-1].ContentID, time.Now().UTC().UnixMilli()); err != nil {
+		_ = tx.Rollback()
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, r.recordPublicTaxonomyRebuildError(ctx, err)
+	}
+	return len(records), false, nil
+}
+
+func (r *Repository) recordPublicTaxonomyRebuildError(ctx context.Context, cause error) error {
+	message := cause.Error()
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	_, _ = r.database.Writer.ExecContext(ctx, `
+		UPDATE public_taxonomy_rebuild_state SET status='failed',last_error=?,updated_at=? WHERE id=1`, message, time.Now().UTC().UnixMilli())
+	return cause
 }
 
 func (r *Repository) Redirects(ctx context.Context, limit int) ([]Redirect, error) {
@@ -536,6 +804,196 @@ func (r *Repository) TaxonomyBySnapshot(ctx context.Context, categoryPublicID []
 	return result, nil
 }
 
+func (r *Repository) TaxonomiesByContentIDs(ctx context.Context, contentIDs []int64) (map[int64]Taxonomy, error) {
+	result := make(map[int64]Taxonomy, len(contentIDs))
+	ids := uniquePositiveIDs(contentIDs)
+	for start := 0; start < len(ids); start += taxonomyBatchSize {
+		end := start + taxonomyBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk))
+		for _, id := range chunk {
+			args = append(args, id)
+			result[id] = Taxonomy{}
+		}
+		rows, err := r.database.Reader.QueryContext(ctx, `
+			SELECT c.id, ca.id, ca.public_id, ca.slug, ca.name, ca.description, ca.sort_order, ca.created_at, ca.updated_at
+			FROM contents c JOIN categories ca ON ca.id=c.category_id
+			WHERE c.kind='article' AND c.id IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("batch read article categories: %w", err)
+		}
+		for rows.Next() {
+			var contentID int64
+			var category Category
+			var created, updated int64
+			if err := rows.Scan(&contentID, &category.ID, &category.PublicID, &category.Slug, &category.Name, &category.Description, &category.SortOrder, &created, &updated); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			category.CreatedAt, category.UpdatedAt = fromMillis(created), fromMillis(updated)
+			taxonomy := result[contentID]
+			taxonomy.Category = &category
+			result[contentID] = taxonomy
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+
+		rows, err = r.database.Reader.QueryContext(ctx, `
+			SELECT ct.content_id, t.id, t.public_id, t.slug, t.name, t.description, t.created_at, t.updated_at
+			FROM content_tags ct JOIN tags t ON t.id=ct.tag_id
+			WHERE ct.content_id IN (`+placeholders+`)
+			ORDER BY ct.content_id, t.name, t.id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("batch read article tags: %w", err)
+		}
+		for rows.Next() {
+			var contentID int64
+			var tag Tag
+			var created, updated int64
+			if err := rows.Scan(&contentID, &tag.ID, &tag.PublicID, &tag.Slug, &tag.Name, &tag.Description, &created, &updated); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			tag.CreatedAt, tag.UpdatedAt = fromMillis(created), fromMillis(updated)
+			taxonomy := result[contentID]
+			taxonomy.Tags = append(taxonomy.Tags, tag)
+			result[contentID] = taxonomy
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (r *Repository) TaxonomiesBySnapshot(ctx context.Context, snapshots []TaxonomySnapshot) (map[int64]Taxonomy, error) {
+	result := make(map[int64]Taxonomy, len(snapshots))
+	unique := make([]TaxonomySnapshot, 0, len(snapshots))
+	seen := make(map[int64]struct{}, len(snapshots))
+	for _, snapshot := range snapshots {
+		if snapshot.ContentID < 1 {
+			continue
+		}
+		if _, exists := seen[snapshot.ContentID]; exists {
+			continue
+		}
+		seen[snapshot.ContentID] = struct{}{}
+		result[snapshot.ContentID] = Taxonomy{}
+		unique = append(unique, snapshot)
+	}
+	for start := 0; start < len(unique); start += taxonomyBatchSize {
+		end := start + taxonomyBatchSize
+		if end > len(unique) {
+			end = len(unique)
+		}
+		chunk := unique[start:end]
+		categoryIDs := make([][]byte, 0, len(chunk))
+		categorySeen := make(map[string]struct{}, len(chunk))
+		for _, snapshot := range chunk {
+			if len(snapshot.CategoryPublicID) == 0 {
+				continue
+			}
+			key := hex.EncodeToString(snapshot.CategoryPublicID)
+			if _, exists := categorySeen[key]; !exists {
+				categorySeen[key] = struct{}{}
+				categoryIDs = append(categoryIDs, snapshot.CategoryPublicID)
+			}
+		}
+		if len(categoryIDs) > 0 {
+			placeholders := strings.TrimRight(strings.Repeat("?,", len(categoryIDs)), ",")
+			args := make([]any, len(categoryIDs))
+			for i := range categoryIDs {
+				args[i] = categoryIDs[i]
+			}
+			categories := make(map[string]Category, len(categoryIDs))
+			rows, err := r.database.Reader.QueryContext(ctx, `SELECT id,public_id,slug,name,description,sort_order,created_at,updated_at FROM categories WHERE public_id IN (`+placeholders+`)`, args...)
+			if err != nil {
+				return nil, fmt.Errorf("batch read published categories: %w", err)
+			}
+			for rows.Next() {
+				var category Category
+				var created, updated int64
+				if err := rows.Scan(&category.ID, &category.PublicID, &category.Slug, &category.Name, &category.Description, &category.SortOrder, &created, &updated); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				category.CreatedAt, category.UpdatedAt = fromMillis(created), fromMillis(updated)
+				categories[hex.EncodeToString(category.PublicID)] = category
+			}
+			if err := rows.Close(); err != nil {
+				return nil, err
+			}
+			for _, snapshot := range chunk {
+				if category, exists := categories[hex.EncodeToString(snapshot.CategoryPublicID)]; exists {
+					taxonomy := result[snapshot.ContentID]
+					copy := category
+					taxonomy.Category = &copy
+					result[snapshot.ContentID] = taxonomy
+				}
+			}
+		}
+
+		values := make([]string, 0, len(chunk))
+		args := make([]any, 0, len(chunk)*2)
+		for _, snapshot := range chunk {
+			values = append(values, "(?,?)")
+			args = append(args, snapshot.ContentID, normalizedTagSnapshot(snapshot.TagPublicIDsJSON))
+		}
+		rows, err := r.database.Reader.QueryContext(ctx, `WITH requested(content_id,tag_ids) AS (VALUES `+strings.Join(values, ",")+
+			`) SELECT requested.content_id,t.id,t.public_id,t.slug,t.name,t.description,t.created_at,t.updated_at
+			FROM requested JOIN json_each(requested.tag_ids) snapshot JOIN tags t ON snapshot.value=lower(hex(t.public_id))
+			ORDER BY requested.content_id,t.name,t.id`, args...)
+		if err != nil {
+			return nil, fmt.Errorf("batch read published tags: %w", err)
+		}
+		for rows.Next() {
+			var contentID int64
+			var tag Tag
+			var created, updated int64
+			if err := rows.Scan(&contentID, &tag.ID, &tag.PublicID, &tag.Slug, &tag.Name, &tag.Description, &created, &updated); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			tag.CreatedAt, tag.UpdatedAt = fromMillis(created), fromMillis(updated)
+			taxonomy := result[contentID]
+			taxonomy.Tags = append(taxonomy.Tags, tag)
+			result[contentID] = taxonomy
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func normalizedTagSnapshot(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "[]"
+	}
+	return value
+}
+
+func uniquePositiveIDs(values []int64) []int64 {
+	result := make([]int64, 0, len(values))
+	seen := make(map[int64]struct{}, len(values))
+	for _, value := range values {
+		if value < 1 {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
 func (r *Repository) ReplaceArticleTaxonomyTx(ctx context.Context, tx *sql.Tx, contentID, categoryID int64, tagIDs []int64, now time.Time) ([]byte, string, error) {
 	var categoryPublicID []byte
 	if categoryID > 0 {
@@ -592,6 +1050,24 @@ func (r *Repository) PublicCategoryPage(ctx context.Context, key string, request
 	}
 	category.CreatedAt = fromMillis(created)
 	category.UpdatedAt = fromMillis(updated)
+	ready, err := r.publicTaxonomyReady(ctx)
+	if err != nil {
+		return PublicCategoryPage{}, err
+	}
+	if ready {
+		var total int
+		if err := r.database.Reader.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM public_taxonomy_members
+			WHERE taxonomy_kind='category' AND taxonomy_public_id=?`, category.PublicID).Scan(&total); err != nil {
+			return PublicCategoryPage{}, err
+		}
+		info := pagination.NewInfo(total, request)
+		ids, err := r.publicContentIDs(ctx, `
+			SELECT content_id FROM public_taxonomy_members
+			WHERE taxonomy_kind='category' AND taxonomy_public_id=?
+			ORDER BY published_at DESC,content_id DESC LIMIT ? OFFSET ?`, category.PublicID, info.PerPage, info.Offset())
+		return PublicCategoryPage{Category: category, ArticleIDs: ids, Pagination: info}, err
+	}
 	total, err := r.publicCategoryCount(ctx, category.PublicID)
 	if err != nil {
 		return PublicCategoryPage{}, err
@@ -626,6 +1102,24 @@ func (r *Repository) PublicTagPage(ctx context.Context, key string, request pagi
 	}
 	tag.CreatedAt = fromMillis(created)
 	tag.UpdatedAt = fromMillis(updated)
+	ready, err := r.publicTaxonomyReady(ctx)
+	if err != nil {
+		return PublicTagPage{}, err
+	}
+	if ready {
+		var total int
+		if err := r.database.Reader.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM public_taxonomy_members
+			WHERE taxonomy_kind='tag' AND taxonomy_public_id=?`, tag.PublicID).Scan(&total); err != nil {
+			return PublicTagPage{}, err
+		}
+		info := pagination.NewInfo(total, request)
+		ids, err := r.publicContentIDs(ctx, `
+			SELECT content_id FROM public_taxonomy_members
+			WHERE taxonomy_kind='tag' AND taxonomy_public_id=?
+			ORDER BY published_at DESC,content_id DESC LIMIT ? OFFSET ?`, tag.PublicID, info.PerPage, info.Offset())
+		return PublicTagPage{Tag: tag, ArticleIDs: ids, Pagination: info}, err
+	}
 	total, err := r.publicTagCount(ctx, tag.PublicID)
 	if err != nil {
 		return PublicTagPage{}, err
@@ -642,6 +1136,46 @@ func (r *Repository) PublicTagPage(ctx context.Context, key string, request pagi
 		  AND c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
 		ORDER BY c.published_at DESC,c.id DESC LIMIT ? OFFSET ?`, tag.PublicID, info.PerPage, info.Offset())
 	return PublicTagPage{Tag: tag, ArticleIDs: ids, Pagination: info}, err
+}
+
+// PublicRelatedArticleIDs reads the rebuildable public membership projection
+// for detail-page recommendations. The boolean is false while the projection
+// is rebuilding so callers can retain their authoritative snapshot fallback.
+func (r *Repository) PublicRelatedArticleIDs(ctx context.Context, currentID int64, categoryPublicID []byte, tagPublicIDs [][]byte, limit int) ([]int64, bool, error) {
+	ready, err := r.publicTaxonomyReady(ctx)
+	if err != nil || !ready {
+		return nil, ready, err
+	}
+	if limit < 1 {
+		return nil, true, nil
+	}
+	if limit > 20 {
+		limit = 20
+	}
+	conditions := make([]string, 0, 1+len(tagPublicIDs))
+	args := []any{currentID}
+	if len(categoryPublicID) > 0 {
+		conditions = append(conditions, "(taxonomy_kind='category' AND taxonomy_public_id=?)")
+		args = append(args, categoryPublicID)
+	}
+	for _, tagPublicID := range tagPublicIDs {
+		if len(tagPublicID) == 0 {
+			continue
+		}
+		conditions = append(conditions, "(taxonomy_kind='tag' AND taxonomy_public_id=?)")
+		args = append(args, tagPublicID)
+	}
+	if len(conditions) == 0 {
+		return nil, true, nil
+	}
+	query := `SELECT content_id
+		FROM public_taxonomy_members
+		WHERE content_id<>? AND (` + strings.Join(conditions, " OR ") + `)
+		GROUP BY content_id
+		ORDER BY MAX(published_at) DESC,content_id DESC LIMIT ?`
+	args = append(args, limit)
+	ids, err := r.publicContentIDs(ctx, query, args...)
+	return ids, true, err
 }
 
 func (r *Repository) publicCategoryCount(ctx context.Context, publicID []byte) (int, error) {

@@ -89,6 +89,26 @@ type Taxonomy struct {
 	Tags     []Tag
 }
 
+// TaxonomySnapshot is the immutable taxonomy identity stored on a published
+// revision. Content list readers use it to batch-resolve terms without
+// issuing one query per card.
+type TaxonomySnapshot struct {
+	ContentID        int64
+	CategoryPublicID []byte
+	TagPublicIDsJSON string
+}
+
+// PublicTaxonomyRebuildState describes the bounded, resumable projection
+// rebuild. The projection is derived data; published revisions remain the
+// authority when this state is pending or failed.
+type PublicTaxonomyRebuildState struct {
+	Status          string
+	CursorContentID int64
+	SchemaVersion   int
+	LastError       string
+	UpdatedAt       time.Time
+}
+
 type PublicCategoryPage struct {
 	Category   Category
 	ArticleIDs []int64

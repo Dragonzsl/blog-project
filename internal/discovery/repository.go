@@ -19,61 +19,113 @@ var markdownMarkup = regexp.MustCompile(`(?s)<[^>]*>|!\[[^]]*\]\([^)]*\)|\[([^]]
 
 type Repository struct{ database *database.DB }
 
+type searchDirtyRecord struct {
+	contentID int64
+	queuedAt  int64
+}
+
 func NewRepository(db *database.DB) *Repository { return &Repository{database: db} }
 
 func (r *Repository) SyncDirty(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, "SELECT content_id,queued_at FROM search_dirty ORDER BY queued_at,content_id LIMIT ?", limit)
+	if err != nil {
+		return 0, fmt.Errorf("list dirty search documents: %w", err)
+	}
+	defer rows.Close()
+	dirty := make([]searchDirtyRecord, 0, limit)
+	for rows.Next() {
+		var item searchDirtyRecord
+		if err := rows.Scan(&item.contentID, &item.queuedAt); err != nil {
+			return 0, err
+		}
+		dirty = append(dirty, item)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(dirty) == 0 {
+		return 0, nil
+	}
+	documents, err := r.readIndexDocuments(ctx, dirty)
+	if err != nil {
+		return 0, fmt.Errorf("read search documents: %w", err)
+	}
+	type snapshot struct {
+		searchDirtyRecord
+		document *indexDocument
+	}
+	snapshots := make([]snapshot, 0, len(dirty))
+	for _, item := range dirty {
+		snapshots = append(snapshots, snapshot{searchDirtyRecord: item, document: documents[item.contentID]})
+	}
+
 	tx, err := r.database.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin search synchronization: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, "SELECT content_id FROM search_dirty ORDER BY queued_at,content_id LIMIT ?", limit)
+	states, err := readSearchStatesTx(ctx, tx, dirty)
 	if err != nil {
-		return 0, fmt.Errorf("list dirty search documents: %w", err)
-	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
 		return 0, err
 	}
-	for _, id := range ids {
-		if err := r.syncDocument(ctx, tx, id); err != nil {
-			return 0, fmt.Errorf("synchronize search document %d: %w", id, err)
+	insertGram, err := tx.PrepareContext(ctx, "INSERT INTO search_grams(content_id,gram) VALUES(?,?)")
+	if err != nil {
+		return 0, err
+	}
+	defer insertGram.Close()
+	processed := 0
+	for _, item := range snapshots {
+		state, exists := states[item.contentID]
+		if !exists || state.status != "published" || state.trashed || item.document == nil {
+			if err := deleteSearchDocumentTx(ctx, tx, item.contentID); err != nil {
+				return 0, err
+			}
+			if err := deleteDirtyTx(ctx, tx, item.searchDirtyRecord); err != nil {
+				return 0, err
+			}
+			processed++
+			continue
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM search_dirty WHERE content_id=?", id); err != nil {
+		if state.publishedRevisionID != item.document.PublishedRevisionID {
+			// A publication raced the Reader snapshot. The trigger has kept this
+			// row dirty; leave it for the next bounded batch.
+			continue
+		}
+		if err := r.syncDocumentTx(ctx, tx, insertGram, *item.document); err != nil {
+			return 0, fmt.Errorf("synchronize search document %d: %w", item.contentID, err)
+		}
+		if err := deleteDirtyTx(ctx, tx, item.searchDirtyRecord); err != nil {
 			return 0, err
 		}
+		processed++
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit search synchronization: %w", err)
 	}
-	return len(ids), nil
+	return processed, nil
 }
 
 type indexDocument struct {
+	ContentID, PublishedRevisionID     int64
 	kind, path, categorySlug, tagSlugs string
 	title, excerpt, body, taxonomy     string
 	publishedAt                        int64
 }
 
-func (r *Repository) syncDocument(ctx context.Context, tx *sql.Tx, contentID int64) error {
-	if _, err := tx.ExecContext(ctx, "DELETE FROM search_documents WHERE rowid=?", contentID); err != nil {
-		return err
+func (r *Repository) readIndexDocuments(ctx context.Context, dirty []searchDirtyRecord) (map[int64]*indexDocument, error) {
+	ids := make([]any, 0, len(dirty))
+	for _, item := range dirty {
+		ids = append(ids, item.contentID)
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM search_grams WHERE content_id=?", contentID); err != nil {
-		return err
-	}
-	var document indexDocument
-	var categoryName, tagNames string
-	err := tx.QueryRowContext(ctx, `
-		SELECT c.kind,
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(ids)), ",")
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT c.id,c.published_revision_id,c.kind,
 		       CASE c.kind WHEN 'page' THEN '/' || c.published_slug ELSE '/posts/' || c.published_slug END,
 		       c.published_at,
 		       revision.title, revision.excerpt, revision.body_markdown,
@@ -94,41 +146,102 @@ func (r *Repository) syncDocument(ctx context.Context, tx *sql.Tx, contentID int
 		FROM contents c
 		JOIN content_revisions revision ON revision.id=c.published_revision_id
 		LEFT JOIN categories category ON category.public_id=revision.category_public_id
-		WHERE c.id=? AND c.status='published' AND c.trashed_at IS NULL
+		WHERE c.id IN (`+placeholders+`) AND c.status='published' AND c.trashed_at IS NULL
 		  AND c.published_slug IS NOT NULL
-	`, contentID).Scan(
-		&document.kind, &document.path, &document.publishedAt,
-		&document.title, &document.excerpt, &document.body,
-		&document.categorySlug, &categoryName, &document.tagSlugs, &tagNames,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	`, ids...)
 	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	documents := make(map[int64]*indexDocument, len(dirty))
+	for rows.Next() {
+		var document indexDocument
+		var categoryName, tagNames string
+		if err := rows.Scan(
+			&document.ContentID, &document.PublishedRevisionID,
+			&document.kind, &document.path, &document.publishedAt,
+			&document.title, &document.excerpt, &document.body,
+			&document.categorySlug, &categoryName, &document.tagSlugs, &tagNames,
+		); err != nil {
+			return nil, err
+		}
+		document.body = plainText(document.body)
+		document.taxonomy = strings.TrimSpace(categoryName + " " + tagNames)
+		copy := document
+		documents[document.ContentID] = &copy
+	}
+	return documents, rows.Err()
+}
+
+type searchState struct {
+	publishedRevisionID int64
+	status              string
+	trashed             bool
+}
+
+func readSearchStatesTx(ctx context.Context, tx *sql.Tx, dirty []searchDirtyRecord) (map[int64]searchState, error) {
+	args := make([]any, 0, len(dirty))
+	for _, item := range dirty {
+		args = append(args, item.contentID)
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(args)), ",")
+	rows, err := tx.QueryContext(ctx, `SELECT id,published_revision_id,status,trashed_at FROM contents WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := make(map[int64]searchState, len(dirty))
+	for rows.Next() {
+		var id int64
+		var revisionID sql.NullInt64
+		var trashedAt sql.NullInt64
+		var state searchState
+		if err := rows.Scan(&id, &revisionID, &state.status, &trashedAt); err != nil {
+			return nil, err
+		}
+		state.publishedRevisionID = revisionID.Int64
+		state.trashed = trashedAt.Valid
+		states[id] = state
+	}
+	return states, rows.Err()
+}
+
+func (r *Repository) syncDocumentTx(ctx context.Context, tx *sql.Tx, insertGram *sql.Stmt, document indexDocument) error {
+	if err := deleteSearchGramsTx(ctx, tx, document.ContentID); err != nil {
 		return err
 	}
-	document.body = plainText(document.body)
-	document.taxonomy = strings.TrimSpace(categoryName + " " + tagNames)
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO search_documents(
+		INSERT OR REPLACE INTO search_documents(
 			rowid,kind,path,published_at,category_slug,tag_slugs,title,excerpt,body,taxonomy
 		) VALUES(?,?,?,?,?,?,?,?,?,?)
-	`, contentID, document.kind, document.path, document.publishedAt, document.categorySlug,
+	`, document.ContentID, document.kind, document.path, document.publishedAt, document.categorySlug,
 		document.tagSlugs, document.title, document.excerpt, document.body, document.taxonomy); err != nil {
 		return err
 	}
 	searchable := strings.Join([]string{document.title, document.excerpt, document.body, document.taxonomy}, " ")
-	insertGram, err := tx.PrepareContext(ctx, "INSERT INTO search_grams(content_id,gram) VALUES(?,?)")
-	if err != nil {
-		return err
-	}
-	defer insertGram.Close()
 	for _, gram := range chineseBigrams(searchable, 4096) {
-		if _, err := insertGram.ExecContext(ctx, contentID, gram); err != nil {
+		if _, err := insertGram.ExecContext(ctx, document.ContentID, gram); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func deleteSearchDocumentTx(ctx context.Context, tx *sql.Tx, contentID int64) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM search_documents WHERE rowid=?", contentID); err != nil {
+		return err
+	}
+	return deleteSearchGramsTx(ctx, tx, contentID)
+}
+
+func deleteSearchGramsTx(ctx context.Context, tx *sql.Tx, contentID int64) error {
+	_, err := tx.ExecContext(ctx, "DELETE FROM search_grams WHERE content_id=?", contentID)
+	return err
+}
+
+func deleteDirtyTx(ctx context.Context, tx *sql.Tx, item searchDirtyRecord) error {
+	_, err := tx.ExecContext(ctx, "DELETE FROM search_dirty WHERE content_id=? AND queued_at=?", item.contentID, item.queuedAt)
+	return err
 }
 
 func (r *Repository) Search(ctx context.Context, query SearchQuery) ([]SearchResult, error) {
@@ -183,11 +296,13 @@ func (r *Repository) SearchPage(ctx context.Context, query SearchQuery) (SearchP
 
 func (r *Repository) searchCount(ctx context.Context, query SearchQuery, grams []string) (int, error) {
 	if len(grams) > 0 {
-		placeholders := strings.TrimRight(strings.Repeat("?,", len(grams)), ",")
-		statement := `SELECT COUNT(*) FROM (
-			SELECT d.rowid
-			FROM search_documents d JOIN search_grams g ON g.content_id=d.rowid
-			WHERE g.gram IN (` + placeholders + `)`
+		statement := `WITH candidates AS MATERIALIZED (
+			` + chineseCandidatesSQL(len(grams)) + `
+		)
+		SELECT COUNT(*)
+		FROM candidates candidate
+		JOIN search_documents d ON d.rowid=candidate.content_id
+		WHERE 1=1`
 		args := make([]any, 0, len(grams)+4)
 		for _, gram := range grams {
 			args = append(args, gram)
@@ -197,8 +312,6 @@ func (r *Repository) searchCount(ctx context.Context, query SearchQuery, grams [
 			args = append(args, match)
 		}
 		statement, args = addSearchFilters(statement, args, query)
-		statement += " GROUP BY d.rowid HAVING COUNT(DISTINCT g.gram)=?)"
-		args = append(args, len(grams))
 		var total int
 		err := r.database.Reader.QueryRowContext(ctx, statement, args...).Scan(&total)
 		return total, err
@@ -216,10 +329,13 @@ func (r *Repository) searchCount(ctx context.Context, query SearchQuery, grams [
 }
 
 func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams []string) ([]SearchResult, error) {
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(grams)), ",")
-	statement := `SELECT d.kind,d.path,d.title,d.excerpt,r.cover_media_public_id,d.published_at
-		FROM search_documents d JOIN contents c ON c.id=d.rowid JOIN content_revisions r ON r.id=c.published_revision_id JOIN search_grams g ON g.content_id=d.rowid
-		WHERE g.gram IN (` + placeholders + `)`
+	statement := `WITH candidates AS MATERIALIZED (
+			` + chineseCandidatesSQL(len(grams)) + `
+		), ranked AS (
+			SELECT d.rowid,d.kind,d.path,d.title,d.excerpt,d.published_at
+			FROM candidates candidate
+			JOIN search_documents d ON d.rowid=candidate.content_id
+			WHERE 1=1`
 	args := make([]any, 0, len(grams)+4)
 	for _, gram := range grams {
 		args = append(args, gram)
@@ -229,8 +345,6 @@ func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams
 		args = append(args, match)
 	}
 	statement, args = addSearchFilters(statement, args, query)
-	statement += " GROUP BY d.rowid HAVING COUNT(DISTINCT g.gram)=?"
-	args = append(args, len(grams))
 	if query.Sort == "newest" {
 		statement += " ORDER BY CAST(d.published_at AS INTEGER) DESC,d.rowid DESC"
 	} else {
@@ -238,9 +352,26 @@ func (r *Repository) searchChinese(ctx context.Context, query SearchQuery, grams
 		like := "%" + escapeLike(query.Text) + "%"
 		args = append(args, like, like)
 	}
-	statement += " LIMIT ? OFFSET ?"
+	statement += ` LIMIT ? OFFSET ?
+		)
+		SELECT ranked.kind,ranked.path,ranked.title,ranked.excerpt,r.cover_media_public_id,ranked.published_at
+		FROM ranked
+		JOIN contents c ON c.id=ranked.rowid
+		JOIN content_revisions r ON r.id=c.published_revision_id`
 	args = append(args, query.Limit, query.Offset)
 	return scanSearchResults(r.database.Reader.QueryContext(ctx, statement, args...))
+}
+
+// chineseCandidatesSQL intersects one indexed gram lookup per bigram. The
+// previous IN/GROUP BY form had to materialize and deduplicate every matching
+// row before it could test completeness; INTERSECT keeps each lookup ordered
+// by the existing (gram,content_id) index and avoids the DISTINCT aggregate.
+func chineseCandidatesSQL(count int) string {
+	parts := make([]string, 0, count)
+	for index := 0; index < count; index++ {
+		parts = append(parts, "SELECT content_id FROM search_grams WHERE gram=?")
+	}
+	return strings.Join(parts, " INTERSECT ")
 }
 
 func addSearchFilters(statement string, args []any, query SearchQuery) (string, []any) {

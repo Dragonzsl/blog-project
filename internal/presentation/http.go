@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -39,8 +40,11 @@ type ContentQueries interface {
 	PublishedArticles(context.Context, int) ([]publishing.Article, error)
 	PublicArticlesPage(context.Context, pagination.Request) (publishing.PublicArticlePage, error)
 	PublicArticleByID(context.Context, int64) (publishing.Article, error)
+	PublicArticleCardsByIDs(context.Context, []int64) ([]publishing.Article, error)
 	PublicArticleNavigation(context.Context, int64, int) (publishing.PublicArticleNavigation, error)
+	PublicArticleNavigationForArticle(context.Context, publishing.Article, int) (publishing.PublicArticleNavigation, error)
 	PublicPage(context.Context, string) (publishing.Article, error)
+	PublicPageCard(context.Context, string) (publishing.Article, error)
 }
 
 type OrganizationQueries interface {
@@ -86,31 +90,51 @@ func NewStateRepository(database *database.DB) *StateRepository {
 }
 
 func (r *StateRepository) RenderEpoch(ctx context.Context) (int64, error) {
-	var epoch int64
-	if err := r.database.Reader.QueryRowContext(ctx, "SELECT render_epoch FROM system_state WHERE id = 1").Scan(&epoch); err != nil {
-		return 0, fmt.Errorf("read render epoch: %w", err)
+	epoch := r.database.RenderEpoch()
+	if epoch < 1 {
+		return 0, fmt.Errorf("read render epoch: invalid value %d", epoch)
 	}
 	return epoch, nil
 }
 
 type HTTPHandler struct {
-	content      ContentQueries
-	siteNamer    SiteNamer
-	state        *StateRepository
-	theme        *Theme
-	themeManager *ThemeManager
-	cache        *PageCache
-	logger       *slog.Logger
-	organization OrganizationQueries
-	discovery    DiscoveryQueries
-	analytics    AnalyticsRecorder
-	features     FeatureProvider
-	clientIP     *clientip.Resolver
-	media        MediaQueries
+	content               ContentQueries
+	siteNamer             SiteNamer
+	state                 *StateRepository
+	theme                 *Theme
+	themeManager          *ThemeManager
+	cache                 *PageCache
+	flight                *RenderFlight
+	searchRender          *searchRenderCache
+	logger                *slog.Logger
+	organization          OrganizationQueries
+	discovery             DiscoveryQueries
+	analytics             AnalyticsRecorder
+	features              FeatureProvider
+	clientIP              *clientip.Resolver
+	media                 MediaQueries
+	searchOptionsMu       sync.Mutex
+	searchOptionsEpoch    int64
+	searchOptionsReady    bool
+	searchCategoryOptions []FilterOption
+	searchTagOptions      []FilterOption
+	searchOptionsFlight   *searchOptionsFlight
+}
+
+type searchOptionsFlight struct {
+	epoch      int64
+	done       chan struct{}
+	categories []FilterOption
+	tags       []FilterOption
+	err        error
 }
 
 type MediaQueries interface {
 	PublicItem(context.Context, []byte) (media.Item, error)
+}
+
+type BatchMediaQueries interface {
+	PublicItems(context.Context, [][]byte) ([]media.Item, error)
 }
 
 func (h *HTTPHandler) SetDiscovery(service DiscoveryQueries) { h.discovery = service }
@@ -138,7 +162,7 @@ func (h *HTTPHandler) currentTheme() *Theme {
 }
 
 func NewHTTPHandler(content ContentQueries, siteNamer SiteNamer, state *StateRepository, theme *Theme, cache *PageCache, logger *slog.Logger, organizations ...OrganizationQueries) *HTTPHandler {
-	handler := &HTTPHandler{content: content, siteNamer: siteNamer, state: state, theme: theme, cache: cache, logger: logger}
+	handler := &HTTPHandler{content: content, siteNamer: siteNamer, state: state, theme: theme, cache: cache, flight: NewRenderFlight(32), searchRender: newSearchRenderCache(), logger: logger}
 	if len(organizations) > 0 {
 		handler.organization = organizations[0]
 	}
@@ -218,7 +242,7 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 			homeView.Archive = archiveMonthViews(archive, 6)
 		}
 		if h.content != nil {
-			about, aboutErr := h.content.PublicPage(ctx, "about")
+			about, aboutErr := h.content.PublicPageCard(ctx, "about")
 			if aboutErr == nil {
 				homeView.About = toArticleCard(h.articleDataWithMedia(ctx, about))
 			} else if !errors.Is(aboutErr, publishing.ErrNotFound) {
@@ -399,10 +423,7 @@ func (h *HTTPHandler) archiveMonth(w http.ResponseWriter, r *http.Request) {
 		}
 		title := fmt.Sprintf("%d 年 %02d 月", page.Year, page.Month)
 		metadata := h.metadata(siteName, title+" · "+siteName, "浏览"+title+"发布的公开文章。", basePath, "website", nil)
-		items := make([]ArticleCard, 0, len(page.Results))
-		for _, result := range page.Results {
-			items = append(items, h.articleCardFromSearchResult(ctx, result))
-		}
+		items := h.articleCardsFromSearchResultsWithMedia(ctx, page.Results)
 		collection := CollectionView{
 			Title:        title,
 			Description:  fmt.Sprintf("这一时间段共发布 %d 篇文章。", page.Pagination.Total),
@@ -438,7 +459,7 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 		metadata := h.articleMetadata(siteName, article, path)
 		view := h.articleDataWithMedia(ctx, article)
 		if article.Kind == "article" {
-			articleNavigation, err := h.content.PublicArticleNavigation(ctx, article.ID, 3)
+			articleNavigation, err := h.content.PublicArticleNavigationForArticle(ctx, article, 3)
 			if err != nil {
 				return nil, "", err
 			}
@@ -515,13 +536,9 @@ func (h *HTTPHandler) taxonomyListing(w http.ResponseWriter, r *http.Request, ki
 		if err != nil {
 			return nil, "", err
 		}
-		articles := make([]publishing.Article, 0, len(ids))
-		for _, id := range ids {
-			article, err := h.content.PublicArticleByID(ctx, id)
-			if err != nil {
-				return nil, "", err
-			}
-			articles = append(articles, article)
+		articles, err := h.content.PublicArticleCardsByIDs(ctx, ids)
+		if err != nil {
+			return nil, "", err
 		}
 		siteName, err := h.siteNamer.SiteName(ctx)
 		if err != nil {
@@ -563,66 +580,86 @@ func (h *HTTPHandler) search(w http.ResponseWriter, r *http.Request) {
 	pageNumber := requestedPage(r)
 	category, categoryValid := normalizedFilter(categoryRaw)
 	tag, tagValid := normalizedFilter(tagRaw)
-	page := SearchPageData{Query: query, Kind: kind, Category: categoryRaw, Tag: tagRaw, Sort: sortOrder}
-	if h.organization != nil {
-		categories, err := h.organization.PublicCategories(r.Context())
-		if err != nil {
-			h.handleRenderError(w, r, err)
-			return
-		}
-		tags, err := h.organization.PublicTags(r.Context())
-		if err != nil {
-			h.handleRenderError(w, r, err)
-			return
-		}
-		page.CategoryOptions = filterOptionsFromCategories(categories)
-		page.TagOptions = filterOptionsFromTags(tags)
+	epoch, err := h.state.RenderEpoch(r.Context())
+	if err != nil {
+		h.handleRenderError(w, r, err)
+		return
 	}
-	if query != "" {
-		if !categoryValid || !tagValid {
-			page.Invalid = true
-		} else {
-			results, err := h.discovery.SearchPage(r.Context(), discovery.SearchQuery{
-				Text: query, Kind: kind, CategorySlug: category, TagSlug: tag, Sort: sortOrder, Page: pageNumber, PerPage: 20,
-			})
-			if errors.Is(err, discovery.ErrInvalidQuery) {
+	theme := h.currentTheme()
+	searchVersion := uint64(0)
+	if versioned, ok := h.discovery.(interface{ SearchCacheVersion() uint64 }); ok {
+		searchVersion = versioned.SearchCacheVersion()
+	}
+	cacheKey := searchRenderKey(theme.Version(), query, kind, categoryRaw, tagRaw, sortOrder, strconv.Itoa(pageNumber), strconv.FormatUint(searchVersion, 10))
+	if body, ok := h.searchRender.Get(cacheKey, epoch); ok {
+		h.writeSearchResponse(w, r, body, "HIT")
+		return
+	}
+	body, _, coalesced, err := h.flight.Do(r.Context(), fmt.Sprintf("search:%d:%s", epoch, cacheKey), func(ctx context.Context) ([]byte, string, error) {
+		page := SearchPageData{Query: query, Kind: kind, Category: categoryRaw, Tag: tagRaw, Sort: sortOrder}
+		categoryOptions, tagOptions, err := h.searchFilterOptions(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		page.CategoryOptions = categoryOptions
+		page.TagOptions = tagOptions
+		if query != "" {
+			if !categoryValid || !tagValid {
 				page.Invalid = true
-			} else if err != nil {
-				h.handleRenderError(w, r, err)
-				return
 			} else {
-				page.Searched = true
-				page.Total = results.Pagination.Total
-				page.Pagination = paginationView(results.Pagination, func(number int) string { return searchPageURL(query, kind, categoryRaw, tagRaw, sortOrder, number) })
-				for _, result := range results.Results {
-					card := h.articleCardFromSearchResult(r.Context(), result)
-					card.HighlightedTitle = highlightText(result.Title, query)
-					card.HighlightedExcerpt = highlightText(result.Excerpt, query)
-					page.Results = append(page.Results, card)
+				results, searchErr := h.discovery.SearchPage(ctx, discovery.SearchQuery{
+					Text: query, Kind: kind, CategorySlug: category, TagSlug: tag, Sort: sortOrder, Page: pageNumber, PerPage: 20,
+				})
+				if errors.Is(searchErr, discovery.ErrInvalidQuery) {
+					page.Invalid = true
+				} else if searchErr != nil {
+					return nil, "", searchErr
+				} else {
+					page.Searched = true
+					page.Total = results.Pagination.Total
+					page.Pagination = paginationView(results.Pagination, func(number int) string { return searchPageURL(query, kind, categoryRaw, tagRaw, sortOrder, number) })
+					cards := h.articleCardsFromSearchResultsWithMedia(ctx, results.Results)
+					for index, result := range results.Results {
+						card := cards[index]
+						card.HighlightedTitle = highlightText(result.Title, query)
+						card.HighlightedExcerpt = highlightText(result.Excerpt, query)
+						page.Results = append(page.Results, card)
+					}
 				}
 			}
 		}
-	}
-	siteName, err := h.siteNamer.SiteName(r.Context())
+		siteName, err := h.siteNamer.SiteName(ctx)
+		if err != nil {
+			return nil, "", err
+		}
+		navigation, err := h.navigation(ctx, "/search")
+		if err != nil {
+			return nil, "", err
+		}
+		metadata := h.metadata(siteName, "搜索 · "+siteName, "搜索"+siteName+"的公开文章与页面。", "/search", "website", nil)
+		metadata.NoIndex = true
+		body, err := theme.RenderSearch(siteName, page, navigation, metadata)
+		if err == nil {
+			h.searchRender.Put(cacheKey, epoch, body)
+		}
+		return body, "", err
+	})
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	navigation, err := h.navigation(r.Context(), "/search")
-	if err != nil {
-		h.handleRenderError(w, r, err)
-		return
+	cacheStatus := "MISS"
+	if coalesced {
+		cacheStatus = "COALESCED"
 	}
-	metadata := h.metadata(siteName, "搜索 · "+siteName, "搜索"+siteName+"的公开文章与页面。", "/search", "website", nil)
-	metadata.NoIndex = true
-	body, err := h.currentTheme().RenderSearch(siteName, page, navigation, metadata)
-	if err != nil {
-		h.handleRenderError(w, r, err)
-		return
-	}
+	h.writeSearchResponse(w, r, body, cacheStatus)
+}
+
+func (h *HTTPHandler) writeSearchResponse(w http.ResponseWriter, r *http.Request, body []byte, cacheStatus string) {
 	setPublicSecurityHeaders(w, body)
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	w.Header().Set("X-Search-Cache", cacheStatus)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
@@ -678,6 +715,13 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 		document := rssDocument{Version: "2.0", Channel: rssChannel{
 			Title: siteName, Link: h.absoluteURL("/"), Description: siteName + "的最新文章。", Language: "zh-CN",
 		}}
+		mediaItems, mediaBatched := h.publicMediaItems(ctx, func() [][]byte {
+			ids := make([][]byte, 0, len(items))
+			for _, item := range items {
+				ids = append(ids, item.CoverMediaPublicID)
+			}
+			return ids
+		}())
 		lastModified := ""
 		var latest time.Time
 		for _, item := range items {
@@ -691,7 +735,12 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 				Published: item.PublishedAt.Format(time.RFC1123Z), GUID: rssGUID{Permalink: "true", Value: absolute},
 			}
 			if h.media != nil && len(item.CoverMediaPublicID) > 0 {
-				if mediaItem, mediaErr := h.media.PublicItem(ctx, item.CoverMediaPublicID); mediaErr == nil {
+				mediaItem, found := mediaItems[hex.EncodeToString(item.CoverMediaPublicID)]
+				if !found && !mediaBatched {
+					mediaItem, _ = h.media.PublicItem(ctx, item.CoverMediaPublicID)
+					found = len(mediaItem.PublicID) > 0
+				}
+				if found {
 					if view, viewErr := mediaItem.PublicView(); viewErr == nil {
 						rssEntry.Enclosure = &rssEnclosure{URL: h.absoluteURL(view.URL), Length: mediaItem.SizeBytes, Type: mediaItem.MIMEType}
 					}
@@ -757,6 +806,83 @@ func (h *HTTPHandler) robots(w http.ResponseWriter, r *http.Request) {
 	}
 	body := []byte("User-agent: *\nAllow: /\nDisallow: /admin/\nDisallow: /search\nSitemap: " + h.absoluteURL("/sitemap.xml") + "\n")
 	h.writeGenerated(w, r, "text/plain; charset=utf-8", body, "")
+}
+
+// searchFilterOptions keeps the public search form's taxonomy options in a
+// process-local epoch snapshot. Organization already caches the source
+// summaries, but cloning and converting hundreds of terms for every search
+// request still creates avoidable allocation and lock pressure. The flight
+// ensures the first request after an epoch change performs the work once.
+func (h *HTTPHandler) searchFilterOptions(ctx context.Context) ([]FilterOption, []FilterOption, error) {
+	if h.organization == nil {
+		return nil, nil, nil
+	}
+	for {
+		epoch, err := h.state.RenderEpoch(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		h.searchOptionsMu.Lock()
+		if h.searchOptionsReady && h.searchOptionsEpoch == epoch {
+			categories := cloneFilterOptions(h.searchCategoryOptions)
+			tags := cloneFilterOptions(h.searchTagOptions)
+			h.searchOptionsMu.Unlock()
+			return categories, tags, nil
+		}
+		if flight := h.searchOptionsFlight; flight != nil {
+			done := flight.done
+			matchingEpoch := flight.epoch == epoch
+			h.searchOptionsMu.Unlock()
+			select {
+			case <-done:
+				if !matchingEpoch {
+					continue
+				}
+				if flight.err != nil {
+					return nil, nil, flight.err
+				}
+				return cloneFilterOptions(flight.categories), cloneFilterOptions(flight.tags), nil
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			}
+		}
+		flight := &searchOptionsFlight{epoch: epoch, done: make(chan struct{})}
+		h.searchOptionsFlight = flight
+		h.searchOptionsMu.Unlock()
+
+		loadContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		categories, loadErr := h.organization.PublicCategories(loadContext)
+		var tags []organization.PublicTagSummary
+		if loadErr == nil {
+			tags, loadErr = h.organization.PublicTags(loadContext)
+		}
+		cancel()
+		var categoryOptions, tagOptions []FilterOption
+		if loadErr == nil {
+			categoryOptions = filterOptionsFromCategories(categories)
+			tagOptions = filterOptionsFromTags(tags)
+		}
+		h.searchOptionsMu.Lock()
+		if loadErr == nil {
+			h.searchOptionsEpoch = epoch
+			h.searchOptionsReady = true
+			h.searchCategoryOptions = cloneFilterOptions(categoryOptions)
+			h.searchTagOptions = cloneFilterOptions(tagOptions)
+		}
+		flight.categories = cloneFilterOptions(categoryOptions)
+		flight.tags = cloneFilterOptions(tagOptions)
+		flight.err = loadErr
+		if h.searchOptionsFlight == flight {
+			h.searchOptionsFlight = nil
+		}
+		close(flight.done)
+		h.searchOptionsMu.Unlock()
+		return categoryOptions, tagOptions, loadErr
+	}
+}
+
+func cloneFilterOptions(values []FilterOption) []FilterOption {
+	return append([]FilterOption(nil), values...)
 }
 
 func (h *HTTPHandler) llms(w http.ResponseWriter, r *http.Request) {
@@ -857,7 +983,12 @@ func (h *HTTPHandler) preview(w http.ResponseWriter, r *http.Request) {
 		h.handleRenderError(w, r, err)
 		return
 	}
-	body, err := h.currentTheme().RenderArticlePage(siteName, h.articleDataWithMedia(r.Context(), article), true, backURL, navigation, PageMetadata{NoIndex: true})
+	previewData := h.articleDataWithMedia(r.Context(), article)
+	// The preview body comes from the mutable editing snapshot. It may share
+	// the published revision ID with the public article, so it must never use
+	// the immutable public Markdown cache key.
+	previewData.BodyCacheKey = ""
+	body, err := h.currentTheme().RenderArticlePage(siteName, previewData, true, backURL, navigation, PageMetadata{NoIndex: true})
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -928,7 +1059,7 @@ func (h *HTTPHandler) serveCachedDocument(w http.ResponseWriter, r *http.Request
 		h.recordAnalytics(r)
 		return
 	}
-	body, lastModified, err := render(r.Context())
+	body, lastModified, coalesced, err := h.flight.Do(r.Context(), fmt.Sprintf("%d|%s", epoch, key), render)
 	if err != nil {
 		h.handleRenderError(w, r, err)
 		return
@@ -943,13 +1074,23 @@ func (h *HTTPHandler) serveCachedDocument(w http.ResponseWriter, r *http.Request
 		LastModified: lastModified,
 		Body:         body,
 	}
-	if err := h.cache.Put(entry); err != nil {
-		h.logger.WarnContext(r.Context(), "store public page cache", "error", err, "key", semanticKey)
+	if !coalesced {
+		if err := h.cache.PutAsync(entry); err != nil {
+			h.logger.WarnContext(r.Context(), "store public page cache", "error", err, "key", semanticKey)
+		}
+		if h.cache.PruneDue(time.Now().UTC(), 30*time.Second) {
+			go func() {
+				if err := h.cache.Prune(epoch); err != nil {
+					h.logger.Warn("prune public page cache", "error", err)
+				}
+			}()
+		}
 	}
-	if err := h.cache.Prune(epoch); err != nil {
-		h.logger.WarnContext(r.Context(), "prune public page cache", "error", err)
+	cacheStatus := "MISS"
+	if coalesced {
+		cacheStatus = "COALESCED"
 	}
-	h.writeCacheEntry(w, r, entry, "MISS")
+	h.writeCacheEntry(w, r, entry, cacheStatus)
 	h.recordAnalytics(r)
 }
 
@@ -1291,6 +1432,9 @@ func articleData(article publishing.Article) ArticleData {
 
 func (h *HTTPHandler) articleDataWithMedia(ctx context.Context, article publishing.Article) ArticleData {
 	data := articleData(article)
+	if article.PublishedRevisionID > 0 {
+		data.BodyCacheKey = fmt.Sprintf("%s|revision:%d", MarkdownRendererVersion, article.PublishedRevisionID)
+	}
 	if h.media == nil || len(article.CoverMediaPublicID) == 0 {
 		return data
 	}
@@ -1311,7 +1455,19 @@ func (h *HTTPHandler) articleDataWithMedia(ctx context.Context, article publishi
 func (h *HTTPHandler) articleDataListWithMedia(ctx context.Context, articles []publishing.Article) []ArticleData {
 	result := make([]ArticleData, 0, len(articles))
 	for _, article := range articles {
-		result = append(result, h.articleDataWithMedia(ctx, article))
+		result = append(result, articleData(article))
+	}
+	items, batched := h.publicMediaItems(ctx, coverIDs(articles))
+	if batched {
+		for index, article := range articles {
+			if item, ok := items[hex.EncodeToString(article.CoverMediaPublicID)]; ok {
+				h.applyMediaView(&result[index], item)
+			}
+		}
+		return result
+	}
+	for index, article := range articles {
+		result[index] = h.articleDataWithMedia(ctx, article)
 	}
 	return result
 }
@@ -1335,6 +1491,82 @@ func (h *HTTPHandler) articleCardFromSearchResult(ctx context.Context, result di
 		card.Cover = &MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
 	}
 	return card
+}
+
+func (h *HTTPHandler) articleCardsFromSearchResultsWithMedia(ctx context.Context, results []discovery.SearchResult) []ArticleCard {
+	cards := make([]ArticleCard, 0, len(results))
+	ids := make([][]byte, 0, len(results))
+	for _, result := range results {
+		cards = append(cards, articleCardFromSearchResult(result))
+		ids = append(ids, result.CoverMediaPublicID)
+	}
+	items, batched := h.publicMediaItems(ctx, ids)
+	if batched {
+		for index, result := range results {
+			if item, ok := items[hex.EncodeToString(result.CoverMediaPublicID)]; ok {
+				h.applyMediaCardView(&cards[index], item)
+			}
+		}
+		return cards
+	}
+	for index, result := range results {
+		cards[index] = h.articleCardFromSearchResult(ctx, result)
+	}
+	return cards
+}
+
+func (h *HTTPHandler) publicMediaItems(ctx context.Context, publicIDs [][]byte) (map[string]media.Item, bool) {
+	if h.media == nil {
+		return nil, false
+	}
+	batcher, ok := h.media.(BatchMediaQueries)
+	if !ok {
+		return nil, false
+	}
+	resolved := false
+	for _, publicID := range publicIDs {
+		if len(publicID) > 0 {
+			resolved = true
+			break
+		}
+	}
+	if !resolved {
+		return nil, true
+	}
+	items, err := batcher.PublicItems(ctx, publicIDs)
+	if err != nil {
+		h.logger.WarnContext(ctx, "batch resolve public media", "error", err)
+		return nil, false
+	}
+	result := make(map[string]media.Item, len(items))
+	for _, item := range items {
+		result[hex.EncodeToString(item.PublicID)] = item
+	}
+	return result, true
+}
+
+func coverIDs(articles []publishing.Article) [][]byte {
+	ids := make([][]byte, 0, len(articles))
+	for _, article := range articles {
+		ids = append(ids, article.CoverMediaPublicID)
+	}
+	return ids
+}
+
+func (h *HTTPHandler) applyMediaView(data *ArticleData, item media.Item) {
+	view, err := item.PublicView()
+	if err != nil {
+		return
+	}
+	data.Cover = &MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
+}
+
+func (h *HTTPHandler) applyMediaCardView(card *ArticleCard, item media.Item) {
+	view, err := item.PublicView()
+	if err != nil {
+		return
+	}
+	card.Cover = &MediaData{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
 }
 
 func articleDataList(articles []publishing.Article) []ArticleData {
@@ -1515,14 +1747,29 @@ func articleCardFromSearchResult(result discovery.SearchResult) ArticleCard {
 }
 
 func (h *HTTPHandler) withArticleNavigation(ctx context.Context, data ArticleData, navigation publishing.PublicArticleNavigation) ArticleData {
+	articles := make([]publishing.Article, 0, 2+len(navigation.Related))
+	previousIndex, nextIndex := -1, -1
 	if navigation.Previous != nil {
-		data.Previous = toArticleCard(h.articleDataWithMedia(ctx, *navigation.Previous))
+		previousIndex = len(articles)
+		articles = append(articles, *navigation.Previous)
 	}
 	if navigation.Next != nil {
-		data.Next = toArticleCard(h.articleDataWithMedia(ctx, *navigation.Next))
+		nextIndex = len(articles)
+		articles = append(articles, *navigation.Next)
 	}
-	if len(navigation.Related) > 0 {
-		data.Related = h.articleCardsWithMedia(ctx, navigation.Related)
+	relatedStart := len(articles)
+	articles = append(articles, navigation.Related...)
+	if len(articles) > 0 {
+		cards := articleCards(h.articleDataListWithMedia(ctx, articles))
+		if previousIndex >= 0 {
+			data.Previous = &cards[previousIndex]
+		}
+		if nextIndex >= 0 {
+			data.Next = &cards[nextIndex]
+		}
+		if relatedStart < len(cards) {
+			data.Related = cards[relatedStart:]
+		}
 	}
 	return data
 }

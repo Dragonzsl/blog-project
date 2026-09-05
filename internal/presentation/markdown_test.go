@@ -5,6 +5,19 @@ import (
 	"testing"
 )
 
+func BenchmarkMarkdownRender(b *testing.B) {
+	markdown := NewMarkdown()
+	source := strings.Repeat("阶段三规模测试正文，用于测量 Markdown 渲染和清洗成本。\n", 48)
+	b.ReportMetric(float64(len(source)), "input_bytes")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if _, err := markdown.Render(source); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestMarkdownRendersGFMAndRemovesUnsafeHTML(t *testing.T) {
 	rendered, err := NewMarkdown().Render(`# 标题
 
