@@ -100,8 +100,11 @@
 
   .auth-shell { width: min(1180px, calc(100% - 40px)); min-height: 100vh; margin: auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 520px); gap: clamp(48px, 8vw, 120px); align-items: center; padding-block: 48px; }
   .auth-intro { max-width: 570px; }
-  .wordmark { display: inline-flex; gap: 10px; align-items: center; font-weight: 760; letter-spacing: -.02em; text-decoration: none; }
-  .wordmark span { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 50%; color: white; background: var(--accent); }
+  .wordmark { display: inline-flex; min-width: 0; gap: 10px; align-items: center; font-weight: 760; letter-spacing: -.02em; text-decoration: none; }
+  .wordmark-mark { display: grid; width: 30px; height: 30px; flex: 0 0 30px; place-items: center; border-radius: 50%; color: white; background: var(--accent); }
+  .wordmark-mark svg { width: 19px; height: 19px; fill: currentColor; }
+  .wordmark-site-name { min-width: 0; color: inherit; }
+  .admin-header .wordmark-site-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .eyebrow { margin: 52px 0 14px; color: var(--accent); font-size: .76rem; font-weight: 780; letter-spacing: .16em; text-transform: uppercase; }
   h1, h2 { margin: 0; font-family: Iowan Old Style, Baskerville, Georgia, serif; font-weight: 500; letter-spacing: -.045em; line-height: .98; }
   h1 { max-width: 720px; font-size: clamp(2.8rem, 5.8vw, 5.4rem); }
@@ -154,7 +157,7 @@
   .dashboard { width: min(1120px, calc(100% - 40px)); margin: 0 auto; padding: clamp(56px, 9vw, 120px) 0; }
   .dashboard .eyebrow { margin: 0 0 18px; }
   .dashboard h1 { font-size: clamp(3.2rem, 6.5vw, 6rem); }
-  .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 64px; }
+  .status-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 64px 0 18px; }
   .status-grid article { position: relative; display: grid; min-height: 190px; align-content: end; padding: 26px; border: 1px solid #deded6; border-radius: 20px; background: white; }
   .status-grid p, .status-grid small { margin: 0; color: var(--muted); }
   .status-grid strong { margin: 10px 0 4px; font-family: Iowan Old Style, Georgia, serif; font-size: 1.65rem; font-weight: 500; }
@@ -177,15 +180,18 @@
   .task-row h2 { margin: 9px 0 0; overflow-wrap: anywhere; font-family: "SFMono-Regular", Consolas, monospace; font-size: .9rem; font-weight: 650; }
   .task-row form { margin: 0; }
   .task-error { margin: 8px 0 0; color: var(--warm); font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
-  .task-meta { margin: 8px 0 0; color: var(--muted); font-size: .72rem; }
+  .task-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; margin: 8px 0 0; color: var(--muted); font-size: .72rem; }
   .article-row { display: flex; align-items: center; justify-content: space-between; gap: 30px; padding: 24px 28px; }
   .article-row + .article-row { border-top: 1px solid #e4e4dc; }
   .article-row h2 { margin: 8px 0 5px; font-family: Iowan Old Style, Georgia, serif; font-size: 1.65rem; letter-spacing: -.02em; }
   .article-row h2 a { text-decoration: none; }
   .article-row p, .row-meta time { margin: 0; color: var(--muted); font-size: .78rem; }
+  .metadata-unit { flex: 0 0 auto; white-space: nowrap; }
+  .status-label, .row-taxonomy { white-space: nowrap; }
   .status-label { display: inline-flex; padding: 4px 8px; border-radius: 999px; color: #805329; background: #f6eadc; font-size: .68rem; font-weight: 780; }
   .status-label.published { color: var(--accent); background: #e4f1ea; }
   .row-meta { display: flex; flex-wrap: wrap; justify-content: end; gap: 12px 18px; color: var(--accent); font-size: .82rem; }
+  .row-meta > a, .row-meta > form { flex: 0 0 auto; white-space: nowrap; }
   .empty-state { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #c9ccc2; border-radius: 24px; text-align: center; }
   .empty-state > span { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; color: white; background: var(--accent); font-size: 1.5rem; }
   .empty-state h2 { margin-top: 24px; }
@@ -349,7 +355,8 @@
   .dashboard-list-item:hover { background: #f5f7f2; }
   .dashboard-list-item strong { overflow: hidden; font-size: .98rem; text-overflow: ellipsis; white-space: nowrap; }
   .dashboard-list-item time { color: var(--muted); font-size: .73rem; }
-  .list-item-kind { color: var(--accent); font-size: .67rem; font-weight: 800; letter-spacing: .05em; }
+  .list-item-kind { min-width: 0; overflow: hidden; color: var(--accent); font-size: .67rem; font-weight: 800; letter-spacing: .05em; text-overflow: ellipsis; white-space: nowrap; }
+  .dashboard-list-item time { white-space: nowrap; }
   .list-item-arrow { position: absolute; top: 50%; right: 24px; color: var(--accent); transform: translateY(-50%); }
   .dashboard-empty { padding: 26px 24px; color: var(--muted); font-size: .84rem; }
   .dashboard-empty p { margin: 0 0 12px; }
@@ -389,6 +396,7 @@
   .content-excerpt { max-width: 700px; margin-top: 10px !important; line-height: 1.55; }
   .library-secondary { display: grid; min-width: 300px; gap: 16px; justify-items: end; align-content: space-between; align-self: stretch; }
   .library-facts { display: flex; flex-wrap: wrap; justify-content: end; gap: 6px 12px; color: var(--muted); font-size: .7rem; text-align: right; }
+  .library-facts > .metadata-unit { flex: 0 0 auto; }
   .library-facts span + span { padding-left: 12px; border-left: 1px solid #dfe1d9; }
   .library-secondary .row-meta { justify-content: end; }
   .admin-pagination { display: flex; align-items: center; justify-content: center; gap: 22px; padding: 20px 10px 4px; color: var(--muted); font-size: .78rem; }
@@ -938,7 +946,6 @@ html[data-admin-sidebar="collapsed"] {
     .admin-sidebar-toggle:hover, .admin-sidebar-toggle:focus-visible { border-color: var(--line); color: var(--accent); background: var(--surface-muted); }
     .admin-header-brand { display: flex; min-width: 0; align-items: center; gap: 8px; }
     .admin-header .wordmark { min-width: 0; }
-    .admin-header .wordmark > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .admin-main { min-width: 0; }
   }
   @media (max-width: 480px) {

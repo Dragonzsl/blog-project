@@ -20,6 +20,7 @@ func TestAdminShellSidebarContract(t *testing.T) {
 		`aria-label="站主管理"`,
 		`aria-current="page"`,
 		`admin_nav_icon`,
+		`wordmark-site-name`,
 	} {
 		if !strings.Contains(markup, expected) {
 			t.Fatalf("admin shell missing sidebar contract %q", expected)
@@ -34,10 +35,13 @@ func TestAdminShellSidebarContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	css := string(styles)
-	for _, expected := range []string{"@media (max-width: 1023px)", ".admin-sidebar[aria-hidden=\"false\"]", "html:not(.js) .admin-sidebar"} {
+	for _, expected := range []string{"@media (max-width: 1023px)", ".admin-sidebar[aria-hidden=\"false\"]", "html:not(.js) .admin-sidebar", ".wordmark-mark", ".wordmark-site-name", ".metadata-unit", ".library-facts > .metadata-unit", ".status-grid {"} {
 		if !strings.Contains(css, expected) {
 			t.Fatalf("admin stylesheet missing responsive sidebar contract %q", expected)
 		}
+	}
+	if strings.Contains(css, ".wordmark span {") {
+		t.Fatal("admin stylesheet still styles the wordmark text as an icon")
 	}
 
 	script, err := fs.ReadFile(Files, "static/admin.js")

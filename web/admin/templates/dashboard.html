@@ -36,7 +36,7 @@
         <header class="section-heading"><div><p class="aside-label">Recent edits</p><h2 id="recent-edits-title">最近编辑</h2></div><a class="text-link" href="/admin/articles">查看内容库 →</a></header>
         {{if .Dashboard.RecentEdits}}
         <div class="dashboard-list-items">
-          {{range .Dashboard.RecentEdits}}<a class="dashboard-list-item" href="{{.EditURL}}"><span class="list-item-kind">{{.Kind}} · {{.Status}}</span><strong>{{.Title}}</strong><time>{{.UpdatedAt}}</time><span class="list-item-arrow" aria-hidden="true">↗</span></a>{{end}}
+          {{range .Dashboard.RecentEdits}}<a class="dashboard-list-item" href="{{.EditURL}}"><span class="list-item-kind">{{.Kind}} · {{.Status}}</span><strong>{{.Title}}</strong><time class="metadata-unit">{{.UpdatedAt}}</time><span class="list-item-arrow" aria-hidden="true">↗</span></a>{{end}}
         </div>
         {{else}}<div class="dashboard-empty"><p>还没有编辑记录。</p><a class="text-link" href="/admin/articles/new">从第一篇文章开始 →</a></div>{{end}}
       </section>
@@ -44,7 +44,7 @@
         <header class="section-heading"><div><p class="aside-label">Recent publishing</p><h2 id="recent-published-title">最近发布</h2></div><span class="section-count">本周 {{.Dashboard.PublishedThisWeek}} 项</span></header>
         {{if .Dashboard.RecentPublished}}
         <div class="dashboard-list-items">
-          {{range .Dashboard.RecentPublished}}<a class="dashboard-list-item" href="{{if .HasPublicURL}}{{.PublicURL}}{{else}}{{.EditURL}}{{end}}" {{if .HasPublicURL}}target="_blank" rel="noreferrer"{{end}}><span class="list-item-kind">{{.Kind}} · {{.PublishedAt}}</span><strong>{{.Title}}</strong><time>已公开</time><span class="list-item-arrow" aria-hidden="true">↗</span></a>{{end}}
+          {{range .Dashboard.RecentPublished}}<a class="dashboard-list-item" href="{{if .HasPublicURL}}{{.PublicURL}}{{else}}{{.EditURL}}{{end}}" {{if .HasPublicURL}}target="_blank" rel="noreferrer"{{end}}><span class="list-item-kind">{{.Kind}} · {{.PublishedAt}}</span><strong>{{.Title}}</strong><time class="metadata-unit">已公开</time><span class="list-item-arrow" aria-hidden="true">↗</span></a>{{end}}
         </div>
         {{else}}<div class="dashboard-empty"><p>还没有公开内容。</p><a class="text-link" href="/admin/articles">查看草稿 →</a></div>{{end}}
       </section>

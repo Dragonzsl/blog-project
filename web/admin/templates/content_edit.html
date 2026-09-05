@@ -18,7 +18,7 @@
       <aside class="editor-rail" aria-label="编辑工作区">
         <a class="editor-back-link" href="{{.Descriptor.ListURL}}">← 返回{{.Descriptor.Plural}}</a>
         <div class="editor-rail-section"><p class="aside-label">Workspace</p><nav class="editor-rail-nav" aria-label="编辑器页面">{{if not .IsNew}}<a href="{{.Descriptor.ListURL}}/{{.Content.ID}}/preview">预览当前内容</a><a href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">浏览版本</a>{{else}}<span>保存后可预览与回溯</span>{{end}}</nav></div>
-        <div class="editor-rail-stats"><div><span>字数</span><strong>{{.WordCount}}</strong></div><div><span>阅读时间</span><strong>{{if .ReadingMinutes}}{{.ReadingMinutes}} 分钟{{else}}—{{end}}</strong></div></div>
+        <div class="editor-rail-stats"><div><span>字数</span><strong class="metadata-unit">{{.WordCount}}</strong></div><div><span>阅读时间</span><strong class="metadata-unit">{{if .ReadingMinutes}}{{.ReadingMinutes}} 分钟{{else}}—{{end}}</strong></div></div>
         <p class="editor-rail-note">Markdown 编辑器会保留纯文本结构，预览时再交给当前主题渲染。</p>
       </aside>
       <form method="post" action="{{.Action}}" class="editor-form" id="content-form" tabindex="-1" {{if not .IsNew}}data-snapshot-url="{{.Descriptor.ListURL}}/{{.Content.ID}}/snapshot" data-snapshot-interval="{{.SnapshotIntervalMilliseconds}}"{{end}}>
@@ -28,6 +28,7 @@
         <label>标题<input class="title-input" name="title" value="{{.Content.Title}}" maxlength="200" placeholder="{{.Descriptor.Singular}}标题" required autofocus></label>
         <label>固定链接<div class="slug-input"><span>{{.Descriptor.PermalinkPrefix}}</span><input name="slug" value="{{.Content.Slug}}" maxlength="120" placeholder="保存标题后自动生成" readonly data-slug-input data-slug-fallback="{{.Descriptor.Kind}}" aria-describedby="slug-help"></div><small id="slug-help">固定链接根据标题自动生成，不需要手动填写。{{if .Published}}修改标题后再次发布会切换地址，并自动将旧地址永久重定向到新地址。{{end}}</small></label>
         <label>摘要<textarea name="excerpt" rows="3" maxlength="500" placeholder="用一两句话说明这项内容。">{{.Content.Excerpt}}</textarea></label>
+        <label>封面图片<select name="cover_media_id"><option value="">不设置封面</option>{{range .MediaOptions}}<option value="{{.ID}}" {{if eq $.Content.CoverMediaID .ID}}selected{{end}}>{{.Label}}</option>{{end}}</select></label>
         <details class="seo-panel" {{if or .Content.SEOTitle .Content.SEODescription}}open{{end}}><summary>搜索与分享元数据</summary><div><label>SEO 标题<input name="seo_title" value="{{.Content.SEOTitle}}" maxlength="200" placeholder="留空则使用内容标题与站点名"></label><label>SEO 描述<textarea name="seo_description" rows="3" maxlength="500" placeholder="留空则使用摘要；建议准确概括页面。">{{.Content.SEODescription}}</textarea></label></div></details>
         {{if eq .Descriptor.Kind "article"}}
         <div class="taxonomy-grid">

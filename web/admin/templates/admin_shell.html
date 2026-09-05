@@ -9,7 +9,7 @@
 <header class="admin-header">
   <div class="admin-header-brand"><button class="admin-sidebar-toggle" type="button" data-sidebar-toggle aria-controls="admin-sidebar" aria-expanded="false" aria-label="打开工作台菜单"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16"/></svg><span class="visually-hidden">打开工作台菜单</span></button><a class="wordmark" href="/admin/" aria-label="返回管理概览">
     <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 2.5c.9 5.6 3.9 8.6 9.5 9.5-5.6.9-8.6 3.9-9.5 9.5C11.1 15.9 8.1 12.9 2.5 12 8.1 11.1 11.1 8.1 12 2.5Z"/></svg></span>
-    <span>{{if .SiteName}}{{.SiteName}}{{else}}站主管理{{end}}</span>
+    <span class="wordmark-site-name">{{if .SiteName}}{{.SiteName}}{{else}}站主管理{{end}}</span>
   </a></div>
   <div class="admin-header-tools">
     {{template "admin_theme_toggle" .}}
