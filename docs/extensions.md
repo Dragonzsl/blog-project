@@ -33,9 +33,10 @@ LICENSE
   "id": "org.example.paper",
   "name": "Paper",
   "version": "1.0.0",
-  "themeApi": "1",
+  "themeApi": 1,
   "core": ">=1.0.0 <2.0.0",
   "features": ["dark-mode", "toc", "comments-slot"],
+  "settingsVersion": 1,
   "settingsSchema": {
     "accent": {"type": "color", "default": "#3157d5"},
     "contentWidth": {"type": "integer", "minimum": 640, "maximum": 840, "default": 760},
@@ -44,7 +45,7 @@ LICENSE
 }
 ```
 
-设置类型第一版只允许 boolean、受限 integer、text、color、select、media 和 URL。Schema 不能声明代码、HTML 或任意文件路径。核心负责生成后台表单和默认值，主题只读取验证后的配置。
+设置类型第一版只允许 boolean、受限 integer、text、color、select、media 和 URL。Schema 不能声明代码、HTML 或任意文件路径。核心负责生成后台表单和默认值，主题只读取验证后的配置。设置版本变化必须有迁移；敏感设置只在管理表单中脱敏，绝不进入主题模板。
 
 ## 主题视图模型
 
@@ -82,7 +83,7 @@ LICENSE
 
 安装流程是：流式接收 → 大小/文件数限制 → 临时目录解包 → 拒绝绝对路径、`..`、符号链接和特殊文件 → 校验清单 → 解析全部模板 → 使用固定样例渲染 → 检查必需模板、资源引用和 API 兼容 → 原子移动到主题目录。
 
-启用前用真实站点数据在隔离预览路径渲染首页、文章、页面、集合、空状态和错误页。全部成功后在一个事务中切换活动主题并提高 `render_epoch`；失败保留旧主题。默认主题内嵌程序，永远是故障回退选项。
+启用前用固定 fixture 渲染首页、文章、集合、目录、搜索和状态页，全部成功后才允许激活。`themes.active` 是数据库权威，`active.json` 是可修复缓存；激活时复核确定性目录 checksum，提交后写 marker，启动时按数据库 reconcile。失败保留旧主题，默认主题内嵌程序，永远是故障回退选项。
 
 ## 默认主题
 
@@ -92,7 +93,7 @@ LICENSE
 
 ## 插件接口
 
-每个官方插件提供静态清单和一个注册入口。概念接口如下：
+每个官方插件提供静态清单和一个注册入口。公开路由默认限于 `/plugins/{id}/`，兼容旧公共 URL 时必须申请宿主扩展槽；管理路由自动限于 `/admin/plugins/{id}/`。概念接口如下：
 
 ```go
 type Plugin interface {
@@ -111,7 +112,7 @@ type Plugin interface {
 - 向标准主题插槽贡献受控输出和静态资源。
 - 使用宿主日志、时钟、HTTP 客户端和秘密引用读取能力。
 
-插件不能获取裸 `*sql.DB`、通用文件系统、进程执行器或任意模板集合。网络访问必须通过受限适配器，统一超时、禁止自动重定向、响应体上限和私网地址策略。
+插件不能获取裸 `*sql.DB`、通用文件系统、进程执行器或任意模板集合。设置 schema 由宿主校验并有 64 KiB 总大小上限，敏感字段脱敏并支持版本迁移；任务 kind 自动命名空间化并有 payload 版本、幂等键和 64 KiB 上限。网络访问必须通过受限适配器，统一超时、禁止自动重定向、响应体上限和私网地址策略。
 
 ## 生命周期
 

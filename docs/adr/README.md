@@ -13,6 +13,7 @@ ADR 保留做出决定时的原始上下文。被取代的记录不删除，以�
 - [0035 可复用开源单站点产品](./0035-reusable-open-source-single-site-product.md)
 - [0036 Apache-2.0](./0036-apache-2-license.md)
 - [0037 三个纵向交付阶段](./0037-vertical-delivery-toward-version-one.md)
+- [0038 阶段二内容与扩展契约](./0038-phase-two-content-and-extension-contracts.md)
 
 ## 架构与运行
 

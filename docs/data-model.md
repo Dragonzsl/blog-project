@@ -36,7 +36,7 @@ SQLite 表使用 `INTEGER PRIMARY KEY` 获得紧凑索引和稳定性能。需�
 
 `editing_snapshots` 每项内容最多一行，保存最近自动保存的正文、元数据、浏览器编辑版本和时间。它可以被新一次自动保存覆盖。
 
-`content_revisions` 是不可变完整快照，保存正文、结构化元数据、分类与标签身份、创建原因以及创建时间。恢复版本会创建一条新记录并更新 `contents`，绝不修改旧版本。
+`content_revisions` 是不可变完整快照，保存正文、结构化元数据、分类与标签身份、创建原因以及创建时间。`cover_media_public_id` 与 `cover_snapshot_version` 保存修订时的封面公共身份；版本 `0` 表示迁移前没有历史封面事实，版本 `1` 表示已记录（空值表示该修订明确无封面）。恢复版本会创建一条新记录并更新 `contents`，绝不修改旧版本。
 
 正式保存先插入版本，再更新 `contents.current_revision_id`。发布时把同一版本写入 `published_revision_id`；所有公开读取只能使用当前发布状态允许的快照。
 
@@ -58,7 +58,7 @@ SQLite 表使用 `INTEGER PRIMARY KEY` 获得紧凑索引和稳定性能。需�
 
 `media` 保存稳定身份、原始名称、检测 MIME、大小、宽高、内容哈希、替代文本、存储适配器和对象键。对象键是内部实现，不出现在文章正文中。
 
-`media_variants` 保存宽度、格式、大小、内容哈希、对象键和生成状态。`media_references` 记录内容/主题配置对媒体的显式引用；删除前必须同时扫描结构化引用和 Markdown AST，不能只做字符串搜索。
+`media_variants` 保存宽度、格式、大小、内容哈希、对象键和生成状态。`media_references` 记录内容/主题配置对媒体的显式引用，关系包括正文和封面；删除前必须同时扫描结构化引用和 Markdown AST，不能只做字符串搜索。公开视图只允许稳定 URL、尺寸、替代文本和 srcset。
 
 同内容哈希只用于提示重复，不自动合并媒体身份。替换原图创建新媒体版本并重新生成变体，不原地覆盖已有缓存对象。
 
@@ -80,9 +80,9 @@ SQLite 表使用 `INTEGER PRIMARY KEY` 获得紧凑索引和稳定性能。需�
 
 ## 主题与插件
 
-`themes` 保存已安装主题 ID、版本、API 版本、路径、校验和、验证结果和安装时间。只有一个主题处于活动状态。
+`themes` 保存已安装主题 ID、版本、API 版本、路径、ZIP 校验和、确定性目录校验和、验证结果和安装时间。只有一个主题处于活动状态。`theme_activation_history` 追加保存前一主题、候选主题、操作状态和时间，供安全回退使用；`active.json` 不属于权威数据。
 
-`theme_settings` 按主题和 schema 版本保存经过验证的值。切换主题不会删除其他主题配置。
+`theme_settings` 按主题和 schema 版本保存经过验证的值。敏感值在读取视图中脱敏，主题运行时不接收；媒体设置只保存公共 ID并由核心解析。切换主题不会删除其他主题配置。
 
 `plugin_states` 保存编译进程序的插件 ID、版本、启用状态、配置 schema 版本和最后初始化结果。`plugin_settings` 保存经过宿主 schema 校验的值；秘密只保存引用。
 

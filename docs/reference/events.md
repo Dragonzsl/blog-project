@@ -7,6 +7,8 @@
 
 事件先写入 `event_outbox`，再以 `core:event_dispatch` 任务持久化；只有业务事务提交后才派发。任务载荷只引用事件 ID，事件派发失败按统一队列的短租约、退避和五次上限处理。外部副作用由 Webhook 等插件转换成持久任务，发布请求不会等待远程网络。相同事件 ID 使用稳定任务幂等键；Webhook delivery identity 也从事件 ID 派生，允许接收方去重。Webhook 使用 HMAC-SHA256 签名，并发送 `X-Blog-Event`、`X-Blog-Event-Version`、`X-Blog-Delivery`、`X-Blog-Timestamp` 和 `X-Blog-Signature-256` 头。
 
+插件事件订阅必须匹配 `Name.vN` 中的版本；不匹配版本不会调用处理器。插件任务由宿主登记 payload 版本和大小上限，kind 使用 `plugin:{id}:{kind}`，幂等键使用 `plugin:{id}:` 前缀；坏版本会进入统一可见失败状态，不忙循环。
+
 插件被禁用时不会接收新的事件或任务，已有任务保留；重新启用后可继续消费。若事件没有启用订阅者，dispatcher 会安全完成该事件任务，不产生远程副作用。
 
 新增字段只能向后兼容地追加；改变已有字段含义、删除字段或修改幂等语义时创建新的主版本，并保留旧版本解码器直到所有旧任务完成。
