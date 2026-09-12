@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -137,6 +138,19 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
+	var initialSiteSettings identity.SiteSettings
+	if siteSettings, settingsErr := identityService.SiteSettings(ctx); settingsErr != nil {
+		db.Close()
+		return nil, fmt.Errorf("read site settings: %w", settingsErr)
+	} else {
+		initialSiteSettings = siteSettings
+		if strings.TrimSpace(siteSettings.BaseURL) != "" {
+			if err := discoveryService.SetBaseURL(siteSettings.BaseURL); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("configure site base URL: %w", err)
+			}
+		}
+	}
 	var backupStore operations.BackupStore
 	if cfg.Operations.Backup.Adapter == "s3" {
 		backupStorage, storageErr := media.NewS3Storage(cfg.Operations.Backup.S3.Endpoint, cfg.Operations.Backup.S3.Bucket, cfg.Operations.Backup.S3.Region, cfg.Operations.Backup.S3.AccessKey, cfg.Operations.Backup.S3.SecretKey, cfg.Operations.Backup.S3.Prefix, cfg.Operations.Backup.S3.ForcePathStyle, cfg.Operations.Backup.S3.UseTLS)
@@ -258,6 +272,32 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	presentationHTTP.SetDiscovery(discoveryService)
 	presentationHTTP.SetThemeManager(themeManager)
 	presentationHTTP.SetMediaQueries(mediaService)
+	applySiteMetadata := func(ctx context.Context, settings identity.SiteSettings) {
+		baseURL := settings.BaseURL
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = cfg.Discovery.BaseURL
+		}
+		if err := discoveryService.SetBaseURL(baseURL); err != nil {
+			logger.WarnContext(ctx, "update discovery base URL from site settings", "error", err)
+		}
+		metadata := presentation.SiteMetadata{
+			Language:    settings.PrimaryLanguage,
+			Description: settings.Description, DefaultSEOTitle: settings.DefaultSEOTitle,
+			DefaultSEODescription: settings.DefaultSEODescription, SocialLinks: settings.SocialLinks,
+		}
+		if len(settings.DefaultSocialImageID) == 16 {
+			if item, err := mediaService.PublicItem(ctx, settings.DefaultSocialImageID); err == nil {
+				if view, err := item.PublicView(); err == nil {
+					metadata.DefaultSocialImageURL = discoveryService.AbsoluteURL(view.URL)
+				}
+			}
+		}
+		presentationHTTP.SetSiteMetadata(metadata)
+	}
+	applySiteMetadata(ctx, initialSiteSettings)
+	identityHTTP.SetSiteSettingsHook(func(ctx context.Context, settings identity.SiteSettings) {
+		applySiteMetadata(ctx, settings)
+	})
 	commentService := comments.NewService(db, publishingService, presentation.NewMarkdown(), cfg.Comments.RequireModeration, authSecret)
 	commentService.SetWriteGuard(publicWriteGuard)
 	identityHTTP.SetPendingCommentQueries(commentService)
@@ -293,6 +333,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		newsletterService.SetOutbox(outbox)
 		newsletterService.SetBaseURL(cfg.Discovery.BaseURL)
 		newsletterHandler := notifications.NewNewsletterHTTPHandlerFromService(newsletterService)
+		newsletterHandler.SetSecurity(identityHTTP)
 		newsletterHandler.SetClientIPResolver(clientIPResolver)
 		pluginID, pluginName := "newsletter.external", "外部 Newsletter"
 		if cfg.Newsletter.Provider == "local" {
