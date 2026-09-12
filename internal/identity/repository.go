@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -46,6 +47,222 @@ func (r *Repository) Timezone(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("read site timezone: %w", err)
 	}
 	return timezone, nil
+}
+
+func (r *Repository) SiteSettings(ctx context.Context) (SiteSettings, error) {
+	var settings SiteSettings
+	var imageID []byte
+	var socialJSON string
+	err := r.database.Reader.QueryRowContext(ctx, `
+		SELECT name,primary_language,timezone,base_url,description,
+		       default_seo_title,default_seo_description,social_links_json,
+		       default_social_image_public_id
+		FROM sites WHERE id=1`).Scan(
+		&settings.Name, &settings.PrimaryLanguage, &settings.Timezone,
+		&settings.BaseURL, &settings.Description, &settings.DefaultSEOTitle,
+		&settings.DefaultSEODescription, &socialJSON, &imageID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SiteSettings{Name: "个人博客", PrimaryLanguage: "zh-CN", Timezone: "Asia/Shanghai", SocialLinks: []string{}}, nil
+	}
+	if err != nil {
+		return SiteSettings{}, fmt.Errorf("read site settings: %w", err)
+	}
+	if socialJSON == "" {
+		socialJSON = "[]"
+	}
+	if err := json.Unmarshal([]byte(socialJSON), &settings.SocialLinks); err != nil {
+		return SiteSettings{}, fmt.Errorf("decode site social links: %w", err)
+	}
+	settings.SocialLinks = append([]string(nil), settings.SocialLinks...)
+	settings.DefaultSocialImageID = append([]byte(nil), imageID...)
+	return settings, nil
+}
+
+func (r *Repository) UpdateSiteSettings(ctx context.Context, settings SiteSettings, now time.Time) error {
+	socialJSON, err := json.Marshal(settings.SocialLinks)
+	if err != nil {
+		return fmt.Errorf("encode site social links: %w", err)
+	}
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET name=?,primary_language=?,timezone=?,base_url=?,description=?,default_seo_title=?,default_seo_description=?,social_links_json=?,default_social_image_public_id=?,updated_at=? WHERE id=1`,
+		settings.Name, settings.PrimaryLanguage, settings.Timezone, settings.BaseURL, settings.Description,
+		settings.DefaultSEOTitle, settings.DefaultSEODescription, string(socialJSON), nullableBytes(settings.DefaultSocialImageID), millis(now)); err != nil {
+		return fmt.Errorf("update site settings: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {
+		return fmt.Errorf("invalidate site settings: %w", err)
+	}
+	if err := insertAuditContext(ctx, tx, "identity.site_settings.updated", "site", `{"fields":["public_metadata"]}`, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) ChangePassword(ctx context.Context, ownerID, authVersion int64, passwordHash string, now time.Time) error {
+	return r.rotateOwnerSecurity(ctx, ownerID, authVersion, passwordHash, nil, nil, "identity.password.changed", now)
+}
+
+func (r *Repository) RotateRecoveryCodes(ctx context.Context, ownerID, authVersion int64, recoveryHashes [][]byte, now time.Time) error {
+	return r.rotateOwnerSecurity(ctx, ownerID, authVersion, "", nil, recoveryHashes, "identity.recovery_codes.rotated", now)
+}
+
+func (r *Repository) CompleteTOTPRotation(ctx context.Context, ownerID, authVersion int64, totpCipher []byte, recoveryHashes [][]byte, now time.Time) error {
+	return r.rotateOwnerSecurity(ctx, ownerID, authVersion, "", totpCipher, recoveryHashes, "identity.totp.rotated", now)
+}
+
+// CompleteTOTPRotationChallenge claims the one-time challenge and rotates the
+// owner security state in one transaction. A crash after either operation is
+// therefore rolled back instead of leaving a replayable challenge or a
+// partially rotated identity.
+func (r *Repository) CompleteTOTPRotationChallenge(ctx context.Context, ownerID, authVersion int64, purpose string, tokenHash, totpCipher []byte, recoveryHashes [][]byte, now time.Time) error {
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, "DELETE FROM owner_security_challenges WHERE owner_id=? AND purpose=? AND token_hash=? AND expires_at>?", ownerID, purpose, tokenHash, millis(now))
+	if err != nil {
+		return err
+	}
+	claimed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if claimed != 1 {
+		return ErrInvalidChallenge
+	}
+	if err := r.rotateOwnerSecurityTx(ctx, tx, ownerID, authVersion, "", totpCipher, recoveryHashes, "identity.totp.rotated", now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) RevokeAllSessions(ctx context.Context, ownerID, authVersion int64, now time.Time) error {
+	return r.rotateOwnerSecurity(ctx, ownerID, authVersion, "", nil, nil, "identity.sessions.revoked", now)
+}
+
+func (r *Repository) rotateOwnerSecurity(ctx context.Context, ownerID, authVersion int64, passwordHash string, totpCipher []byte, recoveryHashes [][]byte, action string, now time.Time) error {
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := r.rotateOwnerSecurityTx(ctx, tx, ownerID, authVersion, passwordHash, totpCipher, recoveryHashes, action, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (r *Repository) rotateOwnerSecurityTx(ctx context.Context, tx *sql.Tx, ownerID, authVersion int64, passwordHash string, totpCipher []byte, recoveryHashes [][]byte, action string, now time.Time) error {
+	query := "UPDATE owners SET auth_version=auth_version+1,updated_at=?"
+	args := []any{millis(now)}
+	if passwordHash != "" {
+		query += ",password_hash=?"
+		args = append(args, passwordHash)
+	}
+	if len(totpCipher) > 0 {
+		query += ",totp_secret_cipher=?"
+		args = append(args, totpCipher)
+	}
+	query += " WHERE id=? AND auth_version=?"
+	args = append(args, ownerID, authVersion)
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	updated, _ := result.RowsAffected()
+	if updated != 1 {
+		return ErrInvalidSecurity
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM sessions WHERE owner_id=?", ownerID); err != nil {
+		return err
+	}
+	if recoveryHashes != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM owner_recovery_codes WHERE owner_id=?", ownerID); err != nil {
+			return err
+		}
+		for _, hash := range recoveryHashes {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO owner_recovery_codes(owner_id,code_hash,created_at) VALUES(?,?,?)", ownerID, hash, millis(now)); err != nil {
+				return err
+			}
+		}
+	}
+	if err := insertAuditContext(ctx, tx, action, "owner", "{}", now); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *Repository) SaveSecurityChallenge(ctx context.Context, ownerID int64, purpose string, tokenHash, candidateCipher []byte, expiresAt, now time.Time) error {
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM owner_security_challenges WHERE owner_id=? AND purpose=?", ownerID, purpose); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO owner_security_challenges(owner_id,purpose,token_hash,candidate_totp_secret_cipher,expires_at,created_at) VALUES(?,?,?,?,?,?)`, ownerID, purpose, tokenHash, candidateCipher, millis(expiresAt), millis(now)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type securityChallenge struct {
+	OwnerID         int64
+	Purpose         string
+	TokenHash       []byte
+	CandidateCipher []byte
+	ExpiresAt       time.Time
+}
+
+func (r *Repository) SecurityChallenge(ctx context.Context, ownerID int64, purpose string, tokenHash []byte, now time.Time) (securityChallenge, error) {
+	var challenge securityChallenge
+	var expiresAt int64
+	err := r.database.Reader.QueryRowContext(ctx, `SELECT owner_id,purpose,token_hash,candidate_totp_secret_cipher,expires_at FROM owner_security_challenges WHERE owner_id=? AND purpose=? AND token_hash=? AND expires_at>?`, ownerID, purpose, tokenHash, millis(now)).Scan(&challenge.OwnerID, &challenge.Purpose, &challenge.TokenHash, &challenge.CandidateCipher, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return securityChallenge{}, ErrInvalidChallenge
+	}
+	if err != nil {
+		return securityChallenge{}, err
+	}
+	challenge.ExpiresAt = fromMillis(expiresAt)
+	return challenge, nil
+}
+
+func (r *Repository) ConsumeSecurityChallenge(ctx context.Context, ownerID int64, purpose string, tokenHash []byte, now time.Time) error {
+	result, err := r.database.Writer.ExecContext(ctx, "DELETE FROM owner_security_challenges WHERE owner_id=? AND purpose=? AND token_hash=? AND expires_at>?", ownerID, purpose, tokenHash, millis(now))
+	if err != nil {
+		return err
+	}
+	count, _ := result.RowsAffected()
+	if count != 1 {
+		return ErrInvalidChallenge
+	}
+	return nil
+}
+
+func (r *Repository) Sessions(ctx context.Context, ownerID int64) ([]SecuritySession, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, "SELECT id,created_at,last_seen_at,expires_at FROM sessions WHERE owner_id=? ORDER BY last_seen_at DESC,id DESC LIMIT 50", ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []SecuritySession
+	for rows.Next() {
+		var item SecuritySession
+		var created, lastSeen, expires int64
+		if err := rows.Scan(&item.ID, &created, &lastSeen, &expires); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, item.LastSeenAt, item.ExpiresAt = fromMillis(created), fromMillis(lastSeen), fromMillis(expires)
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (r *Repository) SaveSetupChallenge(ctx context.Context, challenge setupChallenge, now time.Time) error {
@@ -360,6 +577,24 @@ func insertAudit(ctx context.Context, tx *sql.Tx, action, objectKind, result str
 		return fmt.Errorf("save audit entry: %w", err)
 	}
 	return nil
+}
+
+func insertAuditContext(ctx context.Context, tx *sql.Tx, action, objectKind, contextJSON string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO audit_entries (action, object_kind, result, context_json, created_at)
+		VALUES (?, ?, 'succeeded', ?, ?)
+	`, action, objectKind, contextJSON, millis(now))
+	if err != nil {
+		return fmt.Errorf("save audit entry: %w", err)
+	}
+	return nil
+}
+
+func nullableBytes(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return value
 }
 
 func mapInitializationError(err error) error {

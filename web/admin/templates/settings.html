@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>站点设置 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=8">
+</head>
+<body class="admin-page">
+  {{template "admin_header" .}}
+  <main class="content-shell settings-shell">
+    <div class="page-heading"><div><p class="eyebrow">Owner & site</p><h1>站点设置。</h1><p class="heading-support">公开信息和 Owner 安全操作分开保存；敏感变更成功后会立即撤销旧会话。</p></div></div>
+    {{template "admin_feedback" .}}
+    {{with .RecoveryCodes}}
+    <section class="management-card recovery-codes" aria-labelledby="new-recovery-codes-title">
+      <header><div><p class="aside-label">一次性凭据</p><h2 id="new-recovery-codes-title">请立即保存新的恢复码。</h2></div></header>
+      <p>这些恢复码只在本次响应中显示，数据库只保存不可逆摘要。每个恢复码只能使用一次。</p>
+      <ol class="recovery-code-list">{{range .}}<li><code>{{.}}</code></li>{{end}}</ol>
+      <p><a class="button-link small" href="/admin/login">前往重新登录 →</a></p>
+    </section>
+    {{end}}
+    <section class="management-card" aria-labelledby="site-settings-title">
+      <header><div><p class="aside-label">Public identity</p><h2 id="site-settings-title">公开站点设置</h2></div><span class="section-count">修改后清理公共缓存</span></header>
+      <form method="post" action="/admin/settings/site" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>站点名称<input name="name" value="{{.Settings.Name}}" maxlength="100" required></label>
+        <label>主要语言<input name="primary_language" value="{{.Settings.PrimaryLanguage}}" maxlength="32" required></label>
+        <label>站点时区<input name="timezone" value="{{.Settings.Timezone}}" maxlength="64" required><small>使用 IANA 时区，例如 Asia/Shanghai。</small></label>
+        <label>公开基础 URL<input type="url" name="base_url" value="{{.Settings.BaseURL}}" maxlength="300" placeholder="https://example.com"><small>用于 canonical、Open Graph、Feed、Sitemap 和 JSON-LD。</small></label>
+        <label>站点描述<textarea name="description" rows="3" maxlength="1000">{{.Settings.Description}}</textarea></label>
+        <label>默认 SEO 标题<input name="default_seo_title" value="{{.Settings.DefaultSEOTitle}}" maxlength="200"></label>
+        <label>默认 SEO 描述<textarea name="default_seo_description" rows="3" maxlength="500">{{.Settings.DefaultSEODescription}}</textarea></label>
+        <label>社交链接<small>每行一个 HTTP(S) 地址，不保存查询参数或片段。</small><textarea name="social_links" rows="4" maxlength="2000">{{range .Settings.SocialLinks}}{{.}}
+{{end}}</textarea></label>
+        <label>默认社交图片公共 ID<input name="default_social_image_id" value="{{printf "%x" .Settings.DefaultSocialImageID}}" maxlength="32" pattern="[0-9a-fA-F]{32}"><small>可选；使用媒体库中图片的 32 位十六进制公共 ID。</small></label>
+        <button class="button-link small" type="submit">保存公开设置</button>
+      </form>
+    </section>
+
+    <section class="management-card" aria-labelledby="password-title">
+      <header><div><p class="aside-label">Authentication</p><h2 id="password-title">修改密码</h2></div><span class="section-count">需要当前密码 + TOTP</span></header>
+      <form method="post" action="/admin/settings/password" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>当前密码<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label>当前验证器代码<input inputmode="numeric" pattern="[0-9]{6}" name="current_totp" autocomplete="one-time-code" required></label>
+        <label>新密码<input type="password" name="new_password" autocomplete="new-password" required></label>
+        <label>确认新密码<input type="password" name="new_password_confirm" autocomplete="new-password" required></label>
+        <button class="button-link small" type="submit">更新密码并退出其他会话</button>
+      </form>
+    </section>
+
+    <section class="management-card" aria-labelledby="totp-title">
+      <header><div><p class="aside-label">Two-factor authentication</p><h2 id="totp-title">轮换验证器</h2></div><span class="section-count">旧密钥在确认前仍有效</span></header>
+      {{with .TOTPChallenge}}
+      <div class="notice warning"><p>请在验证器中添加下面的密钥，然后输入新生成的 6 位代码完成轮换。</p><p><strong>密钥：</strong><code>{{.Secret}}</code></p><p><strong>URI：</strong><code>{{.TOTPURI}}</code></p></div>
+      <form method="post" action="/admin/settings/totp/complete" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{$.CSRF}}"><input type="hidden" name="challenge_token" value="{{.Token}}">
+        <label>新验证器代码<input inputmode="numeric" pattern="[0-9]{6}" name="totp_code" autocomplete="one-time-code" required></label>
+        <button class="button-link small" type="submit">确认新验证器</button>
+      </form>
+      {{else}}
+      <form method="post" action="/admin/settings/totp/start" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>当前密码<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label>当前验证器代码<input inputmode="numeric" pattern="[0-9]{6}" name="current_totp" autocomplete="one-time-code" required></label>
+        <button class="button-link small" type="submit">生成轮换挑战</button>
+      </form>
+      {{end}}
+    </section>
+
+    <section class="management-card" aria-labelledby="recovery-title">
+      <header><div><p class="aside-label">Recovery</p><h2 id="recovery-title">重新生成恢复码</h2></div><span class="section-count">旧恢复码立即失效</span></header>
+      <form method="post" action="/admin/settings/recovery" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>当前密码<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label>当前验证器代码<input inputmode="numeric" pattern="[0-9]{6}" name="current_totp" autocomplete="one-time-code" required></label>
+        <button class="button-link small" type="submit">重新生成恢复码</button>
+      </form>
+    </section>
+
+    <section class="management-card" aria-labelledby="sessions-title">
+      <header><div><p class="aside-label">Sessions</p><h2 id="sessions-title">后台会话</h2></div><span class="section-count">最多显示最近 50 个</span></header>
+      {{if .Sessions}}<ul class="settings-session-list">{{range .Sessions}}<li><span>会话 #{{.ID}}</span><span>最近活动 {{.LastSeenAt.Format "2006-01-02 15:04 UTC"}}</span><span>到期 {{.ExpiresAt.Format "2006-01-02 15:04 UTC"}}</span></li>{{end}}</ul>{{else}}<p>当前没有可列出的会话。</p>{{end}}
+      <form method="post" action="/admin/settings/sessions/revoke" class="settings-form" data-submit-feedback>
+        <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+        <label>当前密码<input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label>当前验证器代码<input inputmode="numeric" pattern="[0-9]{6}" name="current_totp" autocomplete="one-time-code" required></label>
+        <button class="danger-button" type="submit">撤销全部会话</button>
+      </form>
+    </section>
+  </main>
+  {{template "admin_footer" .}}
+</body>
+</html>

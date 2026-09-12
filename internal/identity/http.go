@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -49,6 +50,7 @@ type HTTPHandler struct {
 	js               []byte
 	jsETag           string
 	clientIP         *clientip.Resolver
+	siteSettingsHook func(context.Context, SiteSettings)
 }
 
 func NewHTTPHandler(service *Service, security config.Security, logger *slog.Logger) (*HTTPHandler, error) {
@@ -101,6 +103,10 @@ func (h *HTTPHandler) SetPendingCommentQueries(queries PendingCommentQueries) {
 	h.pendingComments = queries
 }
 
+func (h *HTTPHandler) SetSiteSettingsHook(hook func(context.Context, SiteSettings)) {
+	h.siteSettingsHook = hook
+}
+
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Get("/assets/admin.css", h.stylesheet)
 	router.Get("/assets/admin.js", h.adminScript)
@@ -115,6 +121,13 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 func (h *HTTPHandler) RegisterProtected(router chi.Router) {
 	router.Get("/", h.dashboard)
 	router.Post("/logout", h.logout)
+	router.Get("/settings", h.settings)
+	router.Post("/settings/site", h.updateSiteSettings)
+	router.Post("/settings/password", h.changePassword)
+	router.Post("/settings/totp/start", h.startTOTPRotation)
+	router.Post("/settings/totp/complete", h.completeTOTPRotation)
+	router.Post("/settings/recovery", h.regenerateRecoveryCodes)
+	router.Post("/settings/sessions/revoke", h.revokeSessions)
 }
 
 func (h *HTTPHandler) SecurityHeaders(next http.Handler) http.Handler {
@@ -342,6 +355,209 @@ func (h *HTTPHandler) dashboard(w http.ResponseWriter, r *http.Request) {
 		"AdminSection": "overview",
 		"Dashboard":    dashboard,
 	})
+}
+
+func (h *HTTPHandler) settings(w http.ResponseWriter, r *http.Request) {
+	data, err := h.settingsData(r)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	data["Notice"], data["Error"] = settingsFeedback(r)
+	h.render(w, r, "settings.html", data)
+}
+
+func (h *HTTPHandler) settingsData(r *http.Request) (map[string]any, error) {
+	session := sessionFromContext(r.Context())
+	settings, err := h.service.SiteSettings(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	sessions, err := h.service.Sessions(r.Context(), session)
+	if err != nil {
+		return nil, err
+	}
+	siteName, err := h.service.SiteName(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"SiteName": siteName, "Username": session.Username, "CSRF": h.service.SessionCSRF(session.Token),
+		"AdminSection": "settings", "Settings": settings, "Sessions": sessions,
+	}, nil
+}
+
+func (h *HTTPHandler) updateSiteSettings(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	settings, err := h.service.SiteSettings(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	settings.Name = strings.TrimSpace(r.FormValue("name"))
+	settings.PrimaryLanguage = strings.TrimSpace(r.FormValue("primary_language"))
+	settings.Timezone = strings.TrimSpace(r.FormValue("timezone"))
+	settings.BaseURL = strings.TrimSpace(r.FormValue("base_url"))
+	settings.Description = strings.TrimSpace(r.FormValue("description"))
+	settings.DefaultSEOTitle = strings.TrimSpace(r.FormValue("default_seo_title"))
+	settings.DefaultSEODescription = strings.TrimSpace(r.FormValue("default_seo_description"))
+	settings.SocialLinks = splitSettingsLines(r.FormValue("social_links"))
+	if _, present := r.Form["default_social_image_id"]; present {
+		value := strings.TrimSpace(r.FormValue("default_social_image_id"))
+		if value == "" {
+			settings.DefaultSocialImageID = nil
+		} else {
+			decoded, decodeErr := hex.DecodeString(value)
+			if decodeErr != nil || len(decoded) != 16 {
+				h.renderSettingsError(w, r, "默认社交图片公共 ID 必须是 32 位十六进制值")
+				return
+			}
+			settings.DefaultSocialImageID = decoded
+		}
+	}
+	if err := h.service.UpdateSiteSettings(r.Context(), settings); err != nil {
+		h.renderSettingsError(w, r, err.Error())
+		return
+	}
+	if h.siteSettingsHook != nil {
+		if normalized, readErr := h.service.SiteSettings(r.Context()); readErr == nil {
+			h.siteSettingsHook(r.Context(), normalized)
+		}
+	}
+	http.Redirect(w, r, "/admin/settings?notice=site", http.StatusSeeOther)
+}
+
+func (h *HTTPHandler) changePassword(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	if r.FormValue("new_password") != r.FormValue("new_password_confirm") {
+		h.renderSettingsError(w, r, "两次输入的新密码不一致")
+		return
+	}
+	if err := h.service.ChangePassword(r.Context(), sessionFromContext(r.Context()), r.FormValue("current_password"), r.FormValue("current_totp"), r.FormValue("new_password")); err != nil {
+		h.renderSettingsError(w, r, settingsErrorMessage(err))
+		return
+	}
+	h.clearCookie(w, h.sessionCookieName())
+	http.Redirect(w, r, "/admin/login?notice=password", http.StatusSeeOther)
+}
+
+func (h *HTTPHandler) startTOTPRotation(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	challenge, err := h.service.StartTOTPRotation(r.Context(), sessionFromContext(r.Context()), r.FormValue("current_password"), r.FormValue("current_totp"))
+	if err != nil {
+		h.renderSettingsError(w, r, settingsErrorMessage(err))
+		return
+	}
+	data, err := h.settingsData(r)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	data["TOTPChallenge"] = challenge
+	data["Notice"] = "新的验证器密钥已生成；在验证成功前旧密钥仍然有效。"
+	h.render(w, r, "settings.html", data)
+}
+
+func (h *HTTPHandler) completeTOTPRotation(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	codes, err := h.service.CompleteTOTPRotation(r.Context(), sessionFromContext(r.Context()), r.FormValue("challenge_token"), r.FormValue("totp_code"))
+	if err != nil {
+		h.renderSettingsError(w, r, settingsErrorMessage(err))
+		return
+	}
+	h.clearCookie(w, h.sessionCookieName())
+	data := map[string]any{"SiteName": "个人博客", "RecoveryCodes": codes, "Notice": "验证器已更新，旧会话已失效。请保存下面一次性恢复码后重新登录。"}
+	if name, nameErr := h.service.SiteName(r.Context()); nameErr == nil {
+		data["SiteName"] = name
+	}
+	h.render(w, r, "security_recovery.html", data)
+}
+
+func (h *HTTPHandler) regenerateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	codes, err := h.service.RegenerateRecoveryCodes(r.Context(), sessionFromContext(r.Context()), r.FormValue("current_password"), r.FormValue("current_totp"))
+	if err != nil {
+		h.renderSettingsError(w, r, settingsErrorMessage(err))
+		return
+	}
+	h.clearCookie(w, h.sessionCookieName())
+	data := map[string]any{"SiteName": "个人博客", "RecoveryCodes": codes, "Notice": "恢复码已重新生成，旧会话和旧恢复码均已失效。请保存后重新登录。"}
+	if name, nameErr := h.service.SiteName(r.Context()); nameErr == nil {
+		data["SiteName"] = name
+	}
+	h.render(w, r, "security_recovery.html", data)
+}
+
+func (h *HTTPHandler) revokeSessions(w http.ResponseWriter, r *http.Request) {
+	if !h.parseAdminForm(w, r) {
+		return
+	}
+	if err := h.service.RevokeAllSessions(r.Context(), sessionFromContext(r.Context()), r.FormValue("current_password"), r.FormValue("current_totp")); err != nil {
+		h.renderSettingsError(w, r, settingsErrorMessage(err))
+		return
+	}
+	h.clearCookie(w, h.sessionCookieName())
+	http.Redirect(w, r, "/admin/login?notice=sessions", http.StatusSeeOther)
+}
+
+func (h *HTTPHandler) parseAdminForm(w http.ResponseWriter, r *http.Request) bool {
+	if !h.parseForm(w, r) || !h.VerifyParsedCSRF(w, r) {
+		return false
+	}
+	return true
+}
+
+func (h *HTTPHandler) renderSettingsError(w http.ResponseWriter, r *http.Request, message string) {
+	data, err := h.settingsData(r)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	data["Error"] = message
+	h.renderWithStatus(w, r, "settings.html", data, http.StatusUnprocessableEntity)
+}
+
+func settingsFeedback(r *http.Request) (string, string) {
+	switch r.URL.Query().Get("notice") {
+	case "site":
+		return "站点公开设置已保存，公共页面缓存已失效。", ""
+	case "password":
+		return "密码已更新，请使用新密码重新登录。", ""
+	case "sessions":
+		return "所有后台会话已撤销，请重新登录。", ""
+	}
+	return "", ""
+}
+
+func settingsErrorMessage(err error) string {
+	if errors.Is(err, ErrInvalidSecurity) || errors.Is(err, ErrInvalidCredentials) {
+		return "当前密码或验证器代码不正确。"
+	}
+	if errors.Is(err, ErrInvalidChallenge) {
+		return "安全挑战已过期或已使用，请重新开始。"
+	}
+	return err.Error()
+}
+
+func splitSettingsLines(value string) []string {
+	lines := strings.Split(value, "\n")
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if value := strings.TrimSpace(line); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 type dashboardView struct {

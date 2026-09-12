@@ -12,6 +12,8 @@ var (
 	ErrInvalidCredentials = errors.New("invalid credentials")
 	ErrInvalidSetup       = errors.New("invalid or expired setup challenge")
 	ErrRateLimited        = errors.New("too many authentication attempts")
+	ErrInvalidSecurity    = errors.New("security reauthentication failed")
+	ErrInvalidChallenge   = errors.New("security challenge is invalid or expired")
 )
 
 type Owner struct {
@@ -59,6 +61,35 @@ type RecoveryResult struct {
 	TOTPSecret    string
 	TOTPURI       string
 	RecoveryCodes []string
+}
+
+// SiteSettings contains only bounded, public-facing site metadata. Secrets,
+// plugin credentials, and delivery configuration deliberately do not belong
+// here.
+type SiteSettings struct {
+	Name                  string
+	PrimaryLanguage       string
+	Timezone              string
+	BaseURL               string
+	Description           string
+	DefaultSEOTitle       string
+	DefaultSEODescription string
+	SocialLinks           []string
+	DefaultSocialImageID  []byte
+}
+
+type TOTPChallenge struct {
+	Token     string
+	Secret    string
+	TOTPURI   string
+	ExpiresAt time.Time
+}
+
+type SecuritySession struct {
+	ID         int64
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
 }
 
 func usernameKey(username string) string {

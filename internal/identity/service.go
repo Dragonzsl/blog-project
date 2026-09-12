@@ -84,6 +84,189 @@ func (s *Service) Timezone(ctx context.Context) (string, error) {
 	return s.repository.Timezone(ctx)
 }
 
+func (s *Service) SiteSettings(ctx context.Context) (SiteSettings, error) {
+	return s.repository.SiteSettings(ctx)
+}
+
+func (s *Service) UpdateSiteSettings(ctx context.Context, settings SiteSettings) error {
+	normalized, err := normalizeSiteSettings(settings)
+	if err != nil {
+		return err
+	}
+	if err := s.repository.UpdateSiteSettings(ctx, normalized, s.now()); err != nil {
+		return err
+	}
+	s.siteNameMu.Lock()
+	s.siteName = normalized.Name
+	s.siteNameLoaded = true
+	s.siteNameMu.Unlock()
+	return nil
+}
+
+func normalizeSiteSettings(settings SiteSettings) (SiteSettings, error) {
+	settings.Name = strings.TrimSpace(settings.Name)
+	if !utf8.ValidString(settings.Name) || utf8.RuneCountInString(settings.Name) < 1 || utf8.RuneCountInString(settings.Name) > 100 {
+		return SiteSettings{}, errors.New("站点名称需要 1–100 个字符")
+	}
+	settings.PrimaryLanguage = strings.TrimSpace(settings.PrimaryLanguage)
+	if settings.PrimaryLanguage == "" || len(settings.PrimaryLanguage) > 32 || strings.ContainsAny(settings.PrimaryLanguage, "\r\n") {
+		return SiteSettings{}, errors.New("主要语言无效")
+	}
+	settings.Timezone = strings.TrimSpace(settings.Timezone)
+	if _, err := time.LoadLocation(settings.Timezone); err != nil {
+		return SiteSettings{}, errors.New("时区无效")
+	}
+	settings.BaseURL = strings.TrimRight(strings.TrimSpace(settings.BaseURL), "/")
+	if settings.BaseURL != "" {
+		parsed, err := url.Parse(settings.BaseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return SiteSettings{}, errors.New("公开基础 URL 必须是没有凭据、查询参数和片段的 HTTP(S) 地址")
+		}
+	}
+	settings.Description = strings.TrimSpace(settings.Description)
+	settings.DefaultSEOTitle = strings.TrimSpace(settings.DefaultSEOTitle)
+	settings.DefaultSEODescription = strings.TrimSpace(settings.DefaultSEODescription)
+	if !utf8.ValidString(settings.Description) || utf8.RuneCountInString(settings.Description) > 1000 || !utf8.ValidString(settings.DefaultSEOTitle) || utf8.RuneCountInString(settings.DefaultSEOTitle) > 200 || !utf8.ValidString(settings.DefaultSEODescription) || utf8.RuneCountInString(settings.DefaultSEODescription) > 500 {
+		return SiteSettings{}, errors.New("站点描述或 SEO 字段超过长度限制")
+	}
+	if len(settings.SocialLinks) > 10 {
+		return SiteSettings{}, errors.New("社交链接最多 10 个")
+	}
+	links := make([]string, 0, len(settings.SocialLinks))
+	for _, value := range settings.SocialLinks {
+		value = strings.TrimSpace(value)
+		parsed, err := url.Parse(value)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return SiteSettings{}, errors.New("社交链接必须是安全的 HTTP(S) 地址")
+		}
+		links = append(links, value)
+	}
+	settings.SocialLinks = links
+	if len(settings.DefaultSocialImageID) != 0 && len(settings.DefaultSocialImageID) != 16 {
+		return SiteSettings{}, errors.New("默认社交图片公共 ID 无效")
+	}
+	settings.DefaultSocialImageID = append([]byte(nil), settings.DefaultSocialImageID...)
+	return settings, nil
+}
+
+func validateSiteSettings(settings SiteSettings) error {
+	_, err := normalizeSiteSettings(settings)
+	return err
+}
+
+func (s *Service) verifyCurrentCredentials(ctx context.Context, session Session, password, secondFactor string) (Owner, error) {
+	owner, err := s.repository.OwnerByUsername(ctx, usernameKey(session.Username))
+	if err != nil || owner.ID != session.OwnerID || owner.AuthVersion != session.AuthVersion {
+		return Owner{}, ErrInvalidSecurity
+	}
+	valid, err := s.hasher.Verify(owner.PasswordHash, password)
+	if err != nil || !valid {
+		return Owner{}, ErrInvalidSecurity
+	}
+	secret, err := s.protector.Decrypt(owner.TOTPSecretCipher)
+	if err != nil || !validateTOTP(secondFactor, secret, s.now()) {
+		return Owner{}, ErrInvalidSecurity
+	}
+	return owner, nil
+}
+
+func (s *Service) ChangePassword(ctx context.Context, session Session, currentPassword, currentTOTP, newPassword string) error {
+	owner, err := s.verifyCurrentCredentials(ctx, session, currentPassword, currentTOTP)
+	if err != nil {
+		return err
+	}
+	if err := ValidatePassword(newPassword); err != nil {
+		return err
+	}
+	hash, err := s.hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	return s.repository.ChangePassword(ctx, owner.ID, owner.AuthVersion, hash, s.now())
+}
+
+func (s *Service) StartTOTPRotation(ctx context.Context, session Session, currentPassword, currentTOTP string) (TOTPChallenge, error) {
+	owner, err := s.verifyCurrentCredentials(ctx, session, currentPassword, currentTOTP)
+	if err != nil {
+		return TOTPChallenge{}, err
+	}
+	issuer, err := s.SiteName(ctx)
+	if err != nil {
+		return TOTPChallenge{}, err
+	}
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: issuer, AccountName: owner.Username, Period: 30, SecretSize: 20, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1})
+	if err != nil {
+		return TOTPChallenge{}, err
+	}
+	ciphertext, err := s.protector.Encrypt(key.Secret())
+	if err != nil {
+		return TOTPChallenge{}, err
+	}
+	token, err := randomToken(32)
+	if err != nil {
+		return TOTPChallenge{}, err
+	}
+	now := s.now()
+	challenge := TOTPChallenge{Token: token, Secret: key.Secret(), TOTPURI: key.URL(), ExpiresAt: now.Add(10 * time.Minute)}
+	if err := s.repository.SaveSecurityChallenge(ctx, owner.ID, "totp_rotation", tokenHash(token), ciphertext, challenge.ExpiresAt, now); err != nil {
+		return TOTPChallenge{}, err
+	}
+	return challenge, nil
+}
+
+func (s *Service) CompleteTOTPRotation(ctx context.Context, session Session, token, code string) ([]string, error) {
+	if strings.TrimSpace(token) == "" {
+		return nil, ErrInvalidChallenge
+	}
+	owner, err := s.repository.OwnerByUsername(ctx, usernameKey(session.Username))
+	if err != nil || owner.ID != session.OwnerID || owner.AuthVersion != session.AuthVersion {
+		return nil, ErrInvalidSecurity
+	}
+	challenge, err := s.repository.SecurityChallenge(ctx, owner.ID, "totp_rotation", tokenHash(token), s.now())
+	if err != nil {
+		return nil, err
+	}
+	secret, err := s.protector.Decrypt(challenge.CandidateCipher)
+	if err != nil || !validateTOTP(code, secret, s.now()) {
+		return nil, ErrInvalidCredentials
+	}
+	codes, hashes, err := generateRecoveryCodes(s.protector)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repository.CompleteTOTPRotationChallenge(ctx, owner.ID, owner.AuthVersion, "totp_rotation", tokenHash(token), challenge.CandidateCipher, hashes, s.now()); err != nil {
+		return nil, err
+	}
+	return codes, nil
+}
+
+func (s *Service) RegenerateRecoveryCodes(ctx context.Context, session Session, currentPassword, currentTOTP string) ([]string, error) {
+	owner, err := s.verifyCurrentCredentials(ctx, session, currentPassword, currentTOTP)
+	if err != nil {
+		return nil, err
+	}
+	codes, hashes, err := generateRecoveryCodes(s.protector)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.repository.RotateRecoveryCodes(ctx, owner.ID, owner.AuthVersion, hashes, s.now()); err != nil {
+		return nil, err
+	}
+	return codes, nil
+}
+
+func (s *Service) RevokeAllSessions(ctx context.Context, session Session, currentPassword, currentTOTP string) error {
+	owner, err := s.verifyCurrentCredentials(ctx, session, currentPassword, currentTOTP)
+	if err != nil {
+		return err
+	}
+	return s.repository.RevokeAllSessions(ctx, owner.ID, owner.AuthVersion, s.now())
+}
+
+func (s *Service) Sessions(ctx context.Context, session Session) ([]SecuritySession, error) {
+	return s.repository.Sessions(ctx, session.OwnerID)
+}
+
 func (s *Service) StartSetup(ctx context.Context, siteName, username, password string) (SetupStartResult, error) {
 	initialized, err := s.repository.Initialized(ctx)
 	if err != nil {

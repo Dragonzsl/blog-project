@@ -107,6 +107,40 @@ func TestCLIRecoveryInvalidatesSessions(t *testing.T) {
 	}
 }
 
+func TestSiteSettingsRoundTripPreservesDefaultSocialImage(t *testing.T) {
+	ctx := context.Background()
+	service, closeDatabase := newTestService(t)
+	defer closeDatabase()
+	fixedTime := time.Date(2026, time.August, 23, 14, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return fixedTime }
+	started, err := service.StartSetup(ctx, "测试站点", "owner", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := totp.GenerateCode(started.TOTPSecret, fixedTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompleteSetup(ctx, started.Token, code); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := service.SiteSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.DefaultSocialImageID = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	if err := service.UpdateSiteSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.SiteSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(updated.DefaultSocialImageID) != string(settings.DefaultSocialImageID) {
+		t.Fatalf("default social image = %x, want %x", updated.DefaultSocialImageID, settings.DefaultSocialImageID)
+	}
+}
+
 func newTestService(t *testing.T) (*Service, func()) {
 	t.Helper()
 	db, err := database.Open(context.Background(), config.Database{

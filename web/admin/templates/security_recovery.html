@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>保存恢复码 · {{.SiteName}}</title>
+  <link rel="stylesheet" href="/admin/assets/admin.css?v=8">
+</head>
+<body class="auth-page">
+  {{template "admin_theme_toggle" .}}
+  <main class="auth-shell">
+    <section class="auth-card wide" aria-labelledby="security-recovery-title">
+      <p class="eyebrow">安全凭据</p>
+      <h1 id="security-recovery-title">请立即保存新的恢复码。</h1>
+      <p class="muted">这些恢复码只在本次响应中显示，数据库只保存不可逆摘要；每个恢复码只能使用一次。</p>
+      {{with .Notice}}<div class="notice warning" role="status">{{.}}</div>{{end}}
+      <ol class="recovery-codes" aria-label="恢复码">
+        {{range .RecoveryCodes}}<li><code>{{.}}</code></li>{{end}}
+      </ol>
+      <a class="button-link" href="/admin/login">前往重新登录 <span aria-hidden="true">→</span></a>
+    </section>
+  </main>
+</body>
+</html>
