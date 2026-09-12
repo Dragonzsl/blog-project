@@ -41,6 +41,44 @@ type Comment struct {
 	ApprovedAt   *time.Time
 }
 
+type AdminComment struct {
+	Comment
+	ContentTitle string
+	ContentSlug  string
+}
+
+type AdminCommentFilter struct {
+	Status  string
+	Query   string
+	Page    int
+	PerPage int
+}
+
+type AdminCommentPage struct {
+	Comments []AdminComment
+	Total    int
+	Page     int
+	PerPage  int
+	HasMore  bool
+}
+
+type ModerationItemResult struct {
+	ID     int64  `json:"id"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type ModerationBulkResult struct {
+	OperationKey string                 `json:"operation_key"`
+	Action       string                 `json:"action"`
+	Items        []ModerationItemResult `json:"items"`
+}
+
+var (
+	ErrBulkInProgress  = errors.New("comment bulk operation is already being processed")
+	ErrBulkKeyConflict = errors.New("comment bulk operation key was reused")
+)
+
 type Input struct {
 	DisplayName string
 	Email       string
@@ -355,6 +393,99 @@ func (s *Service) PendingCount(ctx context.Context) (int, error) {
 	return count, nil
 }
 
+func (s *Service) AdminComments(ctx context.Context, filter AdminCommentFilter) (AdminCommentPage, error) {
+	filter.Status = strings.TrimSpace(filter.Status)
+	if filter.Status == "" {
+		filter.Status = "pending"
+	}
+	if filter.Status != "all" && filter.Status != "pending" && filter.Status != "approved" && filter.Status != "spam" && filter.Status != "trash" {
+		return AdminCommentPage{}, ErrInvalid
+	}
+	filter.Query = strings.TrimSpace(filter.Query)
+	if len([]rune(filter.Query)) > 100 {
+		return AdminCommentPage{}, ErrInvalid
+	}
+	if filter.Page < 1 {
+		filter.Page = 1
+	}
+	if filter.Page > 100 {
+		filter.Page = 100
+	}
+	if filter.PerPage < 1 {
+		filter.PerPage = 20
+	}
+	if filter.PerPage > 50 {
+		filter.PerPage = 50
+	}
+	where, args := adminCommentWhere(filter)
+	var total int
+	if err := s.db.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM comments c JOIN contents content ON content.id=c.content_id "+where, args...).Scan(&total); err != nil {
+		return AdminCommentPage{}, err
+	}
+	rows, err := s.db.Reader.QueryContext(ctx, `SELECT c.id,c.public_id,c.content_id,c.parent_id,c.display_name,c.website,c.body_markdown,c.body_html,c.status,c.created_at,c.approved_at,c.updated_at,content.title,COALESCE(content.published_slug,content.slug,'')
+		FROM comments c JOIN contents content ON content.id=c.content_id `+where+` ORDER BY c.created_at DESC,c.id DESC LIMIT ? OFFSET ?`, append(args, filter.PerPage, (filter.Page-1)*filter.PerPage)...)
+	if err != nil {
+		return AdminCommentPage{}, err
+	}
+	defer rows.Close()
+	comments := make([]AdminComment, 0, filter.PerPage)
+	for rows.Next() {
+		item, err := scanAdminComment(rows)
+		if err != nil {
+			return AdminCommentPage{}, err
+		}
+		comments = append(comments, item)
+	}
+	if err := rows.Err(); err != nil {
+		return AdminCommentPage{}, err
+	}
+	return AdminCommentPage{Comments: comments, Total: total, Page: filter.Page, PerPage: filter.PerPage, HasMore: filter.Page*filter.PerPage < total}, nil
+}
+
+func adminCommentWhere(filter AdminCommentFilter) (string, []any) {
+	clauses := []string{"1=1"}
+	args := make([]any, 0, 6)
+	if filter.Status != "all" {
+		clauses = append(clauses, "c.status=?")
+		args = append(args, filter.Status)
+	}
+	if filter.Query != "" {
+		pattern := "%" + escapeCommentLike(filter.Query) + "%"
+		clauses = append(clauses, `(c.display_name LIKE ? COLLATE NOCASE ESCAPE char(92) OR c.body_markdown LIKE ? COLLATE NOCASE ESCAPE char(92) OR content.title LIKE ? COLLATE NOCASE ESCAPE char(92))`)
+		args = append(args, pattern, pattern, pattern)
+	}
+	return "WHERE " + strings.Join(clauses, " AND "), args
+}
+
+func escapeCommentLike(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "%", `\%`)
+	return strings.ReplaceAll(value, "_", `\_`)
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func scanAdminComment(row rowScanner) (AdminComment, error) {
+	var item AdminComment
+	var parent, approved sql.NullInt64
+	var created, updated int64
+	if err := row.Scan(&item.ID, &item.PublicID, &item.ContentID, &parent, &item.DisplayName, &item.Website, &item.BodyMarkdown, &item.BodyHTML, &item.Status, &created, &approved, &updated, &item.ContentTitle, &item.ContentSlug); err != nil {
+		return AdminComment{}, err
+	}
+	if parent.Valid {
+		value := parent.Int64
+		item.ParentID = &value
+	}
+	item.CreatedAt = time.UnixMilli(created).UTC()
+	if approved.Valid {
+		value := time.UnixMilli(approved.Int64).UTC()
+		item.ApprovedAt = &value
+	}
+	return item, nil
+}
+
 func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 	if status != "approved" && status != "spam" && status != "trash" && status != "pending" {
 		return ErrInvalid
@@ -398,6 +529,109 @@ func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 		_ = s.events.Dispatch(ctx, extensions.Event{Name: "CommentApproved.v1", Version: 1, ObjectID: append([]byte(nil), publicID...), Payload: map[string]any{"content_public_id": hex.EncodeToString(contentPublicID)}})
 	}
 	return nil
+}
+
+func (s *Service) ModerateBulk(ctx context.Context, ids []int64, status, operationKey string) (ModerationBulkResult, error) {
+	if status != "approved" && status != "spam" && status != "trash" && status != "pending" {
+		return ModerationBulkResult{}, ErrInvalid
+	}
+	if len(ids) == 0 || len(ids) > 50 || strings.TrimSpace(operationKey) == "" || len(operationKey) > 180 || strings.ContainsAny(operationKey, "\r\n") {
+		return ModerationBulkResult{}, ErrInvalid
+	}
+	unique := make([]int64, 0, len(ids))
+	seen := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id < 1 {
+			return ModerationBulkResult{}, ErrInvalid
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	input, err := json.Marshal(struct {
+		IDs    []int64 `json:"ids"`
+		Status string  `json:"status"`
+	}{unique, status})
+	if err != nil {
+		return ModerationBulkResult{}, err
+	}
+	now := s.now().UTC()
+	if cached, found, err := s.claimBulk(ctx, operationKey, string(input), now); err != nil {
+		return ModerationBulkResult{}, err
+	} else if found {
+		return cached, nil
+	}
+	result := ModerationBulkResult{OperationKey: operationKey, Action: status, Items: make([]ModerationItemResult, 0, len(unique))}
+	for _, id := range unique {
+		item := ModerationItemResult{ID: id, Status: "updated"}
+		if err := s.Moderate(ctx, id, status); err != nil {
+			if errors.Is(err, ErrNotFound) {
+				item.Status, item.Error = "not_found", "评论不存在"
+			} else if errors.Is(err, ErrInvalid) {
+				item.Status, item.Error = "invalid", "评论状态无效"
+			} else {
+				_ = s.finishBulk(ctx, operationKey, result, false, now)
+				return ModerationBulkResult{}, err
+			}
+		}
+		result.Items = append(result.Items, item)
+	}
+	if err := s.finishBulk(ctx, operationKey, result, true, now); err != nil {
+		return ModerationBulkResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) claimBulk(ctx context.Context, operationKey, input string, now time.Time) (ModerationBulkResult, bool, error) {
+	tx, err := s.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return ModerationBulkResult{}, false, err
+	}
+	defer tx.Rollback()
+	var storedInput, status, resultJSON string
+	var updatedAt int64
+	err = tx.QueryRowContext(ctx, "SELECT input_json,status,result_json,updated_at FROM bulk_operations WHERE operation_key=? AND object_kind='comment' AND action='moderate'", operationKey).Scan(&storedInput, &status, &resultJSON, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO bulk_operations(operation_key,object_kind,action,input_json,status,result_json,created_at,updated_at) VALUES(?,'comment','moderate',?,'processing','{}',?,?)`, operationKey, input, now.UnixMilli(), now.UnixMilli()); err != nil {
+			return ModerationBulkResult{}, false, err
+		}
+		return ModerationBulkResult{}, false, tx.Commit()
+	}
+	if err != nil {
+		return ModerationBulkResult{}, false, err
+	}
+	if storedInput != input {
+		return ModerationBulkResult{}, false, ErrBulkKeyConflict
+	}
+	if status == "succeeded" {
+		var cached ModerationBulkResult
+		if err := json.Unmarshal([]byte(resultJSON), &cached); err != nil {
+			return ModerationBulkResult{}, false, err
+		}
+		return cached, true, tx.Commit()
+	}
+	if status == "processing" && now.UnixMilli()-updatedAt < int64((5*time.Minute)/time.Millisecond) {
+		return ModerationBulkResult{}, false, ErrBulkInProgress
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE bulk_operations SET status='processing',result_json='{}',updated_at=? WHERE operation_key=? AND object_kind='comment' AND action='moderate'", now.UnixMilli(), operationKey); err != nil {
+		return ModerationBulkResult{}, false, err
+	}
+	return ModerationBulkResult{}, false, tx.Commit()
+}
+
+func (s *Service) finishBulk(ctx context.Context, operationKey string, result ModerationBulkResult, succeeded bool, now time.Time) error {
+	payload, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	status := "failed"
+	if succeeded {
+		status = "succeeded"
+	}
+	_, err = s.db.Writer.ExecContext(ctx, "UPDATE bulk_operations SET status=?,result_json=?,updated_at=? WHERE operation_key=? AND object_kind='comment' AND action='moderate'", status, payload, now.UnixMilli(), operationKey)
+	return err
 }
 
 func nullableTime(ok bool, value time.Time) any {

@@ -44,7 +44,10 @@ func (p *LocalPlugin) Register(host *extensions.Host) error {
 	if err := host.AdminRoute(http.MethodGet, "/comments", p.handler.pending); err != nil {
 		return err
 	}
-	return host.AdminRoute(http.MethodPost, "/comments/{commentID}/moderate", p.handler.moderate)
+	if err := host.AdminRoute(http.MethodPost, "/comments/{commentID}/moderate", p.handler.moderate); err != nil {
+		return err
+	}
+	return host.AdminRoute(http.MethodPost, "/comments/bulk", p.handler.moderateBulk)
 }
 
 // ExternalPlugin is intentionally a small adapter: the provider owns the

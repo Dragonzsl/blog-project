@@ -1,6 +1,8 @@
 package comments
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +43,13 @@ type rateWindow struct {
 	Count   int
 }
 
+type adminCommentFilterView struct {
+	Status      string
+	Query       string
+	PreviousURL string
+	NextURL     string
+}
+
 func NewHTTPHandler(service *Service, lookup ContentLookup, security Security, logger *slog.Logger, templates ...*template.Template) *HTTPHandler {
 	var parsed *template.Template
 	if len(templates) > 0 {
@@ -76,6 +85,7 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/comments", h.pending)
 	router.Post("/comments/{commentID}/moderate", h.moderate)
+	router.Post("/comments/bulk", h.moderateBulk)
 }
 
 func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request) {
@@ -160,15 +170,80 @@ func (h *HTTPHandler) resolveClientIP(r *http.Request) string {
 }
 
 func (h *HTTPHandler) pending(w http.ResponseWriter, r *http.Request) {
-	comments, err := h.service.Pending(r.Context(), 100)
+	pageNumber := int(parseID(r.URL.Query().Get("page")))
+	perPage := int(parseID(r.URL.Query().Get("per_page")))
+	page, err := h.service.AdminComments(r.Context(), AdminCommentFilter{Status: r.URL.Query().Get("status"), Query: r.URL.Query().Get("q"), Page: pageNumber, PerPage: perPage})
 	if err != nil {
 		h.error(w, r, err)
 		return
 	}
+	operationKey := newCommentOperationKey()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	notice, message := commentFeedback(r)
-	_ = h.templates.ExecuteTemplate(w, "comments.html", map[string]any{"Comments": comments, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins", "Notice": notice, "Error": message})
+	filter := adminCommentFilterView{Status: r.URL.Query().Get("status"), Query: r.URL.Query().Get("q")}
+	if filter.Status == "" {
+		filter.Status = "pending"
+	}
+	if page.Page > 1 {
+		filter.PreviousURL = commentPageURL(filter.Status, filter.Query, page.Page-1, page.PerPage)
+	}
+	if page.HasMore {
+		filter.NextURL = commentPageURL(filter.Status, filter.Query, page.Page+1, page.PerPage)
+	}
+	_ = h.templates.ExecuteTemplate(w, "comments.html", map[string]any{"Comments": page.Comments, "Page": page, "Filter": filter, "OperationKey": operationKey, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins", "Notice": notice, "Error": message})
+}
+
+func commentPageURL(status, query string, page, perPage int) string {
+	values := url.Values{}
+	values.Set("status", status)
+	if query != "" {
+		values.Set("q", query)
+	}
+	values.Set("page", strconv.Itoa(page))
+	if perPage > 0 {
+		values.Set("per_page", strconv.Itoa(perPage))
+	}
+	return "/admin/plugins/comments.local/comments?" + values.Encode()
+}
+
+func (h *HTTPHandler) moderateBulk(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
+		return
+	}
+	ids := make([]int64, 0, len(r.Form["comment_ids"]))
+	for _, raw := range r.Form["comment_ids"] {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id < 1 {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	result, err := h.service.ModerateBulk(r.Context(), ids, r.FormValue("status"), r.FormValue("operation_key"))
+	if err != nil {
+		query := url.Values{"error": []string{"bulk"}}
+		if errors.Is(err, ErrBulkInProgress) {
+			query.Set("error", "bulk_in_progress")
+		} else if errors.Is(err, ErrBulkKeyConflict) {
+			query.Set("error", "bulk_conflict")
+		} else if errors.Is(err, ErrInvalid) {
+			query.Set("error", "invalid")
+		}
+		http.Redirect(w, r, "/admin/plugins/comments.local/comments?"+query.Encode(), http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = h.templates.ExecuteTemplate(w, "comment_bulk_result.html", map[string]any{"Result": result, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins"})
+}
+
+func newCommentOperationKey() string {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+	}
+	return hex.EncodeToString(value)
 }
 func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
@@ -211,12 +286,20 @@ func commentFeedback(r *http.Request) (string, string) {
 		return "评论已通过并公开。", ""
 	case "spam":
 		return "评论已标记为垃圾。", ""
+	case "bulk":
+		return "批量评论操作已完成。", ""
 	}
 	switch r.URL.Query().Get("error") {
 	case "invalid":
 		return "", "评论操作无效，请刷新后重试。"
 	case "moderate":
 		return "", "评论状态更新失败，请稍后重试。"
+	case "bulk_in_progress":
+		return "相同的批量操作正在处理，请稍后查看结果。", ""
+	case "bulk_conflict":
+		return "批量操作编号已用于另一组评论，请刷新后重试。", ""
+	case "bulk":
+		return "批量操作失败，请刷新后重试。", ""
 	}
 	return "", ""
 }
