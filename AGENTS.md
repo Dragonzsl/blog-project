@@ -151,6 +151,14 @@ The default Compose deployment uses `app` and `caddy`, with application data und
 - Public pages, admin templates, CSS/JS, or themes: preserve embed tests, run `make test` and `make browser`, and when appropriate run `BROWSER_STRICT=1 make browser` and `make perf-gate`.
 - Release or dependency changes: run `go mod verify`, `make test-race`, `make vet`, `make perf-gate`, `make sbom`, and `make license-audit`. New dependencies must be version-pinned, license-compatible, evaluated for memory/failure impact, and wrapped behind a replaceable boundary.
 
+## Testing and verification
+
+For coding tasks, calibrate how much testing and verification a change requires. This can help avoid unnecessary tests or repeated checks for small changes.
+
+Do not write tests for reversible, low-impact changes that mirror the implementation. If you do choose to verify your work with tests, make sure that the tests are meaningful and necessary to verify implementation.
+
+Run tests appropriate to the change and complete required checks. Once those pass, broaden or repeat testing only when new changes, failures, or unresolved concerns justify it; otherwise, continue toward completing the task.
+
 ## Definition of done
 
 Before handing off a change, confirm that:
