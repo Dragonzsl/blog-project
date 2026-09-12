@@ -26,6 +26,11 @@ import (
 
 var ErrInvalidNewsletterToken = errors.New("newsletter token is invalid or expired")
 
+var (
+	ErrInvalidNewsletterAdmin   = errors.New("newsletter admin input is invalid")
+	ErrNewsletterResendCooldown = errors.New("newsletter confirmation resend is rate limited")
+)
+
 type NewsletterAdapter interface {
 	Name() string
 	Subscribe(context.Context, string) error
@@ -149,6 +154,26 @@ type NewsletterRequest struct {
 	ClientIdentity string
 }
 
+type NewsletterSubscriber struct {
+	ID                int64
+	MaskedEmail       string
+	Provider          string
+	Status            string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	ConfirmedAt       *time.Time
+	ProviderSyncedAt  *time.Time
+	LastProviderError string
+}
+
+type NewsletterSubscriberPage struct {
+	Subscribers []NewsletterSubscriber
+	Total       int
+	Page        int
+	PerPage     int
+	HasMore     bool
+}
+
 type NewsletterService struct {
 	Adapter       NewsletterAdapter
 	db            *database.DB
@@ -181,6 +206,164 @@ func (s *NewsletterService) Cleanup(ctx context.Context) (int64, error) {
 
 func (s *NewsletterService) SetTaskEnqueuer(enqueue func(context.Context, *sql.Tx, string, any, string, time.Time) error) {
 	s.enqueueTaskTx = enqueue
+}
+
+func (s *NewsletterService) AdminSubscribers(ctx context.Context, status, email string, page, perPage int) (NewsletterSubscriberPage, error) {
+	status = strings.TrimSpace(status)
+	if status == "" {
+		status = "all"
+	}
+	if status != "all" && status != "pending" && status != "active" && status != "unsubscribed" {
+		return NewsletterSubscriberPage{}, ErrInvalidNewsletterAdmin
+	}
+	email = strings.TrimSpace(email)
+	var emailHash []byte
+	if email != "" {
+		normalized, err := normalizeEmail(email)
+		if err != nil {
+			return NewsletterSubscriberPage{}, ErrInvalidNewsletterAdmin
+		}
+		emailHash = newsletterEmailHash(s.secret, normalized)
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > 100 {
+		page = 100
+	}
+	if perPage < 1 {
+		perPage = 20
+	}
+	if perPage > 50 {
+		perPage = 50
+	}
+	where := " WHERE 1=1"
+	args := make([]any, 0, 2)
+	if status != "all" {
+		where += " AND status=?"
+		args = append(args, status)
+	}
+	if len(emailHash) > 0 {
+		where += " AND email_hash=?"
+		args = append(args, emailHash)
+	}
+	var total int
+	if err := s.db.Reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM newsletter_subscribers"+where, args...).Scan(&total); err != nil {
+		return NewsletterSubscriberPage{}, err
+	}
+	rows, err := s.db.Reader.QueryContext(ctx, `SELECT id,email_ciphertext,provider,status,created_at,updated_at,confirmed_at,provider_synced_at,last_provider_error FROM newsletter_subscribers`+where+` ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?`, append(args, perPage, (page-1)*perPage)...)
+	if err != nil {
+		return NewsletterSubscriberPage{}, err
+	}
+	defer rows.Close()
+	items := make([]NewsletterSubscriber, 0, perPage)
+	for rows.Next() {
+		var item NewsletterSubscriber
+		var ciphertext []byte
+		var created, updated int64
+		var confirmed, synced sql.NullInt64
+		if err := rows.Scan(&item.ID, &ciphertext, &item.Provider, &item.Status, &created, &updated, &confirmed, &synced, &item.LastProviderError); err != nil {
+			return NewsletterSubscriberPage{}, err
+		}
+		email, err := decryptWithSecret(s.secret, ciphertext, []byte("blog:newsletter:v1"))
+		if err != nil {
+			return NewsletterSubscriberPage{}, err
+		}
+		item.MaskedEmail = maskEmail(string(email))
+		item.CreatedAt, item.UpdatedAt = time.UnixMilli(created).UTC(), time.UnixMilli(updated).UTC()
+		if confirmed.Valid {
+			value := time.UnixMilli(confirmed.Int64).UTC()
+			item.ConfirmedAt = &value
+		}
+		if synced.Valid {
+			value := time.UnixMilli(synced.Int64).UTC()
+			item.ProviderSyncedAt = &value
+		}
+		if item.LastProviderError != "" {
+			item.LastProviderError = "上次 Provider 同步失败"
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return NewsletterSubscriberPage{}, err
+	}
+	return NewsletterSubscriberPage{Subscribers: items, Total: total, Page: page, PerPage: perPage, HasMore: page*perPage < total}, nil
+}
+
+func maskEmail(value string) string {
+	parts := strings.SplitN(strings.ToLower(strings.TrimSpace(value)), "@", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "已保存地址"
+	}
+	local := parts[0]
+	if len([]rune(local)) == 1 {
+		return "*@" + parts[1]
+	}
+	return string([]rune(local)[:1]) + "***@" + parts[1]
+}
+
+func (s *NewsletterService) ResendConfirmation(ctx context.Context, subscriberID int64, operationKey string) error {
+	if s.db == nil || s.guard == nil || subscriberID < 1 || strings.TrimSpace(operationKey) == "" || len(operationKey) > 160 || strings.ContainsAny(operationKey, "\r\n") {
+		return ErrInvalidNewsletterAdmin
+	}
+	now := s.now().UTC()
+	tx, err := s.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	claim, err := s.guard.ClaimTx(ctx, tx, "newsletter.resend_confirmation", operationKey, fmt.Sprintf("subscriber:%d", subscriberID))
+	if err != nil {
+		return err
+	}
+	if claim.Completed {
+		return tx.Commit()
+	}
+	var status string
+	if err := tx.QueryRowContext(ctx, "SELECT status FROM newsletter_subscribers WHERE id=?", subscriberID).Scan(&status); errors.Is(err, sql.ErrNoRows) {
+		return ErrInvalidNewsletterAdmin
+	} else if err != nil {
+		return err
+	}
+	if status != "pending" {
+		return ErrInvalidNewsletterAdmin
+	}
+	var last sql.NullInt64
+	if err := tx.QueryRowContext(ctx, "SELECT MAX(created_at) FROM newsletter_tokens WHERE subscriber_id=? AND purpose='confirm'", subscriberID).Scan(&last); err != nil {
+		return err
+	}
+	if last.Valid && now.UnixMilli()-last.Int64 < int64((10*time.Minute)/time.Millisecond) {
+		return ErrNewsletterResendCooldown
+	}
+	token, tokenHash, err := s.guard.NewToken()
+	if err != nil {
+		return err
+	}
+	ciphertext, err := encryptWithSecret(s.secret, []byte(token), []byte("blog:newsletter:token:v1"))
+	if err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO newsletter_tokens(subscriber_id,purpose,token_hash,token_ciphertext,expires_at,created_at) VALUES(?,'confirm',?,?,?,?)`, subscriberID, tokenHash, ciphertext, now.Add(24*time.Hour).UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return err
+	}
+	tokenID, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	if s.enqueueTaskTx != nil {
+		if err := s.enqueueTaskTx(ctx, tx, "send_confirmation", newsletterTask{TokenID: tokenID}, fmt.Sprintf("newsletter:confirmation:%d", tokenID), now); err != nil {
+			return err
+		}
+	}
+	if err := recordNewsletterAuditTx(ctx, tx, "newsletter.confirmation.resent", `{"status":"pending"}`, now); err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]string{"status": "accepted"})
+	if err := s.guard.CompleteTx(ctx, tx, "newsletter.resend_confirmation", operationKey, http.StatusAccepted, nil, body); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Subscribe and Unsubscribe retain the narrow adapter API for trusted callers;
@@ -264,6 +447,9 @@ func (s *NewsletterService) RequestSubscribe(ctx context.Context, email string, 
 				return err
 			}
 		}
+	}
+	if err := recordNewsletterAuditTx(ctx, tx, "newsletter.subscription.requested", fmt.Sprintf(`{"status":%q}`, subscriberStatus), now); err != nil {
+		return err
 	}
 	if strings.TrimSpace(request.IdempotencyKey) != "" {
 		body, _ := json.Marshal(map[string]string{"status": "accepted"})
@@ -353,7 +539,7 @@ func (s *NewsletterService) Confirm(ctx context.Context, token string) (ConfirmR
 		}
 		return result, nil
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE newsletter_subscribers SET status='active',updated_at=? WHERE id=?`, now.UnixMilli(), subscriberID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE newsletter_subscribers SET status='active',confirmed_at=?,updated_at=? WHERE id=?`, now.UnixMilli(), now.UnixMilli(), subscriberID); err != nil {
 		return ConfirmResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE newsletter_tokens SET consumed_at=? WHERE id=? AND consumed_at IS NULL`, now.UnixMilli(), tokenID); err != nil {
@@ -374,6 +560,9 @@ func (s *NewsletterService) Confirm(ctx context.Context, token string) (ConfirmR
 		if err := s.enqueueTaskTx(ctx, tx, "sync", newsletterTask{SubscriberID: subscriberID, Operation: "subscribe", Version: tokenID}, fmt.Sprintf("newsletter:%d:subscribe:%d", subscriberID, tokenID), now); err != nil {
 			return ConfirmResult{}, err
 		}
+	}
+	if err := recordNewsletterAuditTx(ctx, tx, "newsletter.subscriber.confirmed", `{"status":"active"}`, now); err != nil {
+		return ConfirmResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return ConfirmResult{}, err
@@ -427,7 +616,15 @@ func (s *NewsletterService) UnsubscribeToken(ctx context.Context, token string) 
 			return err
 		}
 	}
+	if err := recordNewsletterAuditTx(ctx, tx, "newsletter.subscriber.unsubscribed", `{"status":"unsubscribed"}`, now); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+func recordNewsletterAuditTx(ctx context.Context, tx *sql.Tx, action, contextJSON string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES(?, 'newsletter_subscriber', 'succeeded', ?, ?)`, action, contextJSON, now.UnixMilli())
+	return err
 }
 
 func (s *NewsletterService) ProcessSyncTask(ctx context.Context, payload []byte) error {
@@ -446,10 +643,18 @@ func (s *NewsletterService) ProcessSyncTask(ctx context.Context, payload []byte)
 	if err != nil {
 		return err
 	}
+	var syncErr error
 	if task.Operation == "subscribe" {
-		return s.Adapter.Subscribe(ctx, string(email))
+		syncErr = s.Adapter.Subscribe(ctx, string(email))
+	} else {
+		syncErr = s.Adapter.Unsubscribe(ctx, string(email))
 	}
-	return s.Adapter.Unsubscribe(ctx, string(email))
+	if syncErr != nil {
+		_, _ = s.db.Writer.ExecContext(ctx, "UPDATE newsletter_subscribers SET last_provider_error=?,updated_at=? WHERE id=?", "provider request failed", s.now().UTC().UnixMilli(), task.SubscriberID)
+		return syncErr
+	}
+	_, _ = s.db.Writer.ExecContext(ctx, "UPDATE newsletter_subscribers SET provider_synced_at=?,last_provider_error='',updated_at=? WHERE id=?", s.now().UTC().UnixMilli(), s.now().UTC().UnixMilli(), task.SubscriberID)
+	return nil
 }
 
 func newsletterEmailHash(secret []byte, email string) []byte {
