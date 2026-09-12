@@ -31,12 +31,15 @@
         <label>站点描述<textarea name="description" rows="3" maxlength="1000">{{.Settings.Description}}</textarea></label>
         <label>默认 SEO 标题<input name="default_seo_title" value="{{.Settings.DefaultSEOTitle}}" maxlength="200"></label>
         <label>默认 SEO 描述<textarea name="default_seo_description" rows="3" maxlength="500">{{.Settings.DefaultSEODescription}}</textarea></label>
+        <label>Feed 摘要策略<select name="feed_summary_mode"><option value="excerpt" {{if eq .Settings.FeedSummaryMode "excerpt"}}selected{{end}}>使用文章摘要</option><option value="full" {{if eq .Settings.FeedSummaryMode "full"}}selected{{end}}>使用正文（最多 64 KiB）</option></select><small>控制 RSS 描述内容；正文模式仍受单条输出上限约束。</small></label>
         <label>社交链接<small>每行一个 HTTP(S) 地址，不保存查询参数或片段。</small><textarea name="social_links" rows="4" maxlength="2000">{{range .Settings.SocialLinks}}{{.}}
 {{end}}</textarea></label>
         <label>默认社交图片公共 ID<input name="default_social_image_id" value="{{printf "%x" .Settings.DefaultSocialImageID}}" maxlength="32" pattern="[0-9a-fA-F]{32}"><small>可选；使用媒体库中图片的 32 位十六进制公共 ID。</small></label>
         <button class="button-link small" type="submit">保存公开设置</button>
       </form>
     </section>
+
+    {{if .Capabilities}}<section class="management-card" aria-labelledby="capabilities-title"><header><div><p class="aside-label">Public capabilities</p><h2 id="capabilities-title">公开能力状态</h2></div><span class="section-count">由配置与插件生命周期控制</span></header><p>这些开关不在站点设置页直接修改；启用状态来自配置和插件注册，便于确认当前实例实际对外开放的能力。</p><ul class="settings-session-list">{{range .Capabilities}}<li><span>{{.Name}}</span><code>{{.ID}}</code><span>{{if .Enabled}}已启用{{else}}未启用{{end}}</span></li>{{end}}</ul></section>{{end}}
 
     <section class="management-card" aria-labelledby="password-title">
       <header><div><p class="aside-label">Authentication</p><h2 id="password-title">修改密码</h2></div><span class="section-count">需要当前密码 + TOTP</span></header>

@@ -56,19 +56,22 @@ func (r *Repository) SiteSettings(ctx context.Context) (SiteSettings, error) {
 	err := r.database.Reader.QueryRowContext(ctx, `
 		SELECT name,primary_language,timezone,base_url,description,
 		       default_seo_title,default_seo_description,social_links_json,
-		       default_social_image_public_id
+		       default_social_image_public_id,feed_summary_mode
 		FROM sites WHERE id=1`).Scan(
 		&settings.Name, &settings.PrimaryLanguage, &settings.Timezone,
 		&settings.BaseURL, &settings.Description, &settings.DefaultSEOTitle,
-		&settings.DefaultSEODescription, &socialJSON, &imageID)
+		&settings.DefaultSEODescription, &socialJSON, &imageID, &settings.FeedSummaryMode)
 	if errors.Is(err, sql.ErrNoRows) {
-		return SiteSettings{Name: "个人博客", PrimaryLanguage: "zh-CN", Timezone: "Asia/Shanghai", SocialLinks: []string{}}, nil
+		return SiteSettings{Name: "个人博客", PrimaryLanguage: "zh-CN", Timezone: "Asia/Shanghai", FeedSummaryMode: "excerpt", SocialLinks: []string{}}, nil
 	}
 	if err != nil {
 		return SiteSettings{}, fmt.Errorf("read site settings: %w", err)
 	}
 	if socialJSON == "" {
 		socialJSON = "[]"
+	}
+	if settings.FeedSummaryMode == "" {
+		settings.FeedSummaryMode = "excerpt"
 	}
 	if err := json.Unmarshal([]byte(socialJSON), &settings.SocialLinks); err != nil {
 		return SiteSettings{}, fmt.Errorf("decode site social links: %w", err)
@@ -88,9 +91,9 @@ func (r *Repository) UpdateSiteSettings(ctx context.Context, settings SiteSettin
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE sites SET name=?,primary_language=?,timezone=?,base_url=?,description=?,default_seo_title=?,default_seo_description=?,social_links_json=?,default_social_image_public_id=?,updated_at=? WHERE id=1`,
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET name=?,primary_language=?,timezone=?,base_url=?,description=?,default_seo_title=?,default_seo_description=?,feed_summary_mode=?,social_links_json=?,default_social_image_public_id=?,updated_at=? WHERE id=1`,
 		settings.Name, settings.PrimaryLanguage, settings.Timezone, settings.BaseURL, settings.Description,
-		settings.DefaultSEOTitle, settings.DefaultSEODescription, string(socialJSON), nullableBytes(settings.DefaultSocialImageID), millis(now)); err != nil {
+		settings.DefaultSEOTitle, settings.DefaultSEODescription, settings.FeedSummaryMode, string(socialJSON), nullableBytes(settings.DefaultSocialImageID), millis(now)); err != nil {
 		return fmt.Errorf("update site settings: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1,updated_at=? WHERE id=1", millis(now)); err != nil {

@@ -5,6 +5,8 @@ package contentapi
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -14,17 +16,23 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/extensions"
 	"github.com/zhushilin/blog-project/internal/media"
+	"github.com/zhushilin/blog-project/internal/platform/clientip"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
 const (
-	PluginID   = "contentapi.readonly"
-	APIVersion = 1
+	PluginID                 = "contentapi.readonly"
+	APIVersion               = 1
+	cursorMaxAge             = 24 * time.Hour
+	maxUpdatedSinceAge       = 10 * 365 * 24 * time.Hour
+	defaultRequestsPerMinute = 120
+	maxRateKeys              = 4096
 )
 
 type ContentQueries interface {
@@ -54,11 +62,22 @@ type MediaQueries interface {
 	PublicItem(context.Context, []byte) (media.Item, error)
 }
 
+type BatchMediaQueries interface {
+	PublicItems(context.Context, [][]byte) ([]media.Item, error)
+}
+
 type Config struct {
 	// Token is optional. With an empty token the API follows ADR-0032 and is
 	// same-origin/public-read by default. When set, callers must send a Bearer
 	// token; no write endpoint is ever registered.
 	Token string
+	// CursorSecret signs pagination cursors. The application supplies its
+	// process secret; tests and standalone embedders get a process-local random
+	// key when this is empty.
+	CursorSecret []byte
+	// RequestsPerMinute bounds public API reads per resolved client identity.
+	// Zero uses the conservative default.
+	RequestsPerMinute int
 }
 
 type Plugin struct {
@@ -66,12 +85,36 @@ type Plugin struct {
 }
 
 func NewPlugin(content ContentQueries, site SiteQueries, urls URLQueries, cfg Config) *Plugin {
-	return &Plugin{handler: &HTTPHandler{content: content, site: site, urls: urls, token: strings.TrimSpace(cfg.Token)}}
+	secret := append([]byte(nil), cfg.CursorSecret...)
+	if len(secret) == 0 {
+		secret = make([]byte, 32)
+		if _, err := rand.Read(secret); err != nil {
+			fallback := sha256.Sum256([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
+			secret = fallback[:]
+		}
+	}
+	rateLimit := cfg.RequestsPerMinute
+	if rateLimit < 1 {
+		rateLimit = defaultRequestsPerMinute
+	}
+	if rateLimit > 10000 {
+		rateLimit = 10000
+	}
+	return &Plugin{handler: &HTTPHandler{content: content, site: site, urls: urls, token: strings.TrimSpace(cfg.Token), cursorSecret: secret, clientIP: clientip.DirectPeerOnly(), rateLimit: rateLimit, rate: make(map[string]apiRateWindow)}}
 }
 
 func (p *Plugin) SetMediaQueries(queries MediaQueries) {
 	if p != nil && p.handler != nil {
 		p.handler.media = queries
+	}
+}
+
+func (p *Plugin) SetClientIPResolver(resolver *clientip.Resolver) {
+	if p != nil && p.handler != nil {
+		if resolver == nil {
+			resolver = clientip.DirectPeerOnly()
+		}
+		p.handler.clientIP = resolver
 	}
 }
 
@@ -107,11 +150,21 @@ func (p *Plugin) Register(host *extensions.Host) error {
 }
 
 type HTTPHandler struct {
-	content ContentQueries
-	site    SiteQueries
-	urls    URLQueries
-	token   string
-	media   MediaQueries
+	content      ContentQueries
+	site         SiteQueries
+	urls         URLQueries
+	token        string
+	media        MediaQueries
+	cursorSecret []byte
+	clientIP     *clientip.Resolver
+	rateLimit    int
+	rateMu       sync.Mutex
+	rate         map[string]apiRateWindow
+}
+
+type apiRateWindow struct {
+	started time.Time
+	count   int
 }
 
 type item struct {
@@ -121,7 +174,7 @@ type item struct {
 	Slug         string     `json:"slug"`
 	URL          string     `json:"url"`
 	Excerpt      string     `json:"excerpt"`
-	BodyMarkdown string     `json:"body_markdown"`
+	BodyMarkdown string     `json:"body_markdown,omitempty"`
 	PublishedAt  *time.Time `json:"published_at,omitempty"`
 	UpdatedAt    *time.Time `json:"updated_at,omitempty"`
 	Cover        *mediaView `json:"cover,omitempty"`
@@ -150,6 +203,11 @@ type mediaView struct {
 }
 
 func (h *HTTPHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if !h.allowRequest(r) {
+		w.Header().Set("Retry-After", "60")
+		writeJSONRequest(w, r, http.StatusTooManyRequests, map[string]string{"error": "rate_limited"})
+		return false
+	}
 	if h.token == "" {
 		return true
 	}
@@ -161,6 +219,45 @@ func (h *HTTPHandler) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (h *HTTPHandler) allowRequest(r *http.Request) bool {
+	if h == nil {
+		return false
+	}
+	limit := h.rateLimit
+	if limit < 1 {
+		limit = defaultRequestsPerMinute
+	}
+	identity := clientip.Unknown
+	if h.clientIP != nil {
+		identity = h.clientIP.Resolve(r)
+	} else {
+		identity = clientip.DirectPeerOnly().Resolve(r)
+	}
+	now := time.Now().UTC()
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+	if h.rate == nil {
+		h.rate = make(map[string]apiRateWindow)
+	}
+	if len(h.rate) >= maxRateKeys {
+		for key, window := range h.rate {
+			if now.Sub(window.started) >= time.Minute {
+				delete(h.rate, key)
+			}
+		}
+		if len(h.rate) >= maxRateKeys {
+			return false
+		}
+	}
+	window := h.rate[identity]
+	if window.started.IsZero() || now.Sub(window.started) >= time.Minute {
+		window = apiRateWindow{started: now}
+	}
+	window.count++
+	h.rate[identity] = window
+	return window.count <= limit
 }
 
 func (h *HTTPHandler) siteInfo(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +289,15 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request, kind string) 
 		writeJSONRequest(w, r, http.StatusBadRequest, map[string]string{"error": "invalid_query"})
 		return
 	}
+	cursorContext := newCursorContext(kind, query)
+	if query.CursorText != "" {
+		cursor, decodeErr := h.decodeCursor(query.CursorText, cursorContext)
+		if decodeErr != nil {
+			writeJSONRequest(w, r, http.StatusBadRequest, map[string]string{"error": "invalid_query"})
+			return
+		}
+		query.Cursor = &cursor
+	}
 	private := h.token != ""
 	if cursorQueries, ok := h.content.(CursorContentQueries); ok && (!query.PageProvided || query.Cursor != nil || query.CursorText != "" || query.CategorySlug != "" || query.TagSlug != "" || query.UpdatedSince != nil) {
 		result, err := cursorQueries.PublishedContentCursor(r.Context(), publishing.PublicContentQuery{Kind: kind, Limit: query.Limit, Cursor: query.Cursor, CategorySlug: query.CategorySlug, TagSlug: query.TagSlug, UpdatedSince: query.UpdatedSince})
@@ -199,15 +305,13 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request, kind string) 
 			writeJSONRequest(w, r, http.StatusInternalServerError, map[string]string{"error": "content unavailable"})
 			return
 		}
-		items := make([]item, 0, len(result.Contents))
-		for _, value := range result.Contents {
-			items = append(items, h.toItem(r.Context(), value))
-		}
+		items := h.toItems(r.Context(), result.Contents)
 		response := map[string]any{"items": items, "per_page": query.Limit, "has_more": result.HasMore, "protocol_version": APIVersion}
 		if result.HasMore && len(result.Contents) > 0 {
-			response["next_cursor"] = encodeCursor(result.Contents[len(result.Contents)-1])
+			response["next_cursor"] = h.encodeCursor(result.Contents[len(result.Contents)-1], cursorContext)
 		}
-		writeJSONRequestWithOptions(w, r, http.StatusOK, response, private, latestModified(result.Contents))
+		stableResponse := map[string]any{"items": items, "per_page": query.Limit, "has_more": result.HasMore, "protocol_version": APIVersion}
+		writeJSONRequestWithOptionsAndETag(w, r, http.StatusOK, response, private, latestModified(result.Contents), stableResponse)
 		return
 	}
 	var result publishing.PublicContentPage
@@ -235,10 +339,7 @@ func (h *HTTPHandler) list(w http.ResponseWriter, r *http.Request, kind string) 
 		writeJSONRequest(w, r, http.StatusInternalServerError, map[string]string{"error": "content unavailable"})
 		return
 	}
-	items := make([]item, 0, len(result.Contents))
-	for _, value := range result.Contents {
-		items = append(items, h.toItem(r.Context(), value))
-	}
+	items := h.toItems(r.Context(), result.Contents)
 	writeJSONRequestWithOptions(w, r, http.StatusOK, map[string]any{"items": items, "page": query.Page, "per_page": query.Limit, "has_more": result.HasMore, "protocol_version": APIVersion}, private, latestModified(result.Contents))
 }
 
@@ -274,6 +375,44 @@ func (h *HTTPHandler) single(w http.ResponseWriter, r *http.Request, article boo
 }
 
 func (h *HTTPHandler) toItem(ctx context.Context, value publishing.Article) item {
+	return h.toItemWithMedia(ctx, value, nil)
+}
+
+func (h *HTTPHandler) toItems(ctx context.Context, values []publishing.Article) []item {
+	var mediaByID map[string]media.Item
+	if batcher, ok := h.media.(BatchMediaQueries); ok {
+		ids := make([][]byte, 0, len(values))
+		seen := make(map[string]struct{}, len(values))
+		for _, value := range values {
+			if len(value.CoverMediaPublicID) == 0 {
+				continue
+			}
+			key := hex.EncodeToString(value.CoverMediaPublicID)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			ids = append(ids, value.CoverMediaPublicID)
+		}
+		if len(ids) > 0 {
+			if batch, err := batcher.PublicItems(ctx, ids); err == nil {
+				mediaByID = make(map[string]media.Item, len(batch))
+				for _, item := range batch {
+					mediaByID[hex.EncodeToString(item.PublicID)] = item
+				}
+			}
+		}
+	}
+	items := make([]item, 0, len(values))
+	for _, value := range values {
+		listItem := h.toItemWithMedia(ctx, value, mediaByID)
+		listItem.BodyMarkdown = ""
+		items = append(items, listItem)
+	}
+	return items
+}
+
+func (h *HTTPHandler) toItemWithMedia(ctx context.Context, value publishing.Article, mediaByID map[string]media.Item) item {
 	result := item{ID: hex.EncodeToString(value.PublicID), Kind: value.Kind, Title: value.Title, Slug: value.PublishedSlug, Excerpt: value.Excerpt, BodyMarkdown: value.BodyMarkdown, PublishedAt: value.PublishedAt, UpdatedAt: value.PublishedRevisionAt, SEO: seo{Title: value.SEOTitle, Description: value.SEODescription}}
 	if result.Slug == "" {
 		result.Slug = value.Slug
@@ -292,7 +431,12 @@ func (h *HTTPHandler) toItem(ctx context.Context, value publishing.Article) item
 		result.Tags = append(result.Tags, term{ID: hex.EncodeToString(tag.PublicID), Slug: tag.Slug, Name: tag.Name})
 	}
 	if h.media != nil && len(value.CoverMediaPublicID) > 0 {
-		if mediaItem, err := h.media.PublicItem(ctx, value.CoverMediaPublicID); err == nil {
+		mediaItem, found := mediaByID[hex.EncodeToString(value.CoverMediaPublicID)]
+		if !found {
+			mediaItem, _ = h.media.PublicItem(ctx, value.CoverMediaPublicID)
+			found = len(mediaItem.PublicID) > 0
+		}
+		if found {
 			if view, err := mediaItem.PublicView(); err == nil {
 				result.Cover = &mediaView{URL: view.URL, Alt: view.Alt, Width: view.Width, Height: view.Height, SrcSet: view.SrcSet}
 			}
@@ -338,11 +482,6 @@ func parseListQuery(r *http.Request) (listQuery, error) {
 		if query.Get("page") != "" {
 			return listQuery{}, errors.New("page and cursor cannot be combined")
 		}
-		cursor, err := decodeCursor(result.CursorText)
-		if err != nil {
-			return listQuery{}, err
-		}
-		result.Cursor = &cursor
 		result.Page = 0
 	}
 	if len(result.CategorySlug) > 120 || len(result.TagSlug) > 120 {
@@ -354,43 +493,96 @@ func parseListQuery(r *http.Request) (listQuery, error) {
 			return listQuery{}, err
 		}
 		value = value.UTC()
+		now := time.Now().UTC()
+		if value.After(now.Add(5*time.Minute)) || now.Sub(value) > maxUpdatedSinceAge {
+			return listQuery{}, errors.New("updated_since is outside the supported window")
+		}
 		result.UpdatedSince = &value
 	}
 	return result, nil
 }
 
 type cursorPayload struct {
-	Version     int    `json:"v"`
-	PublishedAt int64  `json:"published_at"`
-	PublicID    string `json:"public_id"`
+	Version      int    `json:"v"`
+	IssuedAt     int64  `json:"issued_at"`
+	PublishedAt  int64  `json:"published_at"`
+	PublicID     string `json:"public_id"`
+	Kind         string `json:"kind"`
+	Limit        int    `json:"limit"`
+	CategorySlug string `json:"category,omitempty"`
+	TagSlug      string `json:"tag,omitempty"`
+	UpdatedSince int64  `json:"updated_since,omitempty"`
 }
 
-func encodeCursor(value publishing.Article) string {
+type cursorContext struct {
+	Kind         string
+	Limit        int
+	CategorySlug string
+	TagSlug      string
+	UpdatedSince int64
+}
+
+type cursorEnvelope struct {
+	Payload   cursorPayload `json:"payload"`
+	Signature string        `json:"signature"`
+}
+
+func newCursorContext(kind string, query listQuery) cursorContext {
+	updatedSince := int64(0)
+	if query.UpdatedSince != nil {
+		updatedSince = query.UpdatedSince.UnixMilli()
+	}
+	return cursorContext{Kind: kind, Limit: query.Limit, CategorySlug: query.CategorySlug, TagSlug: query.TagSlug, UpdatedSince: updatedSince}
+}
+
+func (h *HTTPHandler) encodeCursor(value publishing.Article, context cursorContext) string {
 	publishedAt := int64(0)
 	if value.PublishedAt != nil {
 		publishedAt = value.PublishedAt.UnixMilli()
 	}
-	payload, _ := json.Marshal(cursorPayload{Version: 1, PublishedAt: publishedAt, PublicID: hex.EncodeToString(value.PublicID)})
-	return base64.RawURLEncoding.EncodeToString(payload)
+	payload := cursorPayload{Version: 1, IssuedAt: time.Now().UTC().UnixMilli(), PublishedAt: publishedAt, PublicID: hex.EncodeToString(value.PublicID), Kind: context.Kind, Limit: context.Limit, CategorySlug: context.CategorySlug, TagSlug: context.TagSlug, UpdatedSince: context.UpdatedSince}
+	encodedPayload, _ := json.Marshal(payload)
+	mac := hmac.New(sha256.New, h.cursorSecret)
+	_, _ = mac.Write(encodedPayload)
+	envelope := cursorEnvelope{Payload: payload, Signature: base64.RawURLEncoding.EncodeToString(mac.Sum(nil))}
+	encoded, _ := json.Marshal(envelope)
+	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
-func decodeCursor(value string) (publishing.PublicContentCursor, error) {
-	if len(value) > 512 {
+func (h *HTTPHandler) decodeCursor(value string, context cursorContext) (publishing.PublicContentCursor, error) {
+	if len(value) > 1024 {
 		return publishing.PublicContentCursor{}, errors.New("cursor is too long")
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
 		return publishing.PublicContentCursor{}, err
 	}
-	var payload cursorPayload
-	if json.Unmarshal(decoded, &payload) != nil || payload.Version != 1 || payload.PublishedAt < 1 {
+	var envelope cursorEnvelope
+	if json.Unmarshal(decoded, &envelope) != nil || envelope.Payload.Version != 1 || envelope.Payload.IssuedAt < 1 || envelope.Payload.PublishedAt < 1 {
 		return publishing.PublicContentCursor{}, errors.New("cursor is invalid")
 	}
-	publicID, err := hex.DecodeString(payload.PublicID)
+	issuedAt := time.UnixMilli(envelope.Payload.IssuedAt)
+	if issuedAt.After(time.Now().UTC().Add(5*time.Minute)) || time.Since(issuedAt) > cursorMaxAge {
+		return publishing.PublicContentCursor{}, errors.New("cursor is expired")
+	}
+	payloadJSON, err := json.Marshal(envelope.Payload)
+	if err != nil {
+		return publishing.PublicContentCursor{}, errors.New("cursor is invalid")
+	}
+	provided, err := base64.RawURLEncoding.DecodeString(envelope.Signature)
+	if err != nil {
+		return publishing.PublicContentCursor{}, errors.New("cursor is invalid")
+	}
+	mac := hmac.New(sha256.New, h.cursorSecret)
+	_, _ = mac.Write(payloadJSON)
+	if !hmac.Equal(provided, mac.Sum(nil)) || envelope.Payload.Kind != context.Kind || envelope.Payload.Limit != context.Limit || envelope.Payload.CategorySlug != context.CategorySlug || envelope.Payload.TagSlug != context.TagSlug || envelope.Payload.UpdatedSince != context.UpdatedSince {
+		return publishing.PublicContentCursor{}, errors.New("cursor is invalid")
+	}
+	publicID, err := hex.DecodeString(envelope.Payload.PublicID)
 	if err != nil || len(publicID) != 16 {
 		return publishing.PublicContentCursor{}, errors.New("cursor is invalid")
 	}
-	return publishing.PublicContentCursor{PublishedAt: time.UnixMilli(payload.PublishedAt).UTC(), PublicID: publicID}, nil
+	return publishing.PublicContentCursor{PublishedAt: time.UnixMilli(envelope.Payload.PublishedAt).UTC(), PublicID: publicID}, nil
 }
 
 func articleModified(value publishing.Article) string {
@@ -429,12 +621,22 @@ func writeJSONRequest(w http.ResponseWriter, r *http.Request, status int, value 
 }
 
 func writeJSONRequestWithOptions(w http.ResponseWriter, r *http.Request, status int, value any, private bool, lastModified string) {
+	writeJSONRequestWithOptionsAndETag(w, r, status, value, private, lastModified, nil)
+}
+
+func writeJSONRequestWithOptionsAndETag(w http.ResponseWriter, r *http.Request, status int, value any, private bool, lastModified string, etagValue any) {
 	body, err := json.Marshal(value)
 	if err != nil {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	digest := sha256.Sum256(body)
+	etagBody := body
+	if etagValue != nil {
+		if stableBody, marshalErr := json.Marshal(etagValue); marshalErr == nil {
+			etagBody = stableBody
+		}
+	}
+	digest := sha256.Sum256(etagBody)
 	etag := `"` + hex.EncodeToString(digest[:16]) + `"`
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if status >= 400 {

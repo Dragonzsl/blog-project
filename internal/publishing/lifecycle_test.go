@@ -144,7 +144,10 @@ func TestRevisionSnapshotScheduleUnpublishAndTrashLifecycle(t *testing.T) {
 	if err != nil || len(trashed) != 1 || trashed[0].Status != "draft" {
 		t.Fatalf("trash=%+v err=%v", trashed, err)
 	}
-	content, err = service.RestoreFromTrash(ctx, content.ID)
+	if _, err := service.RestoreFromTrashExpected(ctx, content.ID, trashed[0].LockVersion-1); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale trash restore error=%v", err)
+	}
+	content, err = service.RestoreFromTrashExpected(ctx, content.ID, trashed[0].LockVersion)
 	if err != nil || content.Status != "draft" || content.TrashedAt != nil {
 		t.Fatalf("restored trash=%+v err=%v", content, err)
 	}

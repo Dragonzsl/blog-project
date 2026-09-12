@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const LatestMigrationVersion int64 = 19
+const LatestMigrationVersion int64 = 20
 
 // Snapshot writes a transactionally consistent, compact SQLite copy. VACUUM
 // INTO reads through SQLite instead of copying the live database and ignoring

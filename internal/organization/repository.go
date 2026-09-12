@@ -474,6 +474,20 @@ func (r *Repository) Redirects(ctx context.Context, limit int) ([]Redirect, erro
 	return result, rows.Err()
 }
 
+func (r *Repository) RedirectBySource(ctx context.Context, sourceKey string) (Redirect, error) {
+	var item Redirect
+	var created, updated int64
+	err := r.database.Reader.QueryRowContext(ctx, `SELECT id,source_path,target_path,status_code,reason,created_at,updated_at FROM redirects WHERE source_path_key=?`, sourceKey).Scan(&item.ID, &item.SourcePath, &item.TargetPath, &item.StatusCode, &item.Reason, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Redirect{}, ErrNotFound
+	}
+	if err != nil {
+		return Redirect{}, err
+	}
+	item.CreatedAt, item.UpdatedAt = fromMillis(created), fromMillis(updated)
+	return item, nil
+}
+
 func (r *Repository) CreateRedirect(ctx context.Context, input RedirectInput, now time.Time) error {
 	result, err := r.database.Writer.ExecContext(ctx, `INSERT INTO redirects(source_path,source_path_key,target_path,target_path_key,status_code,reason,created_at,updated_at) VALUES(?,?,?,?,?,'manual',?,?)`, input.SourcePath, strings.ToLower(input.SourcePath), input.TargetPath, strings.ToLower(input.TargetPath), input.StatusCode, millis(now), millis(now))
 	if err != nil {

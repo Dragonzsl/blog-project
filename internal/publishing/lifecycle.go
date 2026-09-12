@@ -346,6 +346,20 @@ func (r *Repository) Trash(ctx context.Context, kind string, id, expectedVersion
 }
 
 func (r *Repository) RestoreFromTrash(ctx context.Context, id int64, now time.Time) (Article, error) {
+	return r.restoreFromTrash(ctx, id, 0, now)
+}
+
+// RestoreFromTrashExpected performs the same transition as RestoreFromTrash,
+// but keeps the caller's lock version in the write predicate. Bulk actions use
+// this variant so a read-then-write race cannot restore a newer trash record.
+func (r *Repository) RestoreFromTrashExpected(ctx context.Context, id, expectedVersion int64, now time.Time) (Article, error) {
+	if expectedVersion < 1 {
+		return Article{}, ErrConflict
+	}
+	return r.restoreFromTrash(ctx, id, expectedVersion, now)
+}
+
+func (r *Repository) restoreFromTrash(ctx context.Context, id, expectedVersion int64, now time.Time) (Article, error) {
 	tx, err := r.database.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return Article{}, err
@@ -353,18 +367,34 @@ func (r *Repository) RestoreFromTrash(ctx context.Context, id int64, now time.Ti
 	defer tx.Rollback()
 	var kind string
 	var publicID []byte
-	err = tx.QueryRowContext(ctx, `SELECT kind,public_id FROM contents WHERE id=? AND trashed_at IS NOT NULL`, id).Scan(&kind, &publicID)
+	if expectedVersion > 0 {
+		err = tx.QueryRowContext(ctx, `SELECT kind,public_id FROM contents WHERE id=? AND lock_version=? AND trashed_at IS NOT NULL`, id, expectedVersion).Scan(&kind, &publicID)
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT kind,public_id FROM contents WHERE id=? AND trashed_at IS NOT NULL`, id).Scan(&kind, &publicID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
+		if expectedVersion > 0 {
+			return Article{}, ErrConflict
+		}
 		return Article{}, ErrNotFound
 	}
 	if err != nil {
 		return Article{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE contents SET trashed_at=NULL,status='draft',scheduled_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND trashed_at IS NOT NULL`, millis(now), id)
+	updateQuery := `UPDATE contents SET trashed_at=NULL,status='draft',scheduled_at=NULL,lock_version=lock_version+1,updated_at=? WHERE id=? AND trashed_at IS NOT NULL`
+	updateArgs := []any{millis(now), id}
+	if expectedVersion > 0 {
+		updateQuery += " AND lock_version=?"
+		updateArgs = append(updateArgs, expectedVersion)
+	}
+	result, err := tx.ExecContext(ctx, updateQuery, updateArgs...)
 	if err != nil {
 		return Article{}, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
+		if expectedVersion > 0 {
+			return Article{}, ErrConflict
+		}
 		return Article{}, ErrNotFound
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".restored_from_trash", kind, publicID, now); err != nil {

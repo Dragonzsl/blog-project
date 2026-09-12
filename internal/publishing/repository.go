@@ -86,7 +86,11 @@ func (r *Repository) createDraftTx(ctx context.Context, tx *sql.Tx, kind string,
 	if err := r.replaceMediaReferences(ctx, tx, contentID, revision.BodyMarkdown, revision.CoverMediaID, now); err != nil {
 		return 0, err
 	}
-	revisionID, err := insertRevision(ctx, tx, contentID, 1, revision, now)
+	revisionNumber := revision.RevisionNumber
+	if revisionNumber < 1 {
+		revisionNumber = 1
+	}
+	revisionID, err := insertRevision(ctx, tx, contentID, revisionNumber, revision, now)
 	if err != nil {
 		return 0, err
 	}
@@ -137,6 +141,9 @@ func (r *Repository) updateDraftTx(ctx context.Context, tx *sql.Tx, kind string,
 	}
 	if currentVersion != expectedVersion {
 		return 0, ErrConflict
+	}
+	if revision.RevisionNumber > 0 {
+		nextRevision = revision.RevisionNumber
 	}
 	if revision.SlugKey != currentSlugKey {
 		if err := reservePath(ctx, tx, id, kind, revision.Slug, revision.SlugKey, "draft", now); err != nil {
@@ -342,6 +349,51 @@ func (r *Repository) TrashedContent(ctx context.Context, kind string, id int64) 
 		return Article{}, err
 	}
 	return r.enrichTaxonomy(ctx, content)
+}
+
+func (r *Repository) ContentPublicIDExists(ctx context.Context, kind string, publicID []byte) (bool, error) {
+	var exists bool
+	err := r.database.Reader.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM contents WHERE kind=? AND public_id=?)", kind, publicID).Scan(&exists)
+	return exists, err
+}
+
+func (r *Repository) RevisionPublicIDExists(ctx context.Context, publicID []byte) (bool, error) {
+	var exists bool
+	err := r.database.Reader.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM content_revisions WHERE public_id=?)", publicID).Scan(&exists)
+	return exists, err
+}
+
+// DeleteImportedDraft removes only a draft identified by the public ID. It is
+// used to clean up an archive import that failed after earlier entries had
+// committed; published, scheduled, trashed, or otherwise changed content is
+// never eligible for this rollback path.
+func (r *Repository) DeleteImportedDraft(ctx context.Context, kind string, publicID []byte, now time.Time) error {
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var id int64
+	var publishedRevision sql.NullInt64
+	var status string
+	var trashedAt sql.NullInt64
+	err = tx.QueryRowContext(ctx, "SELECT id,status,published_revision_id,trashed_at FROM contents WHERE kind=? AND public_id=?", kind, publicID).Scan(&id, &status, &publishedRevision, &trashedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if status != "draft" || publishedRevision.Valid || trashedAt.Valid {
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM reserved_paths WHERE content_id=? AND reason='draft'", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM contents WHERE id=? AND kind=? AND status='draft' AND published_revision_id IS NULL AND trashed_at IS NULL", id, kind); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (r *Repository) PublicContent(ctx context.Context, kind, slugKey string) (Article, error) {

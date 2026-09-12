@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"path/filepath"
+	"sort"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	"github.com/zhushilin/blog-project/internal/publishing"
 )
 
@@ -91,7 +93,7 @@ func TestArchiveV2PreservesRevisionsRedirectsAndPublicSiteMetadata(t *testing.T)
 	}
 	archivePath := filepath.Join(root, "v2.zip")
 	manifest, err := ExportWithOptions(ctx, source, ExportOptions{
-		ApplicationVersion: "test-version", MigrationVersion: 19,
+		ApplicationVersion: "test-version", MigrationVersion: 20,
 		Site: SiteManifest{Name: "测试站点", PrimaryLanguage: "zh-CN", Timezone: "Asia/Shanghai", BaseURL: "https://blog.example", Description: "公开描述", SocialLinks: []string{"https://example.com/author"}},
 	}, archivePath)
 	if err != nil {
@@ -122,13 +124,28 @@ func TestArchiveV2PreservesRevisionsRedirectsAndPublicSiteMetadata(t *testing.T)
 	if err != nil || len(items) != 1 || items[0].BodyMarkdown != "更新后的正文" {
 		t.Fatalf("items=%+v err=%v", items, err)
 	}
+	contentPublicID, err := platformid.DecodePublicID(manifest.Entries[0].PublicID)
+	if err != nil || string(items[0].PublicID) != string(contentPublicID) {
+		t.Fatalf("content public id=%x want=%x err=%v", items[0].PublicID, contentPublicID, err)
+	}
 	revisions, err := destination.RevisionsWithBodies(ctx, "article", items[0].ID)
 	if err != nil || len(revisions) != len(manifest.Entries[0].Revisions) {
 		t.Fatalf("revisions=%d want=%d err=%v", len(revisions), len(manifest.Entries[0].Revisions), err)
 	}
+	sort.Slice(revisions, func(left, right int) bool { return revisions[left].Number < revisions[right].Number })
+	for index, revision := range revisions {
+		wantID, decodeErr := platformid.DecodePublicID(manifest.Entries[0].Revisions[index].PublicID)
+		if decodeErr != nil || string(revision.PublicID) != string(wantID) || revision.Number != manifest.Entries[0].Revisions[index].Number {
+			t.Fatalf("revision[%d]=%x/#%d want=%x/#%d err=%v", index, revision.PublicID, revision.Number, wantID, manifest.Entries[0].Revisions[index].Number, decodeErr)
+		}
+	}
 	redirects, err := destination.Redirects(ctx, 10)
 	if err != nil || len(redirects) != 1 || redirects[0].SourcePath != "/old-archive" {
 		t.Fatalf("redirects=%+v err=%v", redirects, err)
+	}
+	dryRun, err := ImportWithOptions(ctx, destination, archivePath, ImportOptions{DryRun: true})
+	if err != nil || dryRun.Conflicts == 0 || dryRun.Planned != 0 {
+		t.Fatalf("repeated dry-run=%+v err=%v", dryRun, err)
 	}
 }
 

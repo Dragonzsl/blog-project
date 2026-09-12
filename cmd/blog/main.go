@@ -628,7 +628,7 @@ func archiveSiteManifest(settings identity.SiteSettings) (contentarchive.SiteMan
 	manifest := contentarchive.SiteManifest{
 		Name: settings.Name, PrimaryLanguage: settings.PrimaryLanguage, Timezone: settings.Timezone,
 		BaseURL: settings.BaseURL, Description: settings.Description, DefaultSEOTitle: settings.DefaultSEOTitle,
-		DefaultSEODescription: settings.DefaultSEODescription, SocialLinks: append([]string(nil), settings.SocialLinks...),
+		DefaultSEODescription: settings.DefaultSEODescription, FeedSummaryMode: settings.FeedSummaryMode, SocialLinks: append([]string(nil), settings.SocialLinks...),
 	}
 	if len(settings.DefaultSocialImageID) > 0 {
 		encoded, err := platformid.EncodePublicID(settings.DefaultSocialImageID)
@@ -652,7 +652,7 @@ func applyArchiveSiteManifest(ctx context.Context, db *database.DB, manifest con
 	return identity.NewRepository(db).UpdateSiteSettings(ctx, identity.SiteSettings{
 		Name: manifest.Name, PrimaryLanguage: manifest.PrimaryLanguage, Timezone: manifest.Timezone,
 		BaseURL: manifest.BaseURL, Description: manifest.Description, DefaultSEOTitle: manifest.DefaultSEOTitle,
-		DefaultSEODescription: manifest.DefaultSEODescription, SocialLinks: append([]string(nil), manifest.SocialLinks...),
+		DefaultSEODescription: manifest.DefaultSEODescription, FeedSummaryMode: manifest.FeedSummaryMode, SocialLinks: append([]string(nil), manifest.SocialLinks...),
 		DefaultSocialImageID: imageID,
 	}, time.Now().UTC())
 }

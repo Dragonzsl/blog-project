@@ -1,8 +1,8 @@
 # 改进阶段四实施计划：产品体验与公共能力
 
-> 状态：核心实现与 Docker 内部综合验收已完成；宿主机公开入口仍受当前 Docker Desktop 路径共享限制。详细证据见 [`阶段四实施记录`](../progress/phase-four-product-and-public-capabilities.md)。
+> 状态：设计已实施并完成代码缺口收口；Docker 内部综合验收已完成，宿主机公开入口仍受当前 Docker Desktop 路径共享限制。详细证据见 [`阶段四实施记录`](../progress/phase-four-product-and-public-capabilities.md)。
 >
-> 编制日期：2026-09-11
+> 编制日期：2026-09-11；最近复核：2026-09-12
 >
 > 上游路线图：[项目现状评估与改进路线图](../project-assessment-and-improvement-roadmap.md)
 >
@@ -295,7 +295,7 @@ Q1–Q6 可以在 Q0 后并行开发，但 Q7 应在站点设置、媒体引用�
 
 ### 7.1 迁移策略
 
-- 当前最新迁移为 00019（阶段四）；后续迁移必须继续使用下一个实际空闲编号，本文不预先占用固定编号。
+- 当前最新迁移为 00020（Feed 摘要策略）；后续迁移必须继续使用下一个实际空闲编号，本文不预先占用固定编号。
 - diff、恢复预览、排程日历和 API cursor 原则上不需要新表；优先复用现有 content_revisions、jobs、audit_entries 和已有索引。
 - Owner 安全操作优先复用 owners.auth_version、sessions 和 owner_recovery_codes；只有确认缺少确认时间/挑战状态时才新增最小字段或表。
 - 站点设置使用固定字段或有版本/大小上限的设置结构；禁止引入无界任意 JSON。新增站点公开设置必须能驱动 render_epoch。
@@ -357,7 +357,7 @@ BROWSER_STRICT=1 make browser
 git diff --check
 ~~~
 
-另需记录：1 万篇文章 API cursor/updated_since 压测、归档往返报告、隔离站点恢复、Compose 资源约束、实际 Caddy/TLS 链路和无 JavaScript 页面结果。Docker 或 Playwright 不可用时，不能用单进程或静态检查替代真实环境结论。
+阶段四实施记录已补充 1 万篇文章 API cursor/`updated_since` 压测和归档往返测试证据。仍需记录：隔离站点恢复、Compose 资源约束、实际 Caddy/TLS 链路和无 JavaScript 页面结果。Docker 或 Playwright 不可用时，不能用单进程或静态检查替代真实环境结论。
 
 ## 9. 回滚、兼容与停止条件
 
@@ -384,7 +384,7 @@ git diff --check
 
 ## 10. Git 分批与文档产物
 
-本文是设计基线；实际实施建议按以下边界分批，阶段四当前代码仍需由后续提交动作按边界收口：
+本文首先是设计基线；以下边界也作为本阶段代码拆分和审查参考。本轮代码已在工作树完成，尚未执行新的 Git 提交；提交时仍须排除主题插件和运行产物：
 
 1. docs(phase4): add product and public capabilities plan
 2. feat(identity): add owner and site settings workflows

@@ -126,6 +126,13 @@ func normalizeSiteSettings(settings SiteSettings) (SiteSettings, error) {
 	settings.Description = strings.TrimSpace(settings.Description)
 	settings.DefaultSEOTitle = strings.TrimSpace(settings.DefaultSEOTitle)
 	settings.DefaultSEODescription = strings.TrimSpace(settings.DefaultSEODescription)
+	settings.FeedSummaryMode = strings.TrimSpace(settings.FeedSummaryMode)
+	if settings.FeedSummaryMode == "" {
+		settings.FeedSummaryMode = "excerpt"
+	}
+	if settings.FeedSummaryMode != "excerpt" && settings.FeedSummaryMode != "full" {
+		return SiteSettings{}, errors.New("Feed 摘要策略无效")
+	}
 	if !utf8.ValidString(settings.Description) || utf8.RuneCountInString(settings.Description) > 1000 || !utf8.ValidString(settings.DefaultSEOTitle) || utf8.RuneCountInString(settings.DefaultSEOTitle) > 200 || !utf8.ValidString(settings.DefaultSEODescription) || utf8.RuneCountInString(settings.DefaultSEODescription) > 500 {
 		return SiteSettings{}, errors.New("站点描述或 SEO 字段超过长度限制")
 	}

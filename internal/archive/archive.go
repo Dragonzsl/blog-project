@@ -57,6 +57,7 @@ type SiteManifest struct {
 	Description           string   `json:"description,omitempty"`
 	DefaultSEOTitle       string   `json:"default_seo_title,omitempty"`
 	DefaultSEODescription string   `json:"default_seo_description,omitempty"`
+	FeedSummaryMode       string   `json:"feed_summary_mode,omitempty"`
 	SocialLinks           []string `json:"social_links,omitempty"`
 	DefaultSocialImageID  string   `json:"default_social_image_id,omitempty"`
 }
@@ -476,9 +477,84 @@ func ImportWithOptions(ctx context.Context, service *publishing.Service, archive
 		return ImportReport{}, err
 	}
 	result := ImportReport{}
+	checkedMedia := make(map[string]struct{})
+	type createdDraft struct {
+		Kind     string
+		PublicID []byte
+	}
+	createdDrafts := make([]createdDraft, 0, len(verified.Manifest.Entries))
+	rollbackDrafts := func() error {
+		var rollbackErr error
+		for index := len(createdDrafts) - 1; index >= 0; index-- {
+			if err := service.DeleteImportedDraft(ctx, createdDrafts[index].Kind, createdDrafts[index].PublicID); err != nil {
+				rollbackErr = errors.Join(rollbackErr, err)
+			}
+		}
+		return rollbackErr
+	}
+
+	redirectProvider, hasRedirectProvider := any(service).(interface {
+		RedirectBySource(context.Context, string) (organization.Redirect, error)
+		CreateRedirect(context.Context, organization.RedirectInput) error
+		DeleteRedirect(context.Context, int64) error
+	})
+	redirectsToCreate := append([]RedirectEntry(nil), verified.Manifest.Redirects...)
+	if !options.DryRun && hasRedirectProvider {
+		redirectsToCreate = redirectsToCreate[:0]
+		for _, redirect := range verified.Manifest.Redirects {
+			existing, lookupErr := redirectProvider.RedirectBySource(ctx, redirect.SourcePath)
+			if lookupErr == nil {
+				if existing.TargetPath == redirect.TargetPath && existing.StatusCode == redirect.StatusCode {
+					continue
+				}
+				result.Conflicts++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("redirect %q conflicts with an existing redirect", redirect.SourcePath))
+				return result, nil
+			}
+			if !errors.Is(lookupErr, organization.ErrNotFound) {
+				return result, lookupErr
+			}
+			redirectsToCreate = append(redirectsToCreate, redirect)
+		}
+	}
+	// Check stable identities before creating any draft. Besides making dry-run
+	// useful for repeated imports, this keeps a mixed archive from creating a
+	// prefix of entries before a later content or revision ID conflict is found.
+	for _, entry := range verified.Manifest.Entries {
+		contentPublicID, decodeErr := platformid.DecodePublicID(entry.PublicID)
+		if decodeErr != nil {
+			return result, decodeErr
+		}
+		contentExists, existsErr := service.ContentPublicIDExists(ctx, entry.Kind, contentPublicID)
+		if existsErr != nil {
+			return result, existsErr
+		}
+		if contentExists {
+			result.Conflicts++
+			result.Warnings = append(result.Warnings, fmt.Sprintf("entry %q conflicts with an existing content public ID", entry.Slug))
+		}
+		for _, revision := range entry.Revisions {
+			revisionPublicID, revisionErr := platformid.DecodePublicID(revision.PublicID)
+			if revisionErr != nil {
+				return result, revisionErr
+			}
+			revisionExists, existsErr := service.RevisionPublicIDExists(ctx, revisionPublicID)
+			if existsErr != nil {
+				return result, existsErr
+			}
+			if revisionExists {
+				result.Conflicts++
+				result.Warnings = append(result.Warnings, fmt.Sprintf("entry %q conflicts with an existing revision public ID", entry.Slug))
+			}
+		}
+	}
+	if result.Conflicts > 0 {
+		return result, nil
+	}
 	for _, entry := range verified.Manifest.Entries {
 		if err := ctx.Err(); err != nil {
-			return result, err
+			rollbackErr := rollbackDrafts()
+			return result, errors.Join(err, rollbackErr)
 		}
 		revisions := append([]RevisionEntry(nil), entry.Revisions...)
 		if len(revisions) == 0 {
@@ -487,7 +563,14 @@ func ImportWithOptions(ctx context.Context, service *publishing.Service, archive
 		sort.SliceStable(revisions, func(left, right int) bool { return revisions[left].Number < revisions[right].Number })
 		inputs := make([]publishing.DraftInput, 0, len(revisions))
 		entryError := ""
+		contentPublicID, contentIDErr := platformid.DecodePublicID(entry.PublicID)
+		if contentIDErr != nil {
+			entryError = contentIDErr.Error()
+		}
 		for _, revision := range revisions {
+			if entryError != "" {
+				break
+			}
 			coverMediaPublicID, coverErr := decodeAndCheckCover(ctx, service, revision.CoverMediaPublicID)
 			if coverErr != nil {
 				entryError = coverErr.Error()
@@ -495,9 +578,22 @@ func ImportWithOptions(ctx context.Context, service *publishing.Service, archive
 			}
 			body, bodyErr := readBody(reader.File, revision.BodyPath)
 			if bodyErr != nil {
-				return result, bodyErr
+				rollbackErr := rollbackDrafts()
+				return result, errors.Join(bodyErr, rollbackErr)
 			}
-			inputData := publishing.DraftInput{Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, SEOTitle: revision.SEOTitle, SEODescription: revision.SEODescription, BodyMarkdown: string(body), CoverMediaPublicID: coverMediaPublicID}
+			if mediaErr := decodeAndCheckBodyMedia(ctx, service, string(body), checkedMedia); mediaErr != nil {
+				entryError = mediaErr.Error()
+				break
+			}
+			var revisionPublicID []byte
+			if revision.PublicID != "" {
+				revisionPublicID, bodyErr = platformid.DecodePublicID(revision.PublicID)
+				if bodyErr != nil {
+					entryError = bodyErr.Error()
+					break
+				}
+			}
+			inputData := publishing.DraftInput{ContentPublicID: contentPublicID, RevisionPublicID: revisionPublicID, RevisionNumber: revision.Number, Title: revision.Title, Slug: revision.Slug, Excerpt: revision.Excerpt, SEOTitle: revision.SEOTitle, SEODescription: revision.SEODescription, BodyMarkdown: string(body), CoverMediaPublicID: coverMediaPublicID}
 			if taxonomy, taxonomyErr := resolveTaxonomy(ctx, service, revision.CategoryPublicID, revision.TagPublicIDsJSON); taxonomyErr != nil {
 				entryError = fmt.Sprintf("taxonomy could not be resolved: %v", taxonomyErr)
 				break
@@ -522,23 +618,54 @@ func ImportWithOptions(ctx context.Context, service *publishing.Service, archive
 		if err != nil {
 			result.Conflicts++
 			result.Warnings = append(result.Warnings, fmt.Sprintf("entry %q was not imported: %v", entry.Slug, err))
-			continue
+			rollbackErr := rollbackDrafts()
+			result.Created = 0
+			if rollbackErr != nil {
+				return result, fmt.Errorf("archive import rollback failed: %w", rollbackErr)
+			}
+			return result, nil
 		}
 		result.Created++
+		createdDrafts = append(createdDrafts, createdDraft{Kind: entry.Kind, PublicID: append([]byte(nil), contentPublicID...)})
+	}
+	if !options.DryRun && result.Conflicts > 0 {
+		if rollbackErr := rollbackDrafts(); rollbackErr != nil {
+			return result, fmt.Errorf("archive import rollback failed: %w", rollbackErr)
+		}
+		result.Created = 0
+		return result, nil
+	}
+	createdRedirectIDs := make([]int64, 0, len(redirectsToCreate))
+	rollbackRedirects := func() {
+		if !hasRedirectProvider {
+			return
+		}
+		for index := len(createdRedirectIDs) - 1; index >= 0; index-- {
+			_ = redirectProvider.DeleteRedirect(ctx, createdRedirectIDs[index])
+		}
 	}
 	if !options.DryRun {
-		if provider, ok := any(service).(interface {
-			CreateRedirect(context.Context, organization.RedirectInput) error
-		}); ok {
-			for _, redirect := range verified.Manifest.Redirects {
-				if err := provider.CreateRedirect(ctx, organization.RedirectInput{SourcePath: redirect.SourcePath, TargetPath: redirect.TargetPath, StatusCode: redirect.StatusCode}); err != nil {
+		if hasRedirectProvider {
+			for _, redirect := range redirectsToCreate {
+				if err := redirectProvider.CreateRedirect(ctx, organization.RedirectInput{SourcePath: redirect.SourcePath, TargetPath: redirect.TargetPath, StatusCode: redirect.StatusCode}); err != nil {
 					result.Conflicts++
 					result.Warnings = append(result.Warnings, fmt.Sprintf("redirect %q was not imported: %v", redirect.SourcePath, err))
+					rollbackRedirects()
+					if rollbackErr := rollbackDrafts(); rollbackErr != nil {
+						return result, fmt.Errorf("archive import rollback failed: %w", rollbackErr)
+					}
+					result.Created = 0
+					return result, nil
+				}
+				if created, lookupErr := redirectProvider.RedirectBySource(ctx, redirect.SourcePath); lookupErr == nil {
+					createdRedirectIDs = append(createdRedirectIDs, created.ID)
 				}
 			}
 		}
 		if result.Conflicts == 0 && options.ApplySite != nil && hasSiteManifest(verified.Manifest.Site) {
 			if err := options.ApplySite(ctx, verified.Manifest.Site); err != nil {
+				rollbackRedirects()
+				_ = rollbackDrafts()
 				return result, fmt.Errorf("apply archived site settings: %w", err)
 			}
 		}
@@ -648,6 +775,9 @@ func validateSiteManifest(site SiteManifest) error {
 	}
 	if site.DefaultSocialImageID != "" && !validPublicID(site.DefaultSocialImageID) {
 		return errors.New("archive default social image ID is invalid")
+	}
+	if site.FeedSummaryMode != "" && site.FeedSummaryMode != "excerpt" && site.FeedSummaryMode != "full" {
+		return errors.New("archive feed summary mode is invalid")
 	}
 	return nil
 }
@@ -780,6 +910,24 @@ func decodeAndCheckCover(ctx context.Context, service *publishing.Service, value
 	return decoded, nil
 }
 
+func decodeAndCheckBodyMedia(ctx context.Context, service *publishing.Service, body string, checked map[string]struct{}) error {
+	for _, match := range mediaURLPattern.FindAllStringSubmatch(body, -1) {
+		value := strings.ToLower(match[1])
+		if _, exists := checked[value]; exists {
+			continue
+		}
+		decoded, err := platformid.DecodePublicID(value)
+		if err != nil {
+			return fmt.Errorf("body media %s is invalid", value)
+		}
+		if _, err := service.ResolveMediaPublicID(ctx, decoded); err != nil {
+			return fmt.Errorf("body media %s is not available", value)
+		}
+		checked[value] = struct{}{}
+	}
+	return nil
+}
+
 type resolvedTaxonomy struct {
 	CategoryID int64
 	TagIDs     []int64
@@ -818,7 +966,7 @@ func resolveTaxonomy(ctx context.Context, service *publishing.Service, categoryP
 }
 
 func hasSiteManifest(site SiteManifest) bool {
-	return site.Name != "" || site.PrimaryLanguage != "" || site.Timezone != "" || site.BaseURL != "" || site.Description != "" || site.DefaultSEOTitle != "" || site.DefaultSEODescription != "" || len(site.SocialLinks) > 0 || site.DefaultSocialImageID != ""
+	return site.Name != "" || site.PrimaryLanguage != "" || site.Timezone != "" || site.BaseURL != "" || site.Description != "" || site.DefaultSEOTitle != "" || site.DefaultSEODescription != "" || site.FeedSummaryMode != "" || len(site.SocialLinks) > 0 || site.DefaultSocialImageID != ""
 }
 
 func safePath(value string) bool {

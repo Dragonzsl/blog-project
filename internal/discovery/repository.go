@@ -411,7 +411,7 @@ func scanSearchResults(rows *sql.Rows, err error) ([]SearchResult, error) {
 func (r *Repository) Feed(ctx context.Context, limit int) ([]FeedItem, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT '/posts/' || c.published_slug,revision.title,revision.excerpt,
-		       revision.cover_media_public_id,c.published_at,revision.created_at
+		       substr(revision.body_markdown,1,65536),revision.cover_media_public_id,c.published_at,revision.created_at
 		FROM contents c JOIN content_revisions revision ON revision.id=c.published_revision_id
 		WHERE c.kind='article' AND c.status='published' AND c.trashed_at IS NULL
 		ORDER BY c.published_at DESC,c.id DESC LIMIT ?`, limit)
@@ -423,7 +423,7 @@ func (r *Repository) Feed(ctx context.Context, limit int) ([]FeedItem, error) {
 	for rows.Next() {
 		var item FeedItem
 		var publishedAt, updatedAt int64
-		if err := rows.Scan(&item.Path, &item.Title, &item.Excerpt, &item.CoverMediaPublicID, &publishedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&item.Path, &item.Title, &item.Excerpt, &item.BodyMarkdown, &item.CoverMediaPublicID, &publishedAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		item.PublishedAt = time.UnixMilli(publishedAt).UTC()

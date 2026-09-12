@@ -283,7 +283,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		metadata := presentation.SiteMetadata{
 			Language:    settings.PrimaryLanguage,
 			Description: settings.Description, DefaultSEOTitle: settings.DefaultSEOTitle,
-			DefaultSEODescription: settings.DefaultSEODescription, SocialLinks: settings.SocialLinks,
+			DefaultSEODescription: settings.DefaultSEODescription, FeedSummaryMode: settings.FeedSummaryMode, SocialLinks: settings.SocialLinks,
 		}
 		if len(settings.DefaultSocialImageID) == 16 {
 			if item, err := mediaService.PublicItem(ctx, settings.DefaultSocialImageID); err == nil {
@@ -353,6 +353,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 	mediaHTTP.RegisterPublic(router)
 	presentationHTTP.RegisterPublic(router)
 	extensionRegistry := extensions.NewRegistry(db, router, logger)
+	identityHTTP.SetCapabilityStateProvider(func(ctx context.Context) []identity.CapabilityState {
+		_ = ctx
+		states := []identity.CapabilityState{
+			{ID: "comments.local", Name: "本地评论", Enabled: extensionRegistry.Enabled("comments.local")},
+			{ID: "comments.external", Name: "外部评论", Enabled: extensionRegistry.Enabled("comments.external")},
+			{ID: "contentapi.readonly", Name: "只读 Content API", Enabled: extensionRegistry.Enabled("contentapi.readonly")},
+			{ID: "newsletter.local", Name: "本地 Newsletter", Enabled: extensionRegistry.Enabled("newsletter.local")},
+			{ID: "newsletter.external", Name: "外部 Newsletter", Enabled: extensionRegistry.Enabled("newsletter.external")},
+		}
+		return states
+	})
 	outbox.SetTaskQueue(extensionRegistry.TaskQueue())
 	if err := extensionRegistry.RegisterCoreTask("core:notification_send", outbox.ProcessTask); err != nil {
 		db.Close()
@@ -388,8 +399,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (*App, err
 		db.Close()
 		return nil, err
 	}
-	contentAPIPlugin := contentapi.NewPlugin(publishingService, identityService, discoveryService, contentapi.Config{Token: cfg.ContentAPI.Token})
+	contentAPIPlugin := contentapi.NewPlugin(publishingService, identityService, discoveryService, contentapi.Config{Token: cfg.ContentAPI.Token, CursorSecret: authSecret})
 	contentAPIPlugin.SetMediaQueries(mediaService)
+	contentAPIPlugin.SetClientIPResolver(clientIPResolver)
 	if err := extensionRegistry.Register(contentAPIPlugin); err != nil {
 		db.Close()
 		return nil, err

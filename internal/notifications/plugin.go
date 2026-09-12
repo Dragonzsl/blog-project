@@ -172,6 +172,10 @@ func (h *NewsletterHTTPHandler) adminResend(w http.ResponseWriter, r *http.Reque
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
 		return
 	}
+	if r.FormValue("confirm_action") != "1" {
+		http.Error(w, "请确认此管理操作", http.StatusBadRequest)
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "subscriberID"), 10, 64)
 	if err != nil || id < 1 {
 		http.NotFound(w, r)

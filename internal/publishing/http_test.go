@@ -133,7 +133,7 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 		t.Fatalf("scheduled editor body=%s", scheduledEditor.Body.String())
 	}
 	trash := httptest.NewRecorder()
-	router.ServeHTTP(trash, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"4"}}))
+	router.ServeHTTP(trash, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"4"}, "confirm_action": {"1"}}))
 	if trash.Code != http.StatusSeeOther || trash.Header().Get("Location") != "/admin/trash#trash-results" {
 		t.Fatalf("trash status=%d location=%q", trash.Code, trash.Header().Get("Location"))
 	}
@@ -143,11 +143,82 @@ func TestHTTPArticleCreatePreviewAndPublish(t *testing.T) {
 		t.Fatalf("trash page status=%d body=%s", trashPage.Code, trashPage.Body.String())
 	}
 	restoreTrash := httptest.NewRecorder()
-	router.ServeHTTP(restoreTrash, formRequest(http.MethodPost, "/admin/trash/1/restore", url.Values{"csrf_token": {"test-csrf"}}))
+	router.ServeHTTP(restoreTrash, formRequest(http.MethodPost, "/admin/trash/1/restore", url.Values{"csrf_token": {"test-csrf"}, "confirm_action": {"1"}}))
 	if restoreTrash.Code != http.StatusSeeOther || restoreTrash.Header().Get("Location") != "/admin/articles/1/edit#content-form" {
 		t.Fatalf("restore trash status=%d location=%q", restoreTrash.Code, restoreTrash.Header().Get("Location"))
 	}
 
+}
+
+func TestHighImpactPublishingActionsRequireExplicitConfirmation(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+	draft, err := service.CreateDraft(ctx, DraftInput{Title: "确认保护", Slug: "confirmation-guard", BodyMarkdown: "第一版"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.UpdateDraft(ctx, draft.ID, draft.LockVersion, DraftInput{Title: "确认保护", Slug: draft.Slug, BodyMarkdown: "第二版"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewHTTPHandler(service, fakeAdminSecurity{}, fakeSiteNamer{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := chi.NewRouter()
+	router.Route("/admin", handler.RegisterAdmin)
+
+	missingBulk := httptest.NewRecorder()
+	router.ServeHTTP(missingBulk, formRequest(http.MethodPost, "/admin/articles/bulk", url.Values{"csrf_token": {"test-csrf"}, "content_ids": {"1"}, "content_versions": {"1:2"}, "bulk_action": {"publish"}, "operation_key": {"content-confirmation"}}))
+	if missingBulk.Code != http.StatusBadRequest {
+		t.Fatalf("bulk content without confirmation status=%d body=%s", missingBulk.Code, missingBulk.Body.String())
+	}
+	current, err := service.Article(ctx, draft.ID)
+	if err != nil || current.Status != "draft" || current.LockVersion != updated.LockVersion {
+		t.Fatalf("bulk content without confirmation changed content=%+v err=%v", current, err)
+	}
+
+	missingRestore := httptest.NewRecorder()
+	router.ServeHTTP(missingRestore, formRequest(http.MethodPost, "/admin/articles/1/versions/1/restore", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"2"}}))
+	if missingRestore.Code != http.StatusBadRequest {
+		t.Fatalf("restore without confirmation status=%d body=%s", missingRestore.Code, missingRestore.Body.String())
+	}
+	current, err = service.Article(ctx, draft.ID)
+	if err != nil || current.LockVersion != updated.LockVersion {
+		t.Fatalf("restore without confirmation changed content=%+v err=%v", current, err)
+	}
+
+	restore := httptest.NewRecorder()
+	router.ServeHTTP(restore, formRequest(http.MethodPost, "/admin/articles/1/versions/1/restore", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"2"}, "confirm_action": {"1"}}))
+	if restore.Code != http.StatusSeeOther {
+		t.Fatalf("restore with confirmation status=%d body=%s", restore.Code, restore.Body.String())
+	}
+	current, err = service.Article(ctx, draft.ID)
+	if err != nil || current.LockVersion != 3 {
+		t.Fatalf("restored content=%+v err=%v", current, err)
+	}
+
+	missingTrash := httptest.NewRecorder()
+	router.ServeHTTP(missingTrash, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"3"}}))
+	if missingTrash.Code != http.StatusBadRequest {
+		t.Fatalf("trash without confirmation status=%d body=%s", missingTrash.Code, missingTrash.Body.String())
+	}
+	trashed := httptest.NewRecorder()
+	router.ServeHTTP(trashed, formRequest(http.MethodPost, "/admin/articles/1/trash", url.Values{"csrf_token": {"test-csrf"}, "lock_version": {"3"}, "confirm_action": {"1"}}))
+	if trashed.Code != http.StatusSeeOther {
+		t.Fatalf("trash with confirmation status=%d body=%s", trashed.Code, trashed.Body.String())
+	}
+
+	missingBulkRestore := httptest.NewRecorder()
+	router.ServeHTTP(missingBulkRestore, formRequest(http.MethodPost, "/admin/trash/bulk", url.Values{"csrf_token": {"test-csrf"}, "trash_items": {"article:1:4"}, "operation_key": {"restore-confirmation"}}))
+	if missingBulkRestore.Code != http.StatusBadRequest {
+		t.Fatalf("bulk restore without confirmation status=%d body=%s", missingBulkRestore.Code, missingBulkRestore.Body.String())
+	}
+	bulkRestore := httptest.NewRecorder()
+	router.ServeHTTP(bulkRestore, formRequest(http.MethodPost, "/admin/trash/bulk", url.Values{"csrf_token": {"test-csrf"}, "trash_items": {"article:1:4"}, "operation_key": {"restore-confirmation"}, "confirm_action": {"1"}}))
+	if bulkRestore.Code != http.StatusOK || !strings.Contains(bulkRestore.Body.String(), "批量恢复结果") {
+		t.Fatalf("bulk restore with confirmation status=%d body=%s", bulkRestore.Code, bulkRestore.Body.String())
+	}
 }
 
 func formRequest(method, target string, values url.Values) *http.Request {

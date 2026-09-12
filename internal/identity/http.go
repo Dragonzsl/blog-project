@@ -36,6 +36,12 @@ type PendingCommentQueries interface {
 	PendingCount(context.Context) (int, error)
 }
 
+type CapabilityState struct {
+	ID      string
+	Name    string
+	Enabled bool
+}
+
 type HTTPHandler struct {
 	service          *Service
 	security         config.Security
@@ -51,6 +57,7 @@ type HTTPHandler struct {
 	jsETag           string
 	clientIP         *clientip.Resolver
 	siteSettingsHook func(context.Context, SiteSettings)
+	capabilityStates func(context.Context) []CapabilityState
 }
 
 func NewHTTPHandler(service *Service, security config.Security, logger *slog.Logger) (*HTTPHandler, error) {
@@ -105,6 +112,10 @@ func (h *HTTPHandler) SetPendingCommentQueries(queries PendingCommentQueries) {
 
 func (h *HTTPHandler) SetSiteSettingsHook(hook func(context.Context, SiteSettings)) {
 	h.siteSettingsHook = hook
+}
+
+func (h *HTTPHandler) SetCapabilityStateProvider(provider func(context.Context) []CapabilityState) {
+	h.capabilityStates = provider
 }
 
 func (h *HTTPHandler) RegisterPublic(router chi.Router) {
@@ -381,10 +392,14 @@ func (h *HTTPHandler) settingsData(r *http.Request) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	data := map[string]any{
 		"SiteName": siteName, "Username": session.Username, "CSRF": h.service.SessionCSRF(session.Token),
 		"AdminSection": "settings", "Settings": settings, "Sessions": sessions,
-	}, nil
+	}
+	if h.capabilityStates != nil {
+		data["Capabilities"] = h.capabilityStates(r.Context())
+	}
+	return data, nil
 }
 
 func (h *HTTPHandler) updateSiteSettings(w http.ResponseWriter, r *http.Request) {
@@ -403,6 +418,7 @@ func (h *HTTPHandler) updateSiteSettings(w http.ResponseWriter, r *http.Request)
 	settings.Description = strings.TrimSpace(r.FormValue("description"))
 	settings.DefaultSEOTitle = strings.TrimSpace(r.FormValue("default_seo_title"))
 	settings.DefaultSEODescription = strings.TrimSpace(r.FormValue("default_seo_description"))
+	settings.FeedSummaryMode = strings.TrimSpace(r.FormValue("feed_summary_mode"))
 	settings.SocialLinks = splitSettingsLines(r.FormValue("social_links"))
 	if _, present := r.Form["default_social_image_id"]; present {
 		value := strings.TrimSpace(r.FormValue("default_social_image_id"))

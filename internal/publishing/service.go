@@ -88,9 +88,13 @@ func (s *Service) ImportDraftRevisions(ctx context.Context, kind string, inputs 
 		return Article{}, ErrNotFound
 	}
 	now := s.now()
-	contentPublicID, err := platformid.NewPublicID(now)
-	if err != nil {
-		return Article{}, err
+	contentPublicID := append([]byte(nil), inputs[0].ContentPublicID...)
+	var err error
+	if len(contentPublicID) == 0 {
+		contentPublicID, err = platformid.NewPublicID(now)
+		if err != nil {
+			return Article{}, err
+		}
 	}
 	revisions := make([]revisionInput, len(inputs))
 	updates := make([]draftRevisionUpdate, 0, len(inputs)-1)
@@ -99,12 +103,17 @@ func (s *Service) ImportDraftRevisions(ctx context.Context, kind string, inputs 
 		if err != nil {
 			return Article{}, err
 		}
-		revisionPublicID, idErr := platformid.NewPublicID(now)
-		if idErr != nil {
-			return Article{}, idErr
+		revisionPublicID := append([]byte(nil), input.RevisionPublicID...)
+		if len(revisionPublicID) == 0 {
+			var idErr error
+			revisionPublicID, idErr = platformid.NewPublicID(now)
+			if idErr != nil {
+				return Article{}, idErr
+			}
 		}
 		revisions[index] = revisionInput{
 			PublicID:           revisionPublicID,
+			RevisionNumber:     input.RevisionNumber,
 			Title:              input.Title,
 			Slug:               input.Slug,
 			SlugKey:            input.slugKey,
@@ -121,6 +130,27 @@ func (s *Service) ImportDraftRevisions(ctx context.Context, kind string, inputs 
 		}
 	}
 	return s.repository.CreateDraftWithRevisions(ctx, kind, contentPublicID, revisions[0], inputs[0].CategoryID, inputs[0].TagIDs, updates, now, s.options.RevisionLimit)
+}
+
+func (s *Service) DeleteImportedDraft(ctx context.Context, kind string, publicID []byte) error {
+	if !validKind(kind) || len(publicID) != 16 {
+		return ErrNotFound
+	}
+	return s.repository.DeleteImportedDraft(ctx, kind, publicID, s.now())
+}
+
+func (s *Service) ContentPublicIDExists(ctx context.Context, kind string, publicID []byte) (bool, error) {
+	if !validKind(kind) || len(publicID) != 16 {
+		return false, ErrNotFound
+	}
+	return s.repository.ContentPublicIDExists(ctx, kind, publicID)
+}
+
+func (s *Service) RevisionPublicIDExists(ctx context.Context, publicID []byte) (bool, error) {
+	if len(publicID) != 16 {
+		return false, ErrNotFound
+	}
+	return s.repository.RevisionPublicIDExists(ctx, publicID)
 }
 
 func (s *Service) createDraft(ctx context.Context, kind string, input DraftInput) (Article, error) {
@@ -392,8 +422,16 @@ func (s *Service) Redirects(ctx context.Context, limit int) ([]organization.Redi
 	return s.repository.organization.Redirects(ctx, limit)
 }
 
+func (s *Service) RedirectBySource(ctx context.Context, sourcePath string) (organization.Redirect, error) {
+	return s.repository.organization.RedirectBySource(ctx, sourcePath)
+}
+
 func (s *Service) CreateRedirect(ctx context.Context, input organization.RedirectInput) error {
 	return s.repository.organization.CreateRedirect(ctx, input)
+}
+
+func (s *Service) DeleteRedirect(ctx context.Context, id int64) error {
+	return s.repository.organization.DeleteRedirect(ctx, id)
 }
 
 // TaxonomyBySnapshot keeps archive/import adapters on the publishing service
@@ -513,6 +551,13 @@ func (s *Service) RestoreFromTrash(ctx context.Context, id int64) (Article, erro
 		return Article{}, ErrNotFound
 	}
 	return s.repository.RestoreFromTrash(ctx, id, s.now())
+}
+
+func (s *Service) RestoreFromTrashExpected(ctx context.Context, id, expectedVersion int64) (Article, error) {
+	if id < 1 || expectedVersion < 1 {
+		return Article{}, ErrConflict
+	}
+	return s.repository.RestoreFromTrashExpected(ctx, id, expectedVersion, s.now())
 }
 
 func (s *Service) ProcessLifecycle(ctx context.Context) (published, purged int, err error) {
@@ -680,6 +725,15 @@ func (s *Service) NavigationContentOptions(ctx context.Context) ([]organization.
 }
 
 func validateInput(kind string, input DraftInput) (DraftInput, error) {
+	if len(input.ContentPublicID) != 0 && len(input.ContentPublicID) != 16 {
+		return DraftInput{}, ValidationError{Message: "内容公共 ID 无效"}
+	}
+	if len(input.RevisionPublicID) != 0 && len(input.RevisionPublicID) != 16 {
+		return DraftInput{}, ValidationError{Message: "版本公共 ID 无效"}
+	}
+	if input.RevisionNumber < 0 {
+		return DraftInput{}, ValidationError{Message: "版本编号无效"}
+	}
 	input.Title = strings.TrimSpace(input.Title)
 	input.Excerpt = strings.TrimSpace(input.Excerpt)
 	input.SEOTitle = strings.TrimSpace(input.SEOTitle)

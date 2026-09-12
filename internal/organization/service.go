@@ -241,6 +241,14 @@ func (s *Service) Redirects(ctx context.Context, limit int) ([]Redirect, error) 
 	return s.repository.Redirects(ctx, limit)
 }
 
+func (s *Service) RedirectBySource(ctx context.Context, sourcePath string) (Redirect, error) {
+	_, sourceKey, err := normalizeRedirectPath(sourcePath)
+	if err != nil {
+		return Redirect{}, err
+	}
+	return s.repository.RedirectBySource(ctx, sourceKey)
+}
+
 func (s *Service) CreateRedirect(ctx context.Context, input RedirectInput) error {
 	cleanSource, sourceKey, err := normalizeRedirectPath(input.SourcePath)
 	if err != nil {

@@ -171,6 +171,7 @@ type SiteMetadata struct {
 	Description           string
 	DefaultSEOTitle       string
 	DefaultSEODescription string
+	FeedSummaryMode       string
 	SocialLinks           []string
 	DefaultSocialImageURL string
 }

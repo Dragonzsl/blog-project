@@ -1,11 +1,14 @@
 # 个人博客系统
 
-这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环、阶段二扩展能力与阶段三生态/发行加固已经完成；当前的生产安全与一致性改进阶段也已实施，记录见[阶段一核心闭环](./docs/progress/stage-1.md)、[阶段二](./docs/progress/stage-2.md)、[阶段三](./docs/progress/stage-3.md)和[改进阶段一](./docs/progress/phase-one-production-hardening.md)。
+这是一个面向公开复用的单站点自托管博客系统。阶段一核心闭环、阶段二扩展能力与阶段三生态/发行加固已经完成；后续生产安全、性能、公共能力和产品化改进已按阶段持续实施，当前实现、使用方式和技术细节统一见[文档索引](./docs/README.md)、[项目使用与运维手册](./docs/usage.md)和[实现级架构与技术细节](./docs/architecture-implementation.md)。阶段记录见[阶段一核心闭环](./docs/progress/stage-1.md)、[阶段二](./docs/progress/stage-2.md)、[阶段三](./docs/progress/stage-3.md)、[改进阶段一](./docs/progress/phase-one-production-hardening.md)和[改进阶段四](./docs/progress/phase-four-product-and-public-capabilities.md)。
 
 核心方向：Go 模块化单体、SQLite、Markdown、服务端渲染、可上传主题、可信编译期插件，以及可在 1 核 1 GiB VPS 上稳定运行的硬性资源预算。
 
 ## 设计文档
 
+- [文档索引](./docs/README.md)
+- [项目使用与运维手册](./docs/usage.md)
+- [实现级架构与技术细节](./docs/architecture-implementation.md)
 - [领域词汇表](./CONTEXT.md)
 - [技术选型](./docs/technical-selection.md)
 - [总体架构](./docs/architecture.md)
@@ -27,7 +30,7 @@
 
 ## 运行当前版本
 
-当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、llms.txt、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具。需要 Docker Desktop 或 Docker Engine + Compose：
+当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、llms.txt、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具；后续改进阶段补充了站点/站主设置、版本对比与恢复预览、批量内容操作、排期日历、评论与 Newsletter 管理、游标/增量内容 API、SEO/社交元数据、Feed 摘要模式和 v2 归档能力。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
 cp .env.example .env
@@ -110,7 +113,7 @@ docker compose up -d
 docker compose ps
 ```
 
-恢复完成后，所用归档位于旧数据的回滚目录内，因为备份不会递归包含备份文件；确认站点健康并另行保存归档前，不要删除该回滚目录。备份文件权限为 `0600`，但本地归档本身不加密且包含认证秘密，只能通过加密传输和受保护存储复制；对象存储与归档加密留作后续可选适配器。
+恢复完成后，所用归档位于旧数据的回滚目录内，因为备份不会递归包含备份文件；确认站点健康并另行保存归档前，不要删除该回滚目录。备份文件权限为 `0600`。本地归档默认不加密且包含认证秘密；当前实现支持按配置启用归档加密和 S3 远端归档，但两者都必须使用受保护的密钥/凭据并单独完成恢复演练，具体配置、失败语义和边界见[项目使用与运维手册](./docs/usage.md)与[实现级架构与技术细节](./docs/architecture-implementation.md)。
 
 ## 当前约束
 
@@ -118,4 +121,4 @@ docker compose ps
 - 文章与页面正文以数据库中的 Markdown 为权威版本。
 - 公开页面优先走可缓存快照，动态能力走独立接口。
 - 主题可上传但不能执行服务端代码；插件随程序编译并按配置启停。
-- 所有 1.0 功能按三个可运行的纵向阶段交付。
+- 核心 1.0 功能按三个可运行的纵向阶段交付，后续改进阶段继续补齐生产加固、性能验证、公共能力和产品化运营功能。

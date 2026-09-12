@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/discovery"
@@ -108,6 +109,14 @@ func TestDiscoveryHTTPSEOFeedSitemapSearchAndRedirect(t *testing.T) {
 	llms := requestPublic(t, router, "/llms.txt")
 	if llms.Code != http.StatusOK || !strings.Contains(llms.Header().Get("Content-Type"), "text/plain") || !strings.Contains(llms.Body.String(), "# 纸上花园") || !strings.Contains(llms.Body.String(), "[发现轻量博客](<https://blog.example/posts/discover-new>)") || !strings.Contains(llms.Body.String(), "[RSS](<https://blog.example/rss.xml>)") {
 		t.Fatalf("llms status=%d content-type=%q body=%s", llms.Code, llms.Header().Get("Content-Type"), llms.Body.String())
+	}
+}
+
+func TestBoundedRSSBodyKeepsUTF8AndByteBudget(t *testing.T) {
+	body := strings.Repeat("中", 40<<10)
+	bounded := boundedRSSBody(body)
+	if len(bounded) > 64<<10 || !utf8.ValidString(bounded) {
+		t.Fatalf("bounded RSS body bytes=%d valid=%v", len(bounded), utf8.ValidString(bounded))
 	}
 }
 

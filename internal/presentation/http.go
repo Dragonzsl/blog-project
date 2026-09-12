@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/zhushilin/blog-project/internal/discovery"
@@ -725,8 +726,9 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
+		siteMetadata := h.currentSiteMetadata()
 		language := "zh-CN"
-		if siteMetadata := h.currentSiteMetadata(); siteMetadata.Language != "" {
+		if siteMetadata.Language != "" {
 			language = siteMetadata.Language
 		}
 		document := rssDocument{Version: "2.0", Channel: rssChannel{
@@ -744,6 +746,9 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 		for _, item := range items {
 			absolute := h.absoluteURL(item.Path)
 			description := item.Excerpt
+			if siteMetadata.FeedSummaryMode == "full" {
+				description = strings.TrimSpace(boundedRSSBody(item.BodyMarkdown))
+			}
 			if description == "" {
 				description = item.Title
 			}
@@ -775,6 +780,18 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 		body, err := xml.Marshal(document)
 		return append([]byte(xml.Header), body...), lastModified, err
 	})
+}
+
+func boundedRSSBody(value string) string {
+	const maxBytes = 64 << 10
+	if len(value) <= maxBytes {
+		return value
+	}
+	value = value[:maxBytes]
+	for len(value) > 0 && !utf8.ValidString(value) {
+		value = value[:len(value)-1]
+	}
+	return value
 }
 
 type sitemapDocument struct {

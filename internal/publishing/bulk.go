@@ -68,11 +68,12 @@ func (s *Service) ApplyBulk(ctx context.Context, request BulkActionRequest) (Bul
 		return BulkResult{}, ErrBulkInvalid
 	}
 	input := struct {
-		Kind       string     `json:"kind"`
-		Action     string     `json:"action"`
-		IDs        []int64    `json:"ids"`
-		ScheduleAt *time.Time `json:"schedule_at,omitempty"`
-	}{request.Kind, request.Action, ids, request.ScheduleAt}
+		Kind            string          `json:"kind"`
+		Action          string          `json:"action"`
+		IDs             []int64         `json:"ids"`
+		ExpectedVersion map[int64]int64 `json:"expected_version,omitempty"`
+		ScheduleAt      *time.Time      `json:"schedule_at,omitempty"`
+	}{request.Kind, request.Action, ids, request.ExpectedVersion, request.ScheduleAt}
 	inputJSON, err := json.Marshal(input)
 	if err != nil {
 		return BulkResult{}, err
@@ -145,7 +146,7 @@ func (s *Service) applyBulkItem(ctx context.Context, request BulkActionRequest, 
 	case "trash":
 		operationErr = s.Trash(ctx, request.Kind, id, content.LockVersion)
 	case "restore":
-		_, operationErr = s.RestoreFromTrash(ctx, id)
+		_, operationErr = s.RestoreFromTrashExpected(ctx, id, content.LockVersion)
 	default:
 		operationErr = ErrBulkInvalid
 	}

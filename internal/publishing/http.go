@@ -111,6 +111,7 @@ func (h *HTTPHandler) SetMediaPicker(picker MediaPicker) { h.media = picker }
 func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/trash", h.trashList)
 	router.Post("/trash/{contentID}/restore", h.trashRestore)
+	router.Post("/trash/bulk", h.trashBulkRestore)
 	for _, kind := range []string{"article", "page"} {
 		descriptor := describeContent(kind)
 		kind := kind
@@ -359,6 +360,9 @@ func (h *HTTPHandler) contentTrash(w http.ResponseWriter, r *http.Request, kind 
 	if !h.parseActionForm(w, r) {
 		return
 	}
+	if !requireAdminConfirmation(w, r) {
+		return
+	}
 	id, version, ok := lifecycleTarget(w, r, kind)
 	if !ok {
 		return
@@ -442,7 +446,12 @@ func (h *HTTPHandler) contentRestorePreview(w http.ResponseWriter, r *http.Reque
 		h.handleReadError(w, r, err)
 		return
 	}
-	h.renderAdmin(w, r, "restore_preview.html", map[string]any{"Content": content, "Revision": revision, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
+	snapshot, snapshotErr := h.service.EditingSnapshot(r.Context(), kind, id)
+	if snapshotErr != nil && !errors.Is(snapshotErr, ErrNotFound) {
+		h.handleReadError(w, r, snapshotErr)
+		return
+	}
+	h.renderAdmin(w, r, "restore_preview.html", map[string]any{"Content": content, "Revision": revision, "Snapshot": snapshot, "HasSnapshot": snapshotErr == nil, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
 }
 
 func (h *HTTPHandler) contentBulk(w http.ResponseWriter, r *http.Request, kind string) {
@@ -450,11 +459,19 @@ func (h *HTTPHandler) contentBulk(w http.ResponseWriter, r *http.Request, kind s
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
 		return
 	}
+	if !requireAdminConfirmation(w, r) {
+		return
+	}
 	ids := make([]int64, 0, len(r.Form["content_ids"]))
 	for _, value := range r.Form["content_ids"] {
 		if id, err := strconv.ParseInt(value, 10, 64); err == nil && id > 0 {
 			ids = append(ids, id)
 		}
+	}
+	expectedVersions, err := parseExpectedVersions(r.Form["content_versions"])
+	if err != nil {
+		http.Error(w, "Invalid content version", http.StatusBadRequest)
+		return
 	}
 	action := strings.TrimSpace(r.FormValue("bulk_action"))
 	var scheduleAt *time.Time
@@ -486,7 +503,7 @@ func (h *HTTPHandler) contentBulk(w http.ResponseWriter, r *http.Request, kind s
 		}
 		key = "admin-bulk-" + hex.EncodeToString(raw)
 	}
-	result, err := h.service.ApplyBulk(r.Context(), BulkActionRequest{Kind: kind, Action: action, IDs: ids, ScheduleAt: scheduleAt, OperationKey: key})
+	result, err := h.service.ApplyBulk(r.Context(), BulkActionRequest{Kind: kind, Action: action, IDs: ids, ExpectedVersion: expectedVersions, ScheduleAt: scheduleAt, OperationKey: key})
 	if err != nil {
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrBulkInProgress) {
@@ -496,6 +513,23 @@ func (h *HTTPHandler) contentBulk(w http.ResponseWriter, r *http.Request, kind s
 		return
 	}
 	h.renderAdmin(w, r, "bulk_result.html", map[string]any{"Descriptor": describeContent(kind), "Result": result, "AdminSection": kind + "s"})
+}
+
+func parseExpectedVersions(values []string) (map[int64]int64, error) {
+	result := make(map[int64]int64, len(values))
+	for _, raw := range values {
+		parts := strings.Split(raw, ":")
+		if len(parts) != 2 {
+			return nil, ErrBulkInvalid
+		}
+		id, idErr := strconv.ParseInt(parts[0], 10, 64)
+		version, versionErr := strconv.ParseInt(parts[1], 10, 64)
+		if idErr != nil || versionErr != nil || id < 1 || version < 1 {
+			return nil, ErrBulkInvalid
+		}
+		result[id] = version
+	}
+	return result, nil
 }
 
 func newBulkOperationKey() string {
@@ -517,12 +551,22 @@ func (h *HTTPHandler) scheduleCalendar(w http.ResponseWriter, r *http.Request, k
 		h.internalError(w, r, err)
 		return
 	}
-	start, err := time.ParseInLocation("2006-01", r.URL.Query().Get("month"), location)
-	if err != nil {
-		now := time.Now().In(location)
-		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, location)
+	view := r.URL.Query().Get("view")
+	if view != "week" {
+		view = "month"
 	}
-	end := start.AddDate(0, 1, 0)
+	var start, end time.Time
+	if view == "week" {
+		start = scheduleWeekStart(r.URL.Query().Get("week"), location)
+		end = start.AddDate(0, 0, 7)
+	} else {
+		start, err = time.ParseInLocation("2006-01", r.URL.Query().Get("month"), location)
+		if err != nil {
+			now := time.Now().In(location)
+			start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, location)
+		}
+		end = start.AddDate(0, 1, 0)
+	}
 	items, hasMore, err := h.service.ScheduledContents(r.Context(), kind, start.UTC(), end.UTC(), 200)
 	if err != nil {
 		h.internalError(w, r, err)
@@ -536,11 +580,44 @@ func (h *HTTPHandler) scheduleCalendar(w http.ResponseWriter, r *http.Request, k
 		}
 		views = append(views, map[string]any{"ID": item.ID, "Title": item.Title, "ScheduledAt": at, "EditURL": fmt.Sprintf("/admin/%ss/%d/edit", kind, item.ID)})
 	}
-	h.renderAdmin(w, r, "schedule_calendar.html", map[string]any{"Descriptor": describeContent(kind), "Month": start.Format("2006-01"), "Items": views, "HasMore": hasMore, "Timezone": timezone, "AdminSection": kind + "s"})
+	previous := start.AddDate(0, 0, -1)
+	next := end
+	if view == "month" {
+		previous = start.AddDate(0, -1, 0)
+		next = start.AddDate(0, 1, 0)
+	}
+	previousValues := url.Values{"view": []string{view}}
+	nextValues := url.Values{"view": []string{view}}
+	if view == "week" {
+		previousValues.Set("week", previous.Format("2006-01-02"))
+		nextValues.Set("week", next.Format("2006-01-02"))
+	} else {
+		previousValues.Set("month", previous.Format("2006-01"))
+		nextValues.Set("month", next.Format("2006-01"))
+	}
+	rangeLabel := start.Format("2006-01")
+	if view == "week" {
+		rangeLabel = start.Format("2006-01-02") + " ～ " + end.AddDate(0, 0, -1).Format("2006-01-02")
+	}
+	descriptor := describeContent(kind)
+	h.renderAdmin(w, r, "schedule_calendar.html", map[string]any{"Descriptor": descriptor, "Month": start.Format("2006-01"), "RangeLabel": rangeLabel, "View": view, "PreviousURL": descriptor.ListURL + "/calendar?" + previousValues.Encode(), "NextURL": descriptor.ListURL + "/calendar?" + nextValues.Encode(), "Items": views, "HasMore": hasMore, "Timezone": timezone, "AdminSection": kind + "s"})
+}
+
+func scheduleWeekStart(raw string, location *time.Location) time.Time {
+	value, err := time.ParseInLocation("2006-01-02", raw, location)
+	if err != nil {
+		now := time.Now().In(location)
+		value = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
+	}
+	offset := (int(value.Weekday()) + 6) % 7
+	return value.AddDate(0, 0, -offset)
 }
 
 func (h *HTTPHandler) contentRestoreRevision(w http.ResponseWriter, r *http.Request, kind string) {
 	if !h.parseActionForm(w, r) {
+		return
+	}
+	if !requireAdminConfirmation(w, r) {
 		return
 	}
 	id, version, ok := lifecycleTarget(w, r, kind)
@@ -627,13 +704,92 @@ func (h *HTTPHandler) trashList(w http.ResponseWriter, r *http.Request) {
 	}
 	views := make([]map[string]any, 0, len(contents))
 	for _, content := range contents {
-		views = append(views, map[string]any{"ID": content.ID, "Title": content.Title, "Kind": describeContent(content.Kind).Singular, "TrashedAt": content.TrashedAt.Format("2006-01-02 15:04 UTC")})
+		views = append(views, map[string]any{"ID": content.ID, "KindKey": content.Kind, "Title": content.Title, "Kind": describeContent(content.Kind).Singular, "LockVersion": content.LockVersion, "TrashedAt": content.TrashedAt.Format("2006-01-02 15:04 UTC")})
 	}
-	h.renderAdmin(w, r, "trash.html", map[string]any{"Contents": views, "AdminSection": "trash"})
+	h.renderAdmin(w, r, "trash.html", map[string]any{"Contents": views, "BulkOperationKey": newBulkOperationKey(), "CSRF": h.security.CSRFToken(r), "AdminSection": "trash"})
+}
+
+type trashBulkResult struct {
+	OperationKey string
+	Succeeded    int
+	Skipped      int
+	Conflicts    int
+	Failed       int
+	Items        []BulkItemResult
+}
+
+func (h *HTTPHandler) trashBulkRestore(w http.ResponseWriter, r *http.Request) {
+	if !h.parseActionForm(w, r) {
+		return
+	}
+	if !requireAdminConfirmation(w, r) {
+		return
+	}
+	if single := strings.TrimSpace(r.FormValue("single_item")); single != "" {
+		r.Form["trash_items"] = []string{single}
+	}
+	if len(r.Form["trash_items"]) == 0 || len(r.Form["trash_items"]) > maxBulkItems {
+		http.Error(w, "没有选择要恢复的内容", http.StatusBadRequest)
+		return
+	}
+	groups := make(map[string][]int64)
+	versions := make(map[string]map[int64]int64)
+	seen := make(map[string]struct{})
+	for _, raw := range r.Form["trash_items"] {
+		parts := strings.Split(raw, ":")
+		if len(parts) != 3 || (parts[0] != "article" && parts[0] != "page") {
+			http.Error(w, "Invalid trash item", http.StatusBadRequest)
+			return
+		}
+		id, idErr := strconv.ParseInt(parts[1], 10, 64)
+		version, versionErr := strconv.ParseInt(parts[2], 10, 64)
+		if idErr != nil || versionErr != nil || id < 1 || version < 1 {
+			http.Error(w, "Invalid trash item", http.StatusBadRequest)
+			return
+		}
+		key := parts[0] + ":" + parts[1]
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		groups[parts[0]] = append(groups[parts[0]], id)
+		if versions[parts[0]] == nil {
+			versions[parts[0]] = make(map[int64]int64)
+		}
+		versions[parts[0]][id] = version
+	}
+	operationKey := strings.TrimSpace(r.FormValue("operation_key"))
+	if operationKey == "" {
+		operationKey = newBulkOperationKey()
+	}
+	combined := trashBulkResult{OperationKey: operationKey}
+	for _, kind := range []string{"article", "page"} {
+		if len(groups[kind]) == 0 {
+			continue
+		}
+		result, err := h.service.ApplyBulk(r.Context(), BulkActionRequest{Kind: kind, Action: "restore", IDs: groups[kind], ExpectedVersion: versions[kind], OperationKey: operationKey + "-" + kind})
+		if err != nil {
+			status := http.StatusBadRequest
+			if errors.Is(err, ErrBulkInProgress) {
+				status = http.StatusConflict
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		combined.Succeeded += result.Succeeded
+		combined.Skipped += result.Skipped
+		combined.Conflicts += result.Conflicts
+		combined.Failed += result.Failed
+		combined.Items = append(combined.Items, result.Items...)
+	}
+	h.renderAdmin(w, r, "trash_bulk_result.html", map[string]any{"Result": combined, "CSRF": h.security.CSRFToken(r), "AdminSection": "trash"})
 }
 
 func (h *HTTPHandler) trashRestore(w http.ResponseWriter, r *http.Request) {
 	if !h.parseActionForm(w, r) {
+		return
+	}
+	if !requireAdminConfirmation(w, r) {
 		return
 	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "contentID"), 10, 64)
@@ -744,6 +900,14 @@ func (h *HTTPHandler) parseActionForm(w http.ResponseWriter, r *http.Request) bo
 		return false
 	}
 	return h.security.VerifyParsedCSRF(w, r)
+}
+
+func requireAdminConfirmation(w http.ResponseWriter, r *http.Request) bool {
+	if r.FormValue("confirm_action") == "1" {
+		return true
+	}
+	http.Error(w, "请确认此管理操作", http.StatusBadRequest)
+	return false
 }
 
 func (h *HTTPHandler) renderEditor(w http.ResponseWriter, r *http.Request, kind string, content Article, errorMessage string, status int) {

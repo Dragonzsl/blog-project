@@ -270,7 +270,12 @@
 
   const setupSubmitFeedback = () => {
     document.querySelectorAll("[data-submit-feedback]").forEach((form) => {
-      form.addEventListener("submit", () => {
+      form.addEventListener("submit", (event) => {
+        const message = form.dataset.confirm;
+        if (message && !window.confirm(message)) {
+          event.preventDefault();
+          return;
+        }
         form.setAttribute("aria-busy", "true");
         form.querySelectorAll("button[type='submit']").forEach((button) => {
           button.disabled = true;

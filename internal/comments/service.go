@@ -48,10 +48,13 @@ type AdminComment struct {
 }
 
 type AdminCommentFilter struct {
-	Status  string
-	Query   string
-	Page    int
-	PerPage int
+	Status      string
+	Query       string
+	ArticleSlug string
+	From        *time.Time
+	To          *time.Time
+	Page        int
+	PerPage     int
 }
 
 type AdminCommentPage struct {
@@ -71,6 +74,9 @@ type ModerationItemResult struct {
 type ModerationBulkResult struct {
 	OperationKey string                 `json:"operation_key"`
 	Action       string                 `json:"action"`
+	Succeeded    int                    `json:"succeeded"`
+	NotFound     int                    `json:"not_found"`
+	Invalid      int                    `json:"invalid"`
 	Items        []ModerationItemResult `json:"items"`
 }
 
@@ -322,7 +328,12 @@ func (s *Service) GetByPublicID(ctx context.Context, publicID []byte) (Comment, 
 }
 
 func (s *Service) Approved(ctx context.Context, contentID int64) ([]Comment, error) {
-	rows, err := s.db.Reader.QueryContext(ctx, `SELECT id,public_id,content_id,parent_id,display_name,website,body_markdown,body_html,status,created_at,approved_at,updated_at FROM comments WHERE content_id=? AND status='approved' ORDER BY created_at,id`, contentID)
+	rows, err := s.db.Reader.QueryContext(ctx, `SELECT comment.id,comment.public_id,comment.content_id,comment.parent_id,comment.display_name,comment.website,comment.body_markdown,comment.body_html,comment.status,comment.created_at,comment.approved_at,comment.updated_at
+		FROM comments comment JOIN contents content ON content.id=comment.content_id
+		LEFT JOIN comments parent ON parent.id=comment.parent_id
+		WHERE comment.content_id=? AND comment.status='approved' AND content.status='published' AND content.trashed_at IS NULL
+			AND (parent.id IS NULL OR (parent.content_id=comment.content_id AND parent.status='approved'))
+		ORDER BY comment.created_at,comment.id LIMIT 200`, contentID)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +416,13 @@ func (s *Service) AdminComments(ctx context.Context, filter AdminCommentFilter) 
 	if len([]rune(filter.Query)) > 100 {
 		return AdminCommentPage{}, ErrInvalid
 	}
+	filter.ArticleSlug = strings.TrimSpace(filter.ArticleSlug)
+	if len([]rune(filter.ArticleSlug)) > 120 || strings.ContainsAny(filter.ArticleSlug, "\r\n") {
+		return AdminCommentPage{}, ErrInvalid
+	}
+	if filter.From != nil && filter.To != nil && !filter.From.Before(*filter.To) {
+		return AdminCommentPage{}, ErrInvalid
+	}
 	if filter.Page < 1 {
 		filter.Page = 1
 	}
@@ -444,7 +462,7 @@ func (s *Service) AdminComments(ctx context.Context, filter AdminCommentFilter) 
 
 func adminCommentWhere(filter AdminCommentFilter) (string, []any) {
 	clauses := []string{"1=1"}
-	args := make([]any, 0, 6)
+	args := make([]any, 0, 9)
 	if filter.Status != "all" {
 		clauses = append(clauses, "c.status=?")
 		args = append(args, filter.Status)
@@ -453,6 +471,18 @@ func adminCommentWhere(filter AdminCommentFilter) (string, []any) {
 		pattern := "%" + escapeCommentLike(filter.Query) + "%"
 		clauses = append(clauses, `(c.display_name LIKE ? COLLATE NOCASE ESCAPE char(92) OR c.body_markdown LIKE ? COLLATE NOCASE ESCAPE char(92) OR content.title LIKE ? COLLATE NOCASE ESCAPE char(92))`)
 		args = append(args, pattern, pattern, pattern)
+	}
+	if filter.ArticleSlug != "" {
+		clauses = append(clauses, "COALESCE(content.published_slug,content.slug,'')=?")
+		args = append(args, filter.ArticleSlug)
+	}
+	if filter.From != nil {
+		clauses = append(clauses, "c.created_at>=?")
+		args = append(args, filter.From.UTC().UnixMilli())
+	}
+	if filter.To != nil {
+		clauses = append(clauses, "c.created_at<?")
+		args = append(args, filter.To.UTC().UnixMilli())
 	}
 	return "WHERE " + strings.Join(clauses, " AND "), args
 }
@@ -497,11 +527,24 @@ func (s *Service) Moderate(ctx context.Context, id int64, status string) error {
 	}
 	defer tx.Rollback()
 	var publicID, contentPublicID []byte
-	if err := tx.QueryRowContext(ctx, `SELECT comment.public_id,content.public_id FROM comments comment JOIN contents content ON content.id=comment.content_id WHERE comment.id=?`, id).Scan(&publicID, &contentPublicID); err != nil {
+	var commentContentID int64
+	var contentStatus string
+	var trashedAt sql.NullInt64
+	var parentContentID sql.NullInt64
+	var parentStatus sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT comment.public_id,content.public_id,comment.content_id,content.status,content.trashed_at,parent.content_id,parent.status
+		FROM comments comment JOIN contents content ON content.id=comment.content_id
+		LEFT JOIN comments parent ON parent.id=comment.parent_id WHERE comment.id=?`, id).Scan(&publicID, &contentPublicID, &commentContentID, &contentStatus, &trashedAt, &parentContentID, &parentStatus); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
+	}
+	if parentContentID.Valid && parentContentID.Int64 != commentContentID {
+		return ErrInvalid
+	}
+	if status == "approved" && (contentStatus != "published" || trashedAt.Valid || (parentContentID.Valid && parentStatus.String != "approved")) {
+		return ErrInvalid
 	}
 	result, err := tx.ExecContext(ctx, "UPDATE comments SET status=?,approved_at=?,updated_at=? WHERE id=?", status, nullableTime(status == "approved", now), now.UnixMilli(), id)
 	if err != nil {
@@ -578,6 +621,16 @@ func (s *Service) ModerateBulk(ctx context.Context, ids []int64, status, operati
 		}
 		result.Items = append(result.Items, item)
 	}
+	for _, item := range result.Items {
+		switch item.Status {
+		case "updated":
+			result.Succeeded++
+		case "not_found":
+			result.NotFound++
+		case "invalid":
+			result.Invalid++
+		}
+	}
 	if err := s.finishBulk(ctx, operationKey, result, true, now); err != nil {
 		return ModerationBulkResult{}, err
 	}
@@ -630,7 +683,7 @@ func (s *Service) finishBulk(ctx context.Context, operationKey string, result Mo
 	if succeeded {
 		status = "succeeded"
 	}
-	_, err = s.db.Writer.ExecContext(ctx, "UPDATE bulk_operations SET status=?,result_json=?,updated_at=? WHERE operation_key=? AND object_kind='comment' AND action='moderate'", status, payload, now.UnixMilli(), operationKey)
+	_, err = s.db.Writer.ExecContext(ctx, "UPDATE bulk_operations SET status=?,result_json=?,updated_at=? WHERE operation_key=? AND object_kind='comment' AND action='moderate'", status, string(payload), now.UnixMilli(), operationKey)
 	return err
 }
 

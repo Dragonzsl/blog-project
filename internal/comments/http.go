@@ -46,6 +46,9 @@ type rateWindow struct {
 type adminCommentFilterView struct {
 	Status      string
 	Query       string
+	ArticleSlug string
+	From        string
+	To          string
 	PreviousURL string
 	NextURL     string
 }
@@ -172,7 +175,13 @@ func (h *HTTPHandler) resolveClientIP(r *http.Request) string {
 func (h *HTTPHandler) pending(w http.ResponseWriter, r *http.Request) {
 	pageNumber := int(parseID(r.URL.Query().Get("page")))
 	perPage := int(parseID(r.URL.Query().Get("per_page")))
-	page, err := h.service.AdminComments(r.Context(), AdminCommentFilter{Status: r.URL.Query().Get("status"), Query: r.URL.Query().Get("q"), Page: pageNumber, PerPage: perPage})
+	from, to, dateErr := parseCommentDateRange(r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+	if dateErr != nil {
+		h.redirectCommentError(w, r, "invalid")
+		return
+	}
+	status, query, articleSlug := r.URL.Query().Get("status"), r.URL.Query().Get("q"), r.URL.Query().Get("article")
+	page, err := h.service.AdminComments(r.Context(), AdminCommentFilter{Status: status, Query: query, ArticleSlug: articleSlug, From: from, To: to, Page: pageNumber, PerPage: perPage})
 	if err != nil {
 		h.error(w, r, err)
 		return
@@ -181,24 +190,33 @@ func (h *HTTPHandler) pending(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	notice, message := commentFeedback(r)
-	filter := adminCommentFilterView{Status: r.URL.Query().Get("status"), Query: r.URL.Query().Get("q")}
+	filter := adminCommentFilterView{Status: status, Query: query, ArticleSlug: articleSlug, From: r.URL.Query().Get("from"), To: r.URL.Query().Get("to")}
 	if filter.Status == "" {
 		filter.Status = "pending"
 	}
 	if page.Page > 1 {
-		filter.PreviousURL = commentPageURL(filter.Status, filter.Query, page.Page-1, page.PerPage)
+		filter.PreviousURL = commentPageURL(filter.Status, filter.Query, filter.ArticleSlug, filter.From, filter.To, page.Page-1, page.PerPage)
 	}
 	if page.HasMore {
-		filter.NextURL = commentPageURL(filter.Status, filter.Query, page.Page+1, page.PerPage)
+		filter.NextURL = commentPageURL(filter.Status, filter.Query, filter.ArticleSlug, filter.From, filter.To, page.Page+1, page.PerPage)
 	}
 	_ = h.templates.ExecuteTemplate(w, "comments.html", map[string]any{"Comments": page.Comments, "Page": page, "Filter": filter, "OperationKey": operationKey, "CSRF": h.security.CSRFToken(r), "AdminSection": "plugins", "Notice": notice, "Error": message})
 }
 
-func commentPageURL(status, query string, page, perPage int) string {
+func commentPageURL(status, query, articleSlug, from, to string, page, perPage int) string {
 	values := url.Values{}
 	values.Set("status", status)
 	if query != "" {
 		values.Set("q", query)
+	}
+	if articleSlug != "" {
+		values.Set("article", articleSlug)
+	}
+	if from != "" {
+		values.Set("from", from)
+	}
+	if to != "" {
+		values.Set("to", to)
 	}
 	values.Set("page", strconv.Itoa(page))
 	if perPage > 0 {
@@ -207,9 +225,43 @@ func commentPageURL(status, query string, page, perPage int) string {
 	return "/admin/plugins/comments.local/comments?" + values.Encode()
 }
 
+func parseCommentDateRange(fromValue, toValue string) (*time.Time, *time.Time, error) {
+	var from, to *time.Time
+	if strings.TrimSpace(fromValue) != "" {
+		value, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(fromValue), time.UTC)
+		if err != nil {
+			return nil, nil, err
+		}
+		from = &value
+	}
+	if strings.TrimSpace(toValue) != "" {
+		value, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(toValue), time.UTC)
+		if err != nil {
+			return nil, nil, err
+		}
+		value = value.AddDate(0, 0, 1)
+		to = &value
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		return nil, nil, errors.New("invalid date range")
+	}
+	return from, to, nil
+}
+
+func (h *HTTPHandler) redirectCommentError(w http.ResponseWriter, r *http.Request, code string) {
+	query := url.Values{"error": []string{code}}
+	if r.URL.Query().Get("status") != "" {
+		query.Set("status", r.URL.Query().Get("status"))
+	}
+	http.Redirect(w, r, "/admin/plugins/comments.local/comments?"+query.Encode(), http.StatusSeeOther)
+}
+
 func (h *HTTPHandler) moderateBulk(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
+		return
+	}
+	if !requireAdminConfirmation(w, r) {
 		return
 	}
 	ids := make([]int64, 0, len(r.Form["comment_ids"]))
@@ -249,6 +301,9 @@ func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
 		return
 	}
+	if !requireAdminConfirmation(w, r) {
+		return
+	}
 	id, err := strconv.ParseInt(chi.URLParam(r, "commentID"), 10, 64)
 	if err != nil || id < 1 {
 		http.NotFound(w, r)
@@ -274,6 +329,15 @@ func (h *HTTPHandler) moderate(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/admin/plugins/comments.local/comments?notice="+url.QueryEscape(status), http.StatusSeeOther)
 }
+
+func requireAdminConfirmation(w http.ResponseWriter, r *http.Request) bool {
+	if r.FormValue("confirm_action") == "1" {
+		return true
+	}
+	http.Error(w, "请确认此管理操作", http.StatusBadRequest)
+	return false
+}
+
 func parseID(value string) int64 { id, _ := strconv.ParseInt(value, 10, 64); return id }
 func (h *HTTPHandler) error(w http.ResponseWriter, r *http.Request, err error) {
 	h.logger.ErrorContext(r.Context(), "comment request failed", "error", operations.SafeError(err))

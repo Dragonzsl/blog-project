@@ -52,6 +52,12 @@ func TestServiceCreatesModeratesAndSanitizesComment(t *testing.T) {
 	if err != nil || len(got) != 1 || got[0].DisplayName != "访客" {
 		t.Fatalf("approved=%v err=%v", got, err)
 	}
+	if err := service.Moderate(ctx, comment.ID, "spam"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.Approved(ctx, article.ID); err != nil || len(got) != 0 {
+		t.Fatalf("spam comment remained public: comments=%v err=%v", got, err)
+	}
 	if _, err := service.Create(ctx, article.Slug, Input{DisplayName: "访客", Website: "javascript:alert(1)", Body: "x"}); err == nil {
 		t.Fatal("unsafe website accepted")
 	}

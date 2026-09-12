@@ -39,6 +39,7 @@ type FeedItem struct {
 	Path               string
 	Title              string
 	Excerpt            string
+	BodyMarkdown       string
 	CoverMediaPublicID []byte
 	PublishedAt        time.Time
 	UpdatedAt          time.Time

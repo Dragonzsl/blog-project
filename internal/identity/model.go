@@ -74,6 +74,7 @@ type SiteSettings struct {
 	Description           string
 	DefaultSEOTitle       string
 	DefaultSEODescription string
+	FeedSummaryMode       string
 	SocialLinks           []string
 	DefaultSocialImageID  []byte
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,6 +31,53 @@ func TestMailMessageRejectsHeaderInjection(t *testing.T) {
 	}
 	if !strings.Contains(buildMessage("owner@example.com", Message{To: "a@example.com", Subject: "Hi", Text: "text", HTML: "<p>html</p>"}), "multipart/alternative") {
 		t.Fatal("multipart message missing")
+	}
+}
+
+type fakeNewsletterAdminSecurity struct{}
+
+func (fakeNewsletterAdminSecurity) CSRFToken(*http.Request) string { return "test-csrf" }
+func (fakeNewsletterAdminSecurity) VerifyParsedCSRF(http.ResponseWriter, *http.Request) bool {
+	return true
+}
+
+func TestNewsletterResendRequiresExplicitConfirmation(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.Open(ctx, config.Database{Path: filepath.Join(t.TempDir(), "blog.sqlite"), BusyTimeout: config.Duration{Duration: time.Second}, CacheSizeKiB: 4096, ReadConnections: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	baseNow := time.Date(2026, time.August, 23, 8, 0, 0, 0, time.UTC)
+	service := NewNewsletterService(db, NewLocalNewsletter(db, []byte("newsletter-secret")), []byte("newsletter-secret"))
+	service.now = func() time.Time { return baseNow }
+	if err := service.RequestSubscribe(ctx, "subscriber@example.com", NewsletterRequest{IdempotencyKey: "newsletter-confirmation", ClientIdentity: "198.51.100.23"}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.AdminSubscribers(ctx, "pending", "", 1, 20)
+	if err != nil || len(page.Subscribers) != 1 {
+		t.Fatalf("pending subscribers=%+v err=%v", page, err)
+	}
+	handler := NewNewsletterHTTPHandlerFromService(service)
+	handler.SetSecurity(fakeNewsletterAdminSecurity{})
+	router := chi.NewRouter()
+	router.Post("/admin/plugins/newsletter.local/subscribers/{subscriberID}/resend", handler.adminResend)
+	form := func(values url.Values) *http.Request {
+		request := httptest.NewRequest(http.MethodPost, "/admin/plugins/newsletter.local/subscribers/1/resend", strings.NewReader(values.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return request
+	}
+
+	missing := httptest.NewRecorder()
+	router.ServeHTTP(missing, form(url.Values{"csrf_token": {"test-csrf"}, "operation_key": {"newsletter-confirmation-resend"}}))
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("resend without confirmation status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	service.now = func() time.Time { return baseNow.Add(11 * time.Minute) }
+	resend := httptest.NewRecorder()
+	router.ServeHTTP(resend, form(url.Values{"csrf_token": {"test-csrf"}, "operation_key": {"newsletter-confirmation-resend"}, "confirm_action": {"1"}}))
+	if resend.Code != http.StatusSeeOther || !strings.Contains(resend.Header().Get("Location"), "notice=resend") {
+		t.Fatalf("resend with confirmation status=%d location=%q body=%s", resend.Code, resend.Header().Get("Location"), resend.Body.String())
 	}
 }
 

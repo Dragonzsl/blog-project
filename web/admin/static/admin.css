@@ -192,6 +192,15 @@
   .status-label.published { color: var(--accent); background: #e4f1ea; }
   .row-meta { display: flex; flex-wrap: wrap; justify-content: end; gap: 12px 18px; color: var(--accent); font-size: .82rem; }
   .row-meta > a, .row-meta > form { flex: 0 0 auto; white-space: nowrap; }
+  .confirm-action, .bulk-confirm { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: .76rem; font-weight: 650; line-height: 1.45; }
+  .confirm-action input, .bulk-confirm input { width: auto; min-height: auto; margin-top: 2px; flex: 0 0 auto; }
+  .confirm-form { display: grid; gap: 8px; }
+  .row-meta > .confirm-form { white-space: normal; justify-items: start; }
+  .bulk-toolbar { display: grid; gap: 12px; padding: 18px 20px; }
+  .bulk-toolbar .library-summary { margin: 0; }
+  .bulk-controls { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
+  .bulk-controls > label:not(.bulk-confirm) { min-width: 180px; flex: 1 1 180px; }
+  .bulk-controls > .bulk-confirm { flex: 1 1 100%; }
   .empty-state { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #c9ccc2; border-radius: 24px; text-align: center; }
   .empty-state > span { display: grid; place-items: center; width: 58px; height: 58px; border-radius: 50%; color: white; background: var(--accent); font-size: 1.5rem; }
   .empty-state h2 { margin-top: 24px; }

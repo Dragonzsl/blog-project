@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -31,6 +32,16 @@ import (
 )
 
 const phase3LoadFixtureContents = 10_000
+
+const phase4ContentAPILoadPageSize = 100
+
+type phase4ContentAPIPage struct {
+	Items []struct {
+		ID string `json:"id"`
+	} `json:"items"`
+	NextCursor string `json:"next_cursor"`
+	HasMore    bool   `json:"has_more"`
+}
 
 type phase3LoadSample struct {
 	duration time.Duration
@@ -176,6 +187,156 @@ func TestPhase3HTTPConcurrency(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestPhase4ContentAPICursorLoad is intentionally excluded from the normal
+// suite. Run it with:
+//
+//	go test -tags 'fts5 sqlite_omit_load_extension phase3load' ./internal/app -run TestPhase4ContentAPICursorLoad -count=1 -v
+//
+// It uses the same 10,000 published-article fixture as the phase-three HTTP
+// load test, but exercises the real application router and the Content API's
+// opaque cursor and updated_since paths. The default API rate limit is 120
+// requests/minute; the full cursor walk uses 100 requests and the filtered
+// probe uses one additional request.
+func TestPhase4ContentAPICursorLoad(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg := config.Defaults()
+	cfg.Storage.DataDir = filepath.Join(root, "data")
+	cfg.Database.Path = filepath.Join(root, "data", "db", "blog.sqlite")
+	cfg.Database.ReadConnections = phase3LoadEnvInt(t, "PHASE3_LOAD_READERS", 2)
+	if cfg.Database.ReadConnections > 8 {
+		t.Fatalf("PHASE3_LOAD_READERS must be between 1 and 8")
+	}
+	cfg.Discovery.BaseURL = "http://127.0.0.1"
+	cfg.Security.AuthSecretFile = filepath.Join(root, "data", "secrets", "auth.key")
+	cfg.ContentAPI.Enabled = true
+	cfg.ContentAPI.Token = "phase4-content-api-load-token"
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	application, err := New(ctx, cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := application.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}()
+
+	seedPhase3HTTPFixture(t, application.database.Writer)
+	server := httptest.NewServer(application.server.Handler)
+	defer server.Close()
+	client := &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        16,
+			MaxIdleConnsPerHost: 16,
+			MaxConnsPerHost:     16,
+			IdleConnTimeout:     60 * time.Second,
+		},
+	}
+
+	authorization := "Bearer " + cfg.ContentAPI.Token
+	seen := make(map[string]struct{}, phase3LoadFixtureContents)
+	cursor := ""
+	pages := 0
+	pageDurations := make([]time.Duration, 0, phase3LoadFixtureContents/phase4ContentAPILoadPageSize)
+	loadStarted := time.Now()
+	for {
+		path := "/api/v1/posts?per_page=" + strconv.Itoa(phase4ContentAPILoadPageSize)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		started := time.Now()
+		request, err := http.NewRequest(http.MethodGet, server.URL+path, nil)
+		if err != nil {
+			t.Fatalf("content API page %d request: %v", pages+1, err)
+		}
+		request.Header.Set("Authorization", authorization)
+		response, err := client.Do(request)
+		pageDurations = append(pageDurations, time.Since(started))
+		if err != nil {
+			t.Fatalf("content API page %d: %v", pages+1, err)
+		}
+		var page phase4ContentAPIPage
+		if response.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+			response.Body.Close()
+			t.Fatalf("content API page %d status=%d body=%q", pages+1, response.StatusCode, string(body))
+		}
+		if err := json.NewDecoder(response.Body).Decode(&page); err != nil {
+			response.Body.Close()
+			t.Fatalf("decode content API page %d: %v", pages+1, err)
+		}
+		response.Body.Close()
+		pages++
+		if len(page.Items) == 0 || len(page.Items) > phase4ContentAPILoadPageSize {
+			t.Fatalf("content API page %d item count=%d", pages, len(page.Items))
+		}
+		for _, item := range page.Items {
+			if item.ID == "" {
+				t.Fatalf("content API page %d contains an item without a public id", pages)
+			}
+			if _, exists := seen[item.ID]; exists {
+				t.Fatalf("content API cursor repeated public id %q on page %d", item.ID, pages)
+			}
+			seen[item.ID] = struct{}{}
+		}
+		if !page.HasMore {
+			if page.NextCursor != "" {
+				t.Fatalf("final content API page returned an unexpected cursor")
+			}
+			break
+		}
+		if page.NextCursor == "" {
+			t.Fatalf("content API page %d reports has_more without next_cursor", pages)
+		}
+		cursor = page.NextCursor
+		if pages > phase3LoadFixtureContents/phase4ContentAPILoadPageSize+1 {
+			t.Fatalf("content API cursor walk exceeded the expected page bound")
+		}
+	}
+	if len(seen) != phase3LoadFixtureContents {
+		t.Fatalf("content API cursor walk returned %d unique items, want %d", len(seen), phase3LoadFixtureContents)
+	}
+
+	updatedSince := time.Date(2026, time.September, 5, 0, 0, 0, 0, time.UTC).Add((phase3LoadFixtureContents - phase4ContentAPILoadPageSize) * time.Millisecond)
+	updatedPath := "/api/v1/posts?per_page=" + strconv.Itoa(phase4ContentAPILoadPageSize) + "&updated_since=" + url.QueryEscape(updatedSince.Format(time.RFC3339Nano))
+	started := time.Now()
+	request, err := http.NewRequest(http.MethodGet, server.URL+updatedPath, nil)
+	if err != nil {
+		t.Fatalf("content API updated_since request: %v", err)
+	}
+	request.Header.Set("Authorization", authorization)
+	response, err := client.Do(request)
+	updatedDuration := time.Since(started)
+	if err != nil {
+		t.Fatalf("content API updated_since: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		response.Body.Close()
+		t.Fatalf("content API updated_since status=%d body=%q", response.StatusCode, string(body))
+	}
+	var updatedPage phase4ContentAPIPage
+	if err := json.NewDecoder(response.Body).Decode(&updatedPage); err != nil {
+		response.Body.Close()
+		t.Fatalf("decode content API updated_since: %v", err)
+	}
+	response.Body.Close()
+	if updatedPage.HasMore || updatedPage.NextCursor != "" || len(updatedPage.Items) != phase4ContentAPILoadPageSize {
+		t.Fatalf("content API updated_since returned items=%d has_more=%t cursor=%t, want exactly %d items", len(updatedPage.Items), updatedPage.HasMore, updatedPage.NextCursor != "", phase4ContentAPILoadPageSize)
+	}
+	for _, item := range updatedPage.Items {
+		if _, exists := seen[item.ID]; !exists {
+			t.Fatalf("updated_since returned an item outside the complete cursor walk: %q", item.ID)
+		}
+	}
+
+	sort.Slice(pageDurations, func(left, right int) bool { return pageDurations[left] < pageDurations[right] })
+	t.Logf("phase4 content API load: contents=%d pages=%d duration=%s rps=%.1f page_p50=%s page_p95=%s updated_since_items=%d updated_since_duration=%s", len(seen), pages, time.Since(loadStarted), float64(len(seen))/time.Since(loadStarted).Seconds(), phase3LoadPercentile(pageDurations, 0.50), phase3LoadPercentile(pageDurations, 0.95), len(updatedPage.Items), updatedDuration)
 }
 
 func probePhase3Home(t *testing.T, client *http.Client, baseURL string) {

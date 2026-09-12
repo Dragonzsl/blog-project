@@ -180,12 +180,40 @@ func TestCursorAPIHasStableContinuationAndPrivateValidators(t *testing.T) {
 	if bad.Code != http.StatusBadRequest {
 		t.Fatalf("bad cursor status=%d", bad.Code)
 	}
+	tamperedCursor := page.NextCursor
+	last := len(tamperedCursor) - 1
+	if tamperedCursor[last] == 'a' {
+		tamperedCursor = tamperedCursor[:last] + "b"
+	} else {
+		tamperedCursor = tamperedCursor[:last] + "a"
+	}
+	tampered := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/posts?per_page=2&cursor="+tamperedCursor, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	router.ServeHTTP(tampered, request)
+	if tampered.Code != http.StatusBadRequest {
+		t.Fatalf("tampered cursor status=%d", tampered.Code)
+	}
+	crossFilter := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/posts?per_page=2&category=other&cursor="+page.NextCursor, nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	router.ServeHTTP(crossFilter, request)
+	if crossFilter.Code != http.StatusBadRequest {
+		t.Fatalf("cross-filter cursor status=%d", crossFilter.Code)
+	}
 	pageAndCursor := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodGet, "/posts?page=2&cursor="+page.NextCursor, nil)
 	request.Header.Set("Authorization", "Bearer secret")
 	router.ServeHTTP(pageAndCursor, request)
 	if pageAndCursor.Code != http.StatusBadRequest {
 		t.Fatalf("page and cursor status=%d", pageAndCursor.Code)
+	}
+	tooOld := httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodGet, "/posts?updated_since=2000-01-01T00:00:00Z", nil)
+	request.Header.Set("Authorization", "Bearer secret")
+	router.ServeHTTP(tooOld, request)
+	if tooOld.Code != http.StatusBadRequest {
+		t.Fatalf("old updated_since status=%d", tooOld.Code)
 	}
 	conditional := httptest.NewRecorder()
 	request = httptest.NewRequest(http.MethodGet, "/posts?per_page=2", nil)
@@ -194,6 +222,26 @@ func TestCursorAPIHasStableContinuationAndPrivateValidators(t *testing.T) {
 	router.ServeHTTP(conditional, request)
 	if conditional.Code != http.StatusNotModified {
 		t.Fatalf("conditional status=%d", conditional.Code)
+	}
+}
+
+func TestAPIReadRateLimitIsBoundedPerClient(t *testing.T) {
+	article := publishing.Article{PublicID: bytesOf(1), Kind: "article", PublishedSlug: "limited", Title: "限流"}
+	plugin := NewPlugin(fakeContent{articles: []publishing.Article{article}}, fakeSite{}, fakeURLs{}, Config{RequestsPerMinute: 2})
+	router := chi.NewRouter()
+	router.Get("/posts", plugin.handler.posts)
+	for index := 0; index < 2; index++ {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/posts", nil)
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("request %d status=%d", index+1, response.Code)
+		}
+	}
+	limited := httptest.NewRecorder()
+	router.ServeHTTP(limited, httptest.NewRequest(http.MethodGet, "/posts", nil))
+	if limited.Code != http.StatusTooManyRequests || limited.Header().Get("Retry-After") != "60" {
+		t.Fatalf("limited status=%d retry-after=%q", limited.Code, limited.Header().Get("Retry-After"))
 	}
 }
 
