@@ -26,6 +26,7 @@ import (
 	"github.com/zhushilin/blog-project/internal/organization"
 	"github.com/zhushilin/blog-project/internal/platform/config"
 	"github.com/zhushilin/blog-project/internal/platform/database"
+	platformid "github.com/zhushilin/blog-project/internal/platform/id"
 	"github.com/zhushilin/blog-project/internal/platform/logging"
 	"github.com/zhushilin/blog-project/internal/platform/secrets"
 	"github.com/zhushilin/blog-project/internal/presentation"
@@ -544,6 +545,7 @@ func archiveCommand(arguments []string) error {
 	configPath := flags.String("config", "", "path to TOML configuration")
 	archivePath := flags.String("archive", "", "content archive ZIP path")
 	outputPath := flags.String("output", "", "output content archive ZIP path")
+	dryRun := flags.Bool("dry-run", false, "validate and report an import without writing content or site settings")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return err
 	}
@@ -567,7 +569,23 @@ func archiveCommand(arguments []string) error {
 		if *outputPath == "" {
 			return fmt.Errorf("--output is required")
 		}
-		manifest, err := contentarchive.Export(context.Background(), service, *outputPath)
+		settings, err := identity.NewRepository(db).SiteSettings(context.Background())
+		if err != nil {
+			return err
+		}
+		migrationVersion, err := db.MigrationVersion(context.Background())
+		if err != nil {
+			return err
+		}
+		site, err := archiveSiteManifest(settings)
+		if err != nil {
+			return err
+		}
+		manifest, err := contentarchive.ExportWithOptions(context.Background(), service, contentarchive.ExportOptions{
+			ApplicationVersion: buildinfo.Version,
+			MigrationVersion:   int(migrationVersion),
+			Site:               site,
+		}, *outputPath)
 		if err != nil {
 			return err
 		}
@@ -587,11 +605,16 @@ func archiveCommand(arguments []string) error {
 		if *archivePath == "" {
 			return fmt.Errorf("--archive is required")
 		}
-		result, err := contentarchive.ImportWithReport(context.Background(), service, *archivePath)
+		result, err := contentarchive.ImportWithOptions(context.Background(), service, *archivePath, contentarchive.ImportOptions{
+			DryRun: *dryRun,
+			ApplySite: func(ctx context.Context, site contentarchive.SiteManifest) error {
+				return applyArchiveSiteManifest(ctx, db, site)
+			},
+		})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stdout, "Content archive imported: %d drafts, %d conflicts\n", result.Created, result.Conflicts)
+		fmt.Fprintf(os.Stdout, "Content archive %s: %d drafts, %d planned, %d conflicts\n", map[bool]string{true: "validated", false: "imported"}[*dryRun], result.Created, result.Planned, result.Conflicts)
 		for _, warning := range result.Warnings {
 			fmt.Fprintf(os.Stdout, "Warning: %s\n", warning)
 		}
@@ -599,6 +622,39 @@ func archiveCommand(arguments []string) error {
 	default:
 		return fmt.Errorf("usage: blog archive <export|verify|import> [options]")
 	}
+}
+
+func archiveSiteManifest(settings identity.SiteSettings) (contentarchive.SiteManifest, error) {
+	manifest := contentarchive.SiteManifest{
+		Name: settings.Name, PrimaryLanguage: settings.PrimaryLanguage, Timezone: settings.Timezone,
+		BaseURL: settings.BaseURL, Description: settings.Description, DefaultSEOTitle: settings.DefaultSEOTitle,
+		DefaultSEODescription: settings.DefaultSEODescription, SocialLinks: append([]string(nil), settings.SocialLinks...),
+	}
+	if len(settings.DefaultSocialImageID) > 0 {
+		encoded, err := platformid.EncodePublicID(settings.DefaultSocialImageID)
+		if err != nil {
+			return contentarchive.SiteManifest{}, err
+		}
+		manifest.DefaultSocialImageID = encoded
+	}
+	return manifest, nil
+}
+
+func applyArchiveSiteManifest(ctx context.Context, db *database.DB, manifest contentarchive.SiteManifest) error {
+	var imageID []byte
+	var err error
+	if manifest.DefaultSocialImageID != "" {
+		imageID, err = platformid.DecodePublicID(manifest.DefaultSocialImageID)
+		if err != nil {
+			return err
+		}
+	}
+	return identity.NewRepository(db).UpdateSiteSettings(ctx, identity.SiteSettings{
+		Name: manifest.Name, PrimaryLanguage: manifest.PrimaryLanguage, Timezone: manifest.Timezone,
+		BaseURL: manifest.BaseURL, Description: manifest.Description, DefaultSEOTitle: manifest.DefaultSEOTitle,
+		DefaultSEODescription: manifest.DefaultSEODescription, SocialLinks: append([]string(nil), manifest.SocialLinks...),
+		DefaultSocialImageID: imageID,
+	}, time.Now().UTC())
 }
 
 func storageCommand(arguments []string) error {
