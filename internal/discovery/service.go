@@ -36,6 +36,7 @@ type Service struct {
 	repository    *Repository
 	options       Options
 	baseURL       string
+	baseURLMu     sync.RWMutex
 	archiveMu     sync.RWMutex
 	archiveEpoch  int64
 	archive       []ArchiveYear
@@ -96,7 +97,27 @@ func NewService(repository *Repository, configured ...Options) (*Service, error)
 	return &Service{repository: repository, options: options, baseURL: baseURL, searchItems: make(map[string]*list.Element), searchRecent: list.New(), searchFlights: make(map[string]*searchFlight)}, nil
 }
 
-func (s *Service) BaseURL() string { return s.baseURL }
+func (s *Service) BaseURL() string {
+	s.baseURLMu.RLock()
+	defer s.baseURLMu.RUnlock()
+	return s.baseURL
+}
+
+// SetBaseURL is used by the protected site-settings workflow. The value is
+// validated before replacement so canonical and feed URLs cannot be poisoned
+// by an arbitrary host or URL fragment.
+func (s *Service) SetBaseURL(value string) error {
+	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(value), "/"))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("discovery base URL must be an absolute HTTP or HTTPS URL without credentials, query, or fragment")
+	}
+	parsed.Path = strings.TrimRight(parsed.Path, "/")
+	parsed.RawPath = ""
+	s.baseURLMu.Lock()
+	s.baseURL = strings.TrimRight(parsed.String(), "/")
+	s.baseURLMu.Unlock()
+	return nil
+}
 
 // SearchCacheVersion changes whenever a dirty search projection batch is
 // committed. Presentation caches can include it in their key so a completed
@@ -109,10 +130,11 @@ func (s *Service) SearchCacheVersion() uint64 {
 }
 
 func (s *Service) AbsoluteURL(path string) string {
+	baseURL := s.BaseURL()
 	if path == "/" {
-		return s.baseURL + "/"
+		return baseURL + "/"
 	}
-	return s.baseURL + (&url.URL{Path: path}).EscapedPath()
+	return baseURL + (&url.URL{Path: path}).EscapedPath()
 }
 
 func (s *Service) SyncDirty(ctx context.Context) (int, error) {

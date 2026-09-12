@@ -119,6 +119,8 @@ type HTTPHandler struct {
 	searchCategoryOptions []FilterOption
 	searchTagOptions      []FilterOption
 	searchOptionsFlight   *searchOptionsFlight
+	siteMetadataMu        sync.RWMutex
+	siteMetadata          SiteMetadata
 }
 
 type searchOptionsFlight struct {
@@ -153,6 +155,13 @@ func (h *HTTPHandler) SetClientIPResolver(resolver *clientip.Resolver) {
 func (h *HTTPHandler) SetFeatureProvider(provider FeatureProvider) { h.features = provider }
 
 func (h *HTTPHandler) SetMediaQueries(queries MediaQueries) { h.media = queries }
+
+func (h *HTTPHandler) SetSiteMetadata(metadata SiteMetadata) {
+	metadata.SocialLinks = append([]string(nil), metadata.SocialLinks...)
+	h.siteMetadataMu.Lock()
+	h.siteMetadata = metadata
+	h.siteMetadataMu.Unlock()
+}
 
 func (h *HTTPHandler) currentTheme() *Theme {
 	if h.themeManager != nil {
@@ -257,13 +266,17 @@ func (h *HTTPHandler) home(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		metadata := h.metadata(siteName, siteName, siteName+"的文章与思考。", "/", "website", map[string]any{
+		schema := map[string]any{
 			"@context": "https://schema.org", "@type": "WebSite", "name": siteName,
 			"url": h.absoluteURL("/"), "potentialAction": map[string]any{
 				"@type": "SearchAction", "target": h.absoluteURL("/search") + "?q={search_term_string}",
 				"query-input": "required name=search_term_string",
 			},
-		})
+		}
+		if siteMetadata := h.currentSiteMetadata(); len(siteMetadata.SocialLinks) > 0 {
+			schema["sameAs"] = siteMetadata.SocialLinks
+		}
+		metadata := h.metadata(siteName, siteName, h.defaultSiteDescription(siteName+"的文章与思考。"), "/", "website", schema)
 		theme := h.currentTheme()
 		body, err := theme.RenderHomePageWithView(siteName, homeView, navigation, metadata, cards)
 		lastModified := ""
@@ -456,7 +469,7 @@ func (h *HTTPHandler) article(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
-		metadata := h.articleMetadata(siteName, article, path)
+		metadata := h.articleMetadata(ctx, siteName, article, path)
 		view := h.articleDataWithMedia(ctx, article)
 		if article.Kind == "article" {
 			articleNavigation, err := h.content.PublicArticleNavigationForArticle(ctx, article, 3)
@@ -491,7 +504,7 @@ func (h *HTTPHandler) page(w http.ResponseWriter, r *http.Request) {
 			return nil, "", err
 		}
 		path := "/" + page.Slug
-		metadata := h.articleMetadata(siteName, page, path)
+		metadata := h.articleMetadata(ctx, siteName, page, path)
 		theme := h.currentTheme()
 		body, err := theme.RenderArticlePage(siteName, h.articleDataWithMedia(ctx, page), false, "", navigation, metadata)
 		lastModified := ""
@@ -712,8 +725,12 @@ func (h *HTTPHandler) rss(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, "", err
 		}
+		language := "zh-CN"
+		if siteMetadata := h.currentSiteMetadata(); siteMetadata.Language != "" {
+			language = siteMetadata.Language
+		}
 		document := rssDocument{Version: "2.0", Channel: rssChannel{
-			Title: siteName, Link: h.absoluteURL("/"), Description: siteName + "的最新文章。", Language: "zh-CN",
+			Title: siteName, Link: h.absoluteURL("/"), Description: h.defaultSiteDescription(siteName + "的最新文章。"), Language: language,
 		}}
 		mediaItems, mediaBatched := h.publicMediaItems(ctx, func() [][]byte {
 			ids := make([][]byte, 0, len(items))
@@ -1132,6 +1149,10 @@ func (h *HTTPHandler) writeCacheEntry(w http.ResponseWriter, r *http.Request, en
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+	if entry.LastModified != "" && notModifiedSince(r, entry.LastModified) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
 	w.WriteHeader(entry.Status)
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(entry.Body)
@@ -1149,6 +1170,10 @@ func (h *HTTPHandler) writeGenerated(w http.ResponseWriter, r *http.Request, con
 		w.Header().Set("Last-Modified", lastModified)
 	}
 	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if lastModified != "" && notModifiedSince(r, lastModified) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -1297,22 +1322,32 @@ func (h *HTTPHandler) absoluteURL(path string) string {
 }
 
 func (h *HTTPHandler) metadata(siteName, title, description, path, openGraphType string, schema map[string]any) PageMetadata {
-	metadata := PageMetadata{Title: title, Description: description, OpenGraphType: openGraphType}
+	siteMetadata := h.currentSiteMetadata()
+	if title == siteName && siteMetadata.DefaultSEOTitle != "" {
+		title = siteMetadata.DefaultSEOTitle
+	}
+	if description == "" {
+		description = siteMetadata.DefaultSEODescription
+		if description == "" {
+			description = siteMetadata.Description
+		}
+	}
+	metadata := PageMetadata{Title: title, Description: description, OpenGraphType: openGraphType, SiteName: siteName, ImageURL: siteMetadata.DefaultSocialImageURL, TwitterCard: "summary"}
+	if metadata.ImageURL != "" {
+		metadata.TwitterCard = "summary_large_image"
+	}
 	if h.discovery == nil {
 		return metadata
 	}
 	metadata.CanonicalURL = h.absoluteURL(path)
 	metadata.RSSURL = h.absoluteURL("/rss.xml")
 	if schema != nil {
-		if encoded, err := json.Marshal(schema); err == nil {
-			metadata.JSONLD = template.JS(encoded)
-		}
+		metadata.JSONLD = marshalJSONLD(schema)
 	}
-	_ = siteName
 	return metadata
 }
 
-func (h *HTTPHandler) articleMetadata(siteName string, article publishing.Article, path string) PageMetadata {
+func (h *HTTPHandler) articleMetadata(ctx context.Context, siteName string, article publishing.Article, path string) PageMetadata {
 	title := article.SEOTitle
 	if title == "" {
 		title = article.Title + " · " + siteName
@@ -1333,13 +1368,69 @@ func (h *HTTPHandler) articleMetadata(siteName string, article publishing.Articl
 		"description": description, "url": h.absoluteURL(path),
 		"isPartOf": map[string]any{"@type": "WebSite", "name": siteName, "url": h.absoluteURL("/")},
 	}
+	metadata := h.metadata(siteName, title, description, path, openGraphType, schema)
 	if article.PublishedAt != nil {
 		schema["datePublished"] = article.PublishedAt.Format(time.RFC3339)
+		metadata.PublishedAt = article.PublishedAt
 	}
 	if article.PublishedRevisionAt != nil {
 		schema["dateModified"] = article.PublishedRevisionAt.Format(time.RFC3339)
+		metadata.ModifiedAt = article.PublishedRevisionAt
 	}
-	return h.metadata(siteName, title, description, path, openGraphType, schema)
+	if h.media != nil && len(article.CoverMediaPublicID) > 0 {
+		if item, err := h.media.PublicItem(ctx, article.CoverMediaPublicID); err == nil {
+			if view, err := item.PublicView(); err == nil {
+				metadata.ImageURL = h.absoluteURL(view.URL)
+				metadata.TwitterCard = "summary_large_image"
+				schema["image"] = metadata.ImageURL
+			}
+		}
+	}
+	if siteMetadata := h.currentSiteMetadata(); len(siteMetadata.SocialLinks) > 0 {
+		schema["sameAs"] = siteMetadata.SocialLinks
+	}
+	metadata.JSONLD = marshalJSONLD(schema)
+	return metadata
+}
+
+func (h *HTTPHandler) currentSiteMetadata() SiteMetadata {
+	h.siteMetadataMu.RLock()
+	defer h.siteMetadataMu.RUnlock()
+	metadata := h.siteMetadata
+	metadata.SocialLinks = append([]string(nil), metadata.SocialLinks...)
+	return metadata
+}
+
+func (h *HTTPHandler) defaultSiteDescription(fallback string) string {
+	metadata := h.currentSiteMetadata()
+	if metadata.DefaultSEODescription != "" {
+		return metadata.DefaultSEODescription
+	}
+	if metadata.Description != "" {
+		return metadata.Description
+	}
+	return fallback
+}
+
+func marshalJSONLD(value any) template.JS {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return template.JS("")
+	}
+	return template.JS(encoded)
+}
+
+func notModifiedSince(r *http.Request, lastModified string) bool {
+	value := strings.TrimSpace(r.Header.Get("If-Modified-Since"))
+	if value == "" {
+		return false
+	}
+	since, err := http.ParseTime(value)
+	if err != nil {
+		return false
+	}
+	modified, err := http.ParseTime(lastModified)
+	return err == nil && !modified.After(since)
 }
 
 func normalizedFilter(value string) (string, bool) {

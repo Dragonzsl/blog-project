@@ -157,8 +157,22 @@ type PageContext struct {
 
 type PageMetadata struct {
 	Title, Description, CanonicalURL, OpenGraphType, RSSURL string
+	SiteName, ImageURL, TwitterCard                         string
+	PublishedAt, ModifiedAt                                 *time.Time
 	NoIndex                                                 bool
 	JSONLD                                                  template.JS
+}
+
+// SiteMetadata is the bounded public subset of site settings consumed by the
+// renderer. Credentials, provider configuration, and private owner data never
+// cross this boundary.
+type SiteMetadata struct {
+	Language              string
+	Description           string
+	DefaultSEOTitle       string
+	DefaultSEODescription string
+	SocialLinks           []string
+	DefaultSocialImageURL string
 }
 
 type ArticleCard struct {
