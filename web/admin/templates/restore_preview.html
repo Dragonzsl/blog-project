@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>恢复预览 · {{.Content.Title}} · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}<main class="content-shell version-shell">
+  <div class="page-heading"><div><p class="eyebrow">Restore preview</p><h1>确认恢复 #{{.Revision.Number}}。</h1><p class="heading-support">这会把历史内容载入当前编辑状态，并创建一个新的 restore 版本；不会自动发布，也不会改写历史。</p></div></div>
+  <section class="management-card"><div class="version-meta"><span>{{.Revision.Title}}</span><span>/{{.Revision.Slug}}</span><span>{{.Revision.CreatedAt.Format "2006-01-02 15:04 UTC"}}</span></div>{{if .Revision.Excerpt}}<p class="version-detail-excerpt">{{.Revision.Excerpt}}</p>{{end}}<pre class="version-body">{{.Revision.BodyMarkdown}}</pre></section>
+  <div class="editor-actions"><a class="text-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">取消</a><form method="post" action="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions/{{.Revision.ID}}/restore"><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="lock_version" value="{{.Content.LockVersion}}"><button class="button-link" type="submit">确认恢复为新版本 →</button></form></div>
+</main>{{template "admin_footer" .}}</body></html>

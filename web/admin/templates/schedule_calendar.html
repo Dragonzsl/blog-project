@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>排程日历 · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}<main class="content-shell">
+  <div class="page-heading"><div><p class="eyebrow">Schedule calendar</p><h1>{{.Month}} 的排程。</h1><p class="heading-support">按站点时区 {{.Timezone}} 显示，数据范围固定为一个月。</p></div><a class="text-link" href="{{.Descriptor.ListURL}}">返回{{.Descriptor.Plural}} →</a></div>
+  <nav class="content-status-tabs" aria-label="排程月份"><a href="{{.Descriptor.ListURL}}/calendar?month={{.Month}}">当前月份</a><a href="{{.Descriptor.ListURL}}?status=scheduled">定时内容列表</a></nav>
+  <section class="article-table schedule-list" aria-label="定时内容">{{range .Items}}<article class="article-row"><div class="library-primary"><span class="status-label">定时发布</span><h2><a href="{{.EditURL}}">{{.Title}}</a></h2><p class="content-slug">{{.ScheduledAt}}</p></div></article>{{else}}<section class="empty-state"><h2>本月没有排程。</h2><p>设置定时发布时间后，内容会按站点时区显示在这里。</p></section>{{end}}</section>
+  {{if .HasMore}}<div class="notice warning">本月超过 200 项，只显示前 200 项。请按更小的日期范围继续查看。</div>{{end}}
+</main>{{template "admin_footer" .}}</body></html>

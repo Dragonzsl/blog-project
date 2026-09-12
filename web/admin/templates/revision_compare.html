@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>版本比较 · {{.Content.Title}} · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}<main class="content-shell version-shell">
+  <div class="page-heading"><div><p class="eyebrow">Revision compare</p><h1>{{.Content.Title}}的版本比较。</h1></div><a class="text-link" href="{{.Descriptor.ListURL}}/{{.Content.ID}}/versions">返回版本列表 →</a></div>
+  <div class="version-meta"><span>从 #{{.Comparison.From.Number}} 到 #{{.Comparison.To.Number}}</span><span>正文和元数据均为转义文本</span></div>
+  {{if .Comparison.Changes}}<section class="management-card"><h2>元数据变化</h2><div class="diff-fields">{{range .Comparison.Changes}}<article><strong>{{.Field}}</strong><del>{{.Before}}</del><ins>{{.After}}</ins></article>{{end}}</div></section>{{end}}
+  <section class="management-card"><h2>正文 diff</h2><div class="revision-diff" aria-label="正文版本差异">{{range .Comparison.BodyLines}}<div class="diff-line diff-{{.Kind}}"><span aria-hidden="true">{{if eq .Kind "added"}}+{{else if eq .Kind "removed"}}-{{else}} {{end}}</span><code>{{.Text}}</code></div>{{end}}</div></section>
+</main>{{template "admin_footer" .}}</body></html>

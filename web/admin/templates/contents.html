@@ -24,11 +24,12 @@
       {{if or .Filter.Query (ne .Filter.Status "all") .Filter.Category .Filter.Tag}}<a class="clear-filter" href="{{.Descriptor.ListURL}}">清空</a>{{end}}
     </form>
 
-    <div id="content-results" class="library-summary" tabindex="-1"><span>共 {{.Pagination.Total}} 项{{if .Filter.Query}}，匹配“{{.Filter.Query}}”{{end}}</span><span>第 {{.Pagination.Page}} / {{if .Pagination.PageCount}}{{.Pagination.PageCount}}{{else}}1{{end}} 页</span></div>
+    <form class="management-card bulk-toolbar" method="post" action="{{.Descriptor.ListURL}}/bulk" data-submit-feedback><input type="hidden" name="csrf_token" value="{{.CSRF}}"><input type="hidden" name="operation_key" value="{{.BulkOperationKey}}"><div class="library-summary"><span>共 {{.Pagination.Total}} 项{{if .Filter.Query}}，匹配“{{.Filter.Query}}”{{end}}</span><span>单次最多选择 50 项</span></div><div class="bulk-controls"><label>批量操作<select name="bulk_action" required><option value="">选择操作</option><option value="publish">立即发布</option><option value="schedule">设置定时发布</option><option value="cancel_schedule">取消定时</option><option value="unpublish">撤回发布</option><option value="trash">移入回收站</option></select></label><label>定时发布时间（仅设置定时）<input type="datetime-local" name="scheduled_at"></label><button class="button-link small" type="submit">应用到已选内容</button><a class="text-link" href="{{.Descriptor.ListURL}}/calendar">查看排程日历 →</a></div>
+    <div id="content-results" class="library-summary" tabindex="-1"><span>当前页选择后再提交</span><span>第 {{.Pagination.Page}} / {{if .Pagination.PageCount}}{{.Pagination.PageCount}}{{else}}1{{end}} 页</span></div>
     {{if .Contents}}
     <div class="article-table library-table" aria-label="内容列表">
       {{range .Contents}}<article class="article-row library-row">
-        <div class="library-primary"><div class="library-row-top"><span class="status-label {{if .Published}}published{{end}}">{{.Status}}</span>{{if .CategoryName}}<span class="row-taxonomy">{{.CategoryName}}</span>{{end}}{{range .Tags}}<span class="row-taxonomy"># {{.}}</span>{{end}}</div><h2><a href="{{.EditURL}}">{{.Title}}</a></h2><p class="content-slug">{{$.Descriptor.PermalinkPrefix}}{{.Slug}}</p>{{if .Excerpt}}<p class="content-excerpt">{{.Excerpt}}</p>{{end}}</div>
+        <div class="library-primary"><label class="bulk-select"><input type="checkbox" name="content_ids" value="{{.ID}}"><span class="visually-hidden">选择 {{.Title}}</span></label><div class="library-row-top"><span class="status-label {{if .Published}}published{{end}}">{{.Status}}</span>{{if .CategoryName}}<span class="row-taxonomy">{{.CategoryName}}</span>{{end}}{{range .Tags}}<span class="row-taxonomy"># {{.}}</span>{{end}}</div><h2><a href="{{.EditURL}}">{{.Title}}</a></h2><p class="content-slug">{{$.Descriptor.PermalinkPrefix}}{{.Slug}}</p>{{if .Excerpt}}<p class="content-excerpt">{{.Excerpt}}</p>{{end}}</div>
         <div class="library-secondary"><div class="library-facts"><span class="metadata-unit">{{.WordCount}} 字</span>{{if .ReadingMinutes}}<span class="metadata-unit">{{.ReadingMinutes}} 分钟阅读</span>{{end}}{{if .PublishedAt}}<span class="metadata-unit">发布于 {{.PublishedAt}}</span>{{end}}<span class="metadata-unit">编辑于 {{.UpdatedAt}}</span></div><div class="row-meta"><a href="{{.EditURL}}">编辑</a><a href="{{.PreviewURL}}" target="_blank" rel="noreferrer">预览</a><a href="{{.VersionsURL}}">版本</a>{{if .HasPublicURL}}<a href="{{.PublicURL}}" target="_blank" rel="noreferrer">公开页 ↗</a>{{end}}</div></div>
       </article>{{end}}
     </div>
@@ -36,6 +37,7 @@
     {{else}}
     <section class="empty-state library-empty"><span aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M5 5.5h14v13H5zM8 3.5v4M16 3.5v4M8 11h8M8 15h5"/></svg></span><h2>{{if .Filter.Query}}没有匹配的{{.Descriptor.Singular}}{{else}}还没有{{.Descriptor.Singular}}{{end}}。</h2><p>{{if .Filter.Query}}换个关键词或清除筛选，看看其他内容。{{else}}创建草稿，预览确认后再公开发布。{{end}}</p>{{if .Filter.Query}}<a class="button-link" href="{{.Descriptor.ListURL}}">查看全部{{.Descriptor.Plural}} →</a>{{else}}<a class="button-link" href="{{.Descriptor.CreateURL}}">创建第一项 →</a>{{end}}</section>
     {{end}}
+    </form>
   </main>
   {{template "admin_footer" .}}
 </body>

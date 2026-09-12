@@ -41,8 +41,19 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 		return Article{}, fmt.Errorf("begin %s creation: %w", kind, err)
 	}
 	defer tx.Rollback()
-	if err := r.resolveCoverMediaTx(ctx, tx, &revision); err != nil {
+	contentID, err := r.createDraftTx(ctx, tx, kind, publicID, revision, categoryID, tagIDs, now)
+	if err != nil {
 		return Article{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("commit %s creation: %w", kind, err)
+	}
+	return r.Content(ctx, kind, contentID)
+}
+
+func (r *Repository) createDraftTx(ctx context.Context, tx *sql.Tx, kind string, publicID []byte, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time) (int64, error) {
+	if err := r.resolveCoverMediaTx(ctx, tx, &revision); err != nil {
+		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO contents (
@@ -52,46 +63,43 @@ func (r *Repository) CreateDraft(ctx context.Context, kind string, publicID []by
 	`, publicID, kind, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt,
 		revision.SEOTitle, revision.SEODescription, revision.BodyMarkdown, nullableInt64(revision.CoverMediaID), millis(now), millis(now))
 	if err != nil {
-		return Article{}, mapWriteError(err)
+		return 0, mapWriteError(err)
 	}
 	contentID, err := result.LastInsertId()
 	if err != nil {
-		return Article{}, fmt.Errorf("read %s ID: %w", kind, err)
+		return 0, fmt.Errorf("read %s ID: %w", kind, err)
 	}
 	if kind == "article" {
 		revision.CategoryPublicID, revision.TagPublicIDsJSON, err = r.organization.ReplaceArticleTaxonomyTx(ctx, tx, contentID, categoryID, tagIDs, now)
 		if err != nil {
-			return Article{}, err
+			return 0, err
 		}
 	} else {
 		revision.TagPublicIDsJSON = "[]"
 	}
 	coverPublicID, err := validateCoverMediaTx(ctx, tx, revision.CoverMediaID)
 	if err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	revision.CoverMediaPublicID = coverPublicID
 	revision.CoverSnapshotVersion = 1
 	if err := r.replaceMediaReferences(ctx, tx, contentID, revision.BodyMarkdown, revision.CoverMediaID, now); err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	revisionID, err := insertRevision(ctx, tx, contentID, 1, revision, now)
 	if err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, "UPDATE contents SET current_revision_id = ? WHERE id = ?", revisionID, contentID); err != nil {
-		return Article{}, fmt.Errorf("attach current revision: %w", err)
+		return 0, fmt.Errorf("attach current revision: %w", err)
 	}
 	if err := reservePath(ctx, tx, contentID, kind, revision.Slug, revision.SlugKey, "draft", now); err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".created", kind, publicID, now); err != nil {
-		return Article{}, err
+		return 0, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Article{}, fmt.Errorf("commit %s creation: %w", kind, err)
-	}
-	return r.Content(ctx, kind, contentID)
+	return contentID, nil
 }
 
 func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedVersion int64, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time, configuredLimit ...int) (Article, error) {
@@ -100,33 +108,45 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 		return Article{}, fmt.Errorf("begin %s update: %w", kind, err)
 	}
 	defer tx.Rollback()
+	contentID, err := r.updateDraftTx(ctx, tx, kind, id, expectedVersion, revision, categoryID, tagIDs, now, configuredLimit...)
+	if err != nil {
+		return Article{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("commit %s update: %w", kind, err)
+	}
+	return r.Content(ctx, kind, contentID)
+}
+
+func (r *Repository) updateDraftTx(ctx context.Context, tx *sql.Tx, kind string, id, expectedVersion int64, revision revisionInput, categoryID int64, tagIDs []int64, now time.Time, configuredLimit ...int) (int64, error) {
 	var currentSlugKey string
 	var currentVersion, nextRevision int64
 	var currentCoverID sql.NullInt64
 	var publicID []byte
+	var err error
 	err = tx.QueryRowContext(ctx, `
 		SELECT slug_key, lock_version, public_id, cover_media_id,
 		       (SELECT COALESCE(MAX(revision_number), 0) + 1 FROM content_revisions WHERE content_id = contents.id)
 		FROM contents WHERE id = ? AND kind = ? AND trashed_at IS NULL
 	`, id, kind).Scan(&currentSlugKey, &currentVersion, &publicID, &currentCoverID, &nextRevision)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Article{}, ErrNotFound
+		return 0, ErrNotFound
 	}
 	if err != nil {
-		return Article{}, fmt.Errorf("read %s for update: %w", kind, err)
+		return 0, fmt.Errorf("read %s for update: %w", kind, err)
 	}
 	if currentVersion != expectedVersion {
-		return Article{}, ErrConflict
+		return 0, ErrConflict
 	}
 	if revision.SlugKey != currentSlugKey {
 		if err := reservePath(ctx, tx, id, kind, revision.Slug, revision.SlugKey, "draft", now); err != nil {
-			return Article{}, err
+			return 0, err
 		}
 	}
 	if kind == "article" {
 		revision.CategoryPublicID, revision.TagPublicIDsJSON, err = r.organization.ReplaceArticleTaxonomyTx(ctx, tx, id, categoryID, tagIDs, now)
 		if err != nil {
-			return Article{}, err
+			return 0, err
 		}
 	} else {
 		revision.TagPublicIDsJSON = "[]"
@@ -137,20 +157,20 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 		revision.CoverMediaID = currentCoverID.Int64
 	}
 	if err := r.resolveCoverMediaTx(ctx, tx, &revision); err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	coverPublicID, err := validateCoverMediaTx(ctx, tx, revision.CoverMediaID)
 	if err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	revision.CoverMediaPublicID = coverPublicID
 	revision.CoverSnapshotVersion = 1
 	if err := r.replaceMediaReferences(ctx, tx, id, revision.BodyMarkdown, revision.CoverMediaID, now); err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	revisionID, err := insertRevision(ctx, tx, id, nextRevision, revision, now)
 	if err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE contents
@@ -160,31 +180,60 @@ func (r *Repository) UpdateDraft(ctx context.Context, kind string, id, expectedV
 	`, revision.Slug, revision.SlugKey, revision.Title, revision.Excerpt, revision.SEOTitle,
 		revision.SEODescription, revision.BodyMarkdown, nullableInt64(revision.CoverMediaID), revisionID, millis(now), id, kind, expectedVersion)
 	if err != nil {
-		return Article{}, mapWriteError(err)
+		return 0, mapWriteError(err)
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		if err != nil {
-			return Article{}, fmt.Errorf("check %s update: %w", kind, err)
+			return 0, fmt.Errorf("check %s update: %w", kind, err)
 		}
-		return Article{}, ErrConflict
+		return 0, ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, "DELETE FROM editing_snapshots WHERE content_id=?", id); err != nil {
-		return Article{}, err
+		return 0, err
 	}
 	limit := 50
 	if len(configuredLimit) > 0 {
 		limit = configuredLimit[0]
 	}
 	if err := pruneRevisions(ctx, tx, id, limit); err != nil {
-		return Article{}, fmt.Errorf("prune content revisions: %w", err)
+		return 0, fmt.Errorf("prune content revisions: %w", err)
 	}
 	if err := insertAudit(ctx, tx, "publishing."+kind+".saved", kind, publicID, now); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+type draftRevisionUpdate struct {
+	revision   revisionInput
+	categoryID int64
+	tagIDs     []int64
+}
+
+// CreateDraftWithRevisions imports one content item and its historical draft
+// revisions in a single write transaction. Archive adapters use this boundary
+// so a later revision failure cannot leave a half-imported content item.
+func (r *Repository) CreateDraftWithRevisions(ctx context.Context, kind string, publicID []byte, first revisionInput, firstCategoryID int64, firstTagIDs []int64, updates []draftRevisionUpdate, now time.Time, revisionLimit int) (Article, error) {
+	tx, err := r.database.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return Article{}, fmt.Errorf("begin %s archive import: %w", kind, err)
+	}
+	defer tx.Rollback()
+	contentID, err := r.createDraftTx(ctx, tx, kind, publicID, first, firstCategoryID, firstTagIDs, now)
+	if err != nil {
 		return Article{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return Article{}, fmt.Errorf("commit %s update: %w", kind, err)
+	version := int64(1)
+	for _, update := range updates {
+		if _, err := r.updateDraftTx(ctx, tx, kind, contentID, version, update.revision, update.categoryID, update.tagIDs, now, revisionLimit); err != nil {
+			return Article{}, err
+		}
+		version++
 	}
-	return r.Content(ctx, kind, id)
+	if err := tx.Commit(); err != nil {
+		return Article{}, fmt.Errorf("commit %s archive import: %w", kind, err)
+	}
+	return r.Content(ctx, kind, contentID)
 }
 
 func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersion int64, now time.Time) (Article, error) {
@@ -281,6 +330,14 @@ func (r *Repository) Publish(ctx context.Context, kind string, id, expectedVersi
 
 func (r *Repository) Content(ctx context.Context, kind string, id int64) (Article, error) {
 	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, contentSelect+" WHERE c.id = ? AND c.kind = ? AND c.trashed_at IS NULL", id, kind))
+	if err != nil {
+		return Article{}, err
+	}
+	return r.enrichTaxonomy(ctx, content)
+}
+
+func (r *Repository) TrashedContent(ctx context.Context, kind string, id int64) (Article, error) {
+	content, err := scanContent(r.database.Reader.QueryRowContext(ctx, contentSelect+" WHERE c.id=? AND c.kind=? AND c.trashed_at IS NOT NULL", id, kind))
 	if err != nil {
 		return Article{}, err
 	}
@@ -560,6 +617,132 @@ func (r *Repository) PublicArticleCardsByIDs(ctx context.Context, ids []int64) (
 
 func (r *Repository) PublishedPages(ctx context.Context, limit int) ([]Article, error) {
 	return r.publishedContents(ctx, "page", limit)
+}
+
+func (r *Repository) PublishedContentCursor(ctx context.Context, query PublicContentQuery) (PublicContentPage, error) {
+	limit := query.Limit
+	if limit < 1 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	clauses := []string{"c.kind=?", "c.status='published'", "c.trashed_at IS NULL"}
+	args := []any{query.Kind}
+	if query.Cursor != nil && !query.Cursor.PublishedAt.IsZero() && len(query.Cursor.PublicID) == 16 {
+		clauses = append(clauses, "(c.published_at < ? OR (c.published_at = ? AND c.public_id < ?))")
+		published := millis(query.Cursor.PublishedAt)
+		args = append(args, published, published, query.Cursor.PublicID)
+	}
+	if query.UpdatedSince != nil && !query.UpdatedSince.IsZero() {
+		clauses = append(clauses, "r.created_at >= ?")
+		args = append(args, millis(*query.UpdatedSince))
+	}
+	if category := strings.TrimSpace(query.CategorySlug); category != "" {
+		clauses = append(clauses, "r.category_public_id=(SELECT public_id FROM categories WHERE slug_key=? LIMIT 1)")
+		args = append(args, strings.ToLower(category))
+	}
+	if tag := strings.TrimSpace(query.TagSlug); tag != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM tags filter_tag WHERE filter_tag.slug_key=? AND EXISTS (SELECT 1 FROM json_each(r.tag_public_ids_json) WHERE json_each.value=lower(hex(filter_tag.public_id))))")
+		args = append(args, strings.ToLower(tag))
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, publicCardSelect+" WHERE "+strings.Join(clauses, " AND ")+" ORDER BY c.published_at DESC,c.public_id DESC LIMIT ?", append(args, limit+1)...)
+	if err != nil {
+		return PublicContentPage{}, fmt.Errorf("list published content cursor: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Article, 0, limit)
+	hasMore := false
+	for rows.Next() {
+		content, err := scanContent(rows)
+		if err != nil {
+			return PublicContentPage{}, err
+		}
+		if len(items) == limit {
+			hasMore = true
+			continue
+		}
+		items = append(items, content)
+	}
+	if err := rows.Err(); err != nil {
+		return PublicContentPage{}, err
+	}
+	if err := r.enrichPublishedTaxonomyBatch(ctx, items); err != nil {
+		return PublicContentPage{}, err
+	}
+	return PublicContentPage{Contents: items, HasMore: hasMore}, nil
+}
+
+func (r *Repository) PublishedContentPage(ctx context.Context, kind string, page, perPage int) (PublicContentPage, error) {
+	if page < 1 {
+		page = 1
+	}
+	if page > 100 {
+		page = 100
+	}
+	if perPage < 1 {
+		perPage = 20
+	}
+	if perPage > 100 {
+		perPage = 100
+	}
+	offset := (page - 1) * perPage
+	rows, err := r.database.Reader.QueryContext(ctx, publicCardSelect+" WHERE c.kind=? AND c.status='published' AND c.trashed_at IS NULL ORDER BY c.published_at DESC,c.public_id DESC LIMIT ? OFFSET ?", kind, perPage+1, offset)
+	if err != nil {
+		return PublicContentPage{}, fmt.Errorf("list published content page: %w", err)
+	}
+	defer rows.Close()
+	items := make([]Article, 0, perPage)
+	hasMore := false
+	for rows.Next() {
+		content, err := scanContent(rows)
+		if err != nil {
+			return PublicContentPage{}, err
+		}
+		if len(items) == perPage {
+			hasMore = true
+			continue
+		}
+		items = append(items, content)
+	}
+	if err := rows.Err(); err != nil {
+		return PublicContentPage{}, err
+	}
+	if err := r.enrichPublishedTaxonomyBatch(ctx, items); err != nil {
+		return PublicContentPage{}, err
+	}
+	return PublicContentPage{Contents: items, HasMore: hasMore}, nil
+}
+
+func (r *Repository) ScheduledContents(ctx context.Context, kind string, start, end time.Time, limit int) ([]ScheduledContent, bool, error) {
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows, err := r.database.Reader.QueryContext(ctx, contentListSelect+` WHERE c.kind=? AND c.status='scheduled' AND c.trashed_at IS NULL AND c.scheduled_at>=? AND c.scheduled_at<? ORDER BY c.scheduled_at ASC,c.id ASC LIMIT ?`, kind, millis(start), millis(end), limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	items := make([]ScheduledContent, 0, limit)
+	hasMore := false
+	for rows.Next() {
+		content, err := scanContent(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(items) == limit {
+			hasMore = true
+			continue
+		}
+		items = append(items, ScheduledContent{Article: content})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	return items, hasMore, nil
 }
 
 func (r *Repository) publishedContents(ctx context.Context, kind string, limit int) ([]Article, error) {

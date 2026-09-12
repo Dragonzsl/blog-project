@@ -2,6 +2,8 @@ package publishing
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
@@ -69,6 +71,7 @@ type adminContentStatusTab struct {
 
 type adminContentView struct {
 	ID             int64
+	LockVersion    int64
 	Title          string
 	Slug           string
 	Excerpt        string
@@ -127,9 +130,13 @@ func (h *HTTPHandler) RegisterAdmin(router chi.Router) {
 		router.Post(base+"/{"+parameter+"}/unpublish", func(w http.ResponseWriter, r *http.Request) { h.contentUnpublish(w, r, kind) })
 		router.Post(base+"/{"+parameter+"}/trash", func(w http.ResponseWriter, r *http.Request) { h.contentTrash(w, r, kind) })
 		router.Get(base+"/{"+parameter+"}/versions", func(w http.ResponseWriter, r *http.Request) { h.contentVersions(w, r, kind) })
+		router.Get(base+"/{"+parameter+"}/versions/compare", func(w http.ResponseWriter, r *http.Request) { h.contentCompare(w, r, kind) })
 		router.Get(base+"/{"+parameter+"}/versions/{revisionID}", func(w http.ResponseWriter, r *http.Request) { h.contentVersion(w, r, kind) })
+		router.Get(base+"/{"+parameter+"}/versions/{revisionID}/restore", func(w http.ResponseWriter, r *http.Request) { h.contentRestorePreview(w, r, kind) })
 		router.Post(base+"/{"+parameter+"}/versions/{revisionID}/restore", func(w http.ResponseWriter, r *http.Request) { h.contentRestoreRevision(w, r, kind) })
 		router.Post(base+"/{"+parameter+"}/snapshot", func(w http.ResponseWriter, r *http.Request) { h.contentSaveSnapshot(w, r, kind) })
+		router.Post(base+"/bulk", func(w http.ResponseWriter, r *http.Request) { h.contentBulk(w, r, kind) })
+		router.Get(base+"/calendar", func(w http.ResponseWriter, r *http.Request) { h.scheduleCalendar(w, r, kind) })
 	}
 }
 
@@ -146,14 +153,15 @@ func (h *HTTPHandler) contentList(w http.ResponseWriter, r *http.Request, kind s
 		views = append(views, newAdminContentView(descriptor, content))
 	}
 	data := map[string]any{
-		"Contents":     views,
-		"Descriptor":   descriptor,
-		"Pagination":   page.Pagination,
-		"Filter":       filter,
-		"StatusTabs":   adminContentStatusTabs(descriptor, filter),
-		"AdminSection": kind + "s",
-		"PreviousURL":  adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page-1),
-		"NextURL":      adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page+1),
+		"Contents":         views,
+		"Descriptor":       descriptor,
+		"Pagination":       page.Pagination,
+		"Filter":           filter,
+		"StatusTabs":       adminContentStatusTabs(descriptor, filter),
+		"AdminSection":     kind + "s",
+		"PreviousURL":      adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page-1),
+		"NextURL":          adminContentURL(descriptor.ListURL, filter, filter.Status, page.Pagination.Page+1),
+		"BulkOperationKey": newBulkOperationKey(),
 	}
 	if kind == "article" {
 		categories, err := h.service.Categories(r.Context())
@@ -382,6 +390,153 @@ func (h *HTTPHandler) contentVersions(w http.ResponseWriter, r *http.Request, ki
 		})
 	}
 	h.renderAdmin(w, r, "versions.html", map[string]any{"Content": content, "Revisions": views, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
+}
+
+func (h *HTTPHandler) contentCompare(w http.ResponseWriter, r *http.Request, kind string) {
+	id, err := contentID(r, kind)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	fromID, _ := strconv.ParseInt(r.URL.Query().Get("from"), 10, 64)
+	toID, _ := strconv.ParseInt(r.URL.Query().Get("to"), 10, 64)
+	if fromID < 1 || toID < 1 || fromID == toID {
+		http.Error(w, "请选择两个不同的版本", http.StatusBadRequest)
+		return
+	}
+	content, err := h.content(r.Context(), kind, id)
+	if err != nil {
+		h.handleReadError(w, r, err)
+		return
+	}
+	comparison, err := h.service.CompareRevisions(r.Context(), kind, id, fromID, toID)
+	if err != nil {
+		if errors.Is(err, ErrDiffTooLarge) {
+			http.Error(w, "版本正文过大，暂不生成比较结果", http.StatusRequestEntityTooLarge)
+			return
+		}
+		h.handleReadError(w, r, err)
+		return
+	}
+	h.renderAdmin(w, r, "revision_compare.html", map[string]any{"Content": content, "Comparison": comparison, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
+}
+
+func (h *HTTPHandler) contentRestorePreview(w http.ResponseWriter, r *http.Request, kind string) {
+	id, err := contentID(r, kind)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	revisionID, err := strconv.ParseInt(chi.URLParam(r, "revisionID"), 10, 64)
+	if err != nil || revisionID < 1 {
+		http.NotFound(w, r)
+		return
+	}
+	content, err := h.content(r.Context(), kind, id)
+	if err != nil {
+		h.handleReadError(w, r, err)
+		return
+	}
+	revision, err := h.service.Revision(r.Context(), kind, id, revisionID)
+	if err != nil {
+		h.handleReadError(w, r, err)
+		return
+	}
+	h.renderAdmin(w, r, "restore_preview.html", map[string]any{"Content": content, "Revision": revision, "Descriptor": describeContent(kind), "AdminSection": kind + "s"})
+}
+
+func (h *HTTPHandler) contentBulk(w http.ResponseWriter, r *http.Request, kind string) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil || !h.security.VerifyParsedCSRF(w, r) {
+		return
+	}
+	ids := make([]int64, 0, len(r.Form["content_ids"]))
+	for _, value := range r.Form["content_ids"] {
+		if id, err := strconv.ParseInt(value, 10, 64); err == nil && id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	action := strings.TrimSpace(r.FormValue("bulk_action"))
+	var scheduleAt *time.Time
+	if action == "schedule" {
+		timezone, err := h.siteNamer.Timezone(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		location, err := time.LoadLocation(timezone)
+		if err != nil {
+			http.Error(w, "站点时区无效", http.StatusBadRequest)
+			return
+		}
+		value, err := time.ParseInLocation("2006-01-02T15:04", r.FormValue("scheduled_at"), location)
+		if err != nil || !value.After(time.Now().In(location)) {
+			http.Error(w, "定时发布时间必须是未来的有效时间", http.StatusBadRequest)
+			return
+		}
+		value = value.UTC()
+		scheduleAt = &value
+	}
+	key := strings.TrimSpace(r.FormValue("operation_key"))
+	if key == "" {
+		raw := make([]byte, 16)
+		if _, err := rand.Read(raw); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		key = "admin-bulk-" + hex.EncodeToString(raw)
+	}
+	result, err := h.service.ApplyBulk(r.Context(), BulkActionRequest{Kind: kind, Action: action, IDs: ids, ScheduleAt: scheduleAt, OperationKey: key})
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, ErrBulkInProgress) {
+			status = http.StatusConflict
+		}
+		http.Error(w, err.Error(), status)
+		return
+	}
+	h.renderAdmin(w, r, "bulk_result.html", map[string]any{"Descriptor": describeContent(kind), "Result": result, "AdminSection": kind + "s"})
+}
+
+func newBulkOperationKey() string {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "admin-bulk-fallback"
+	}
+	return "admin-bulk-" + hex.EncodeToString(raw)
+}
+
+func (h *HTTPHandler) scheduleCalendar(w http.ResponseWriter, r *http.Request, kind string) {
+	timezone, err := h.siteNamer.Timezone(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	start, err := time.ParseInLocation("2006-01", r.URL.Query().Get("month"), location)
+	if err != nil {
+		now := time.Now().In(location)
+		start = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, location)
+	}
+	end := start.AddDate(0, 1, 0)
+	items, hasMore, err := h.service.ScheduledContents(r.Context(), kind, start.UTC(), end.UTC(), 200)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	views := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		at := ""
+		if item.ScheduledAt != nil {
+			at = item.ScheduledAt.In(location).Format("2006-01-02 15:04 MST")
+		}
+		views = append(views, map[string]any{"ID": item.ID, "Title": item.Title, "ScheduledAt": at, "EditURL": fmt.Sprintf("/admin/%ss/%d/edit", kind, item.ID)})
+	}
+	h.renderAdmin(w, r, "schedule_calendar.html", map[string]any{"Descriptor": describeContent(kind), "Month": start.Format("2006-01"), "Items": views, "HasMore": hasMore, "Timezone": timezone, "AdminSection": kind + "s"})
 }
 
 func (h *HTTPHandler) contentRestoreRevision(w http.ResponseWriter, r *http.Request, kind string) {
@@ -792,6 +947,7 @@ func adminContentURL(base string, filter AdminContentFilter, status string, page
 func newAdminContentView(descriptor contentDescriptor, content Article) adminContentView {
 	view := adminContentView{
 		ID:             content.ID,
+		LockVersion:    content.LockVersion,
 		Title:          content.Title,
 		Slug:           content.Slug,
 		Excerpt:        content.Excerpt,

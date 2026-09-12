@@ -14,7 +14,7 @@ import (
 func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64) ([]Revision, error) {
 	rows, err := r.database.Reader.QueryContext(ctx, `
 		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
-		       revision.title, revision.slug, revision.excerpt, '', '', '',
+		       revision.title, revision.slug, revision.excerpt, revision.seo_title, revision.seo_description, '',
 		       revision.cover_media_public_id, revision.cover_snapshot_version,
 		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
 		       revision.is_publication_checkpoint, revision.created_at
@@ -24,6 +24,41 @@ func (r *Repository) Revisions(ctx context.Context, kind string, contentID int64
 		ORDER BY revision.revision_number DESC`, contentID, kind)
 	if err != nil {
 		return nil, fmt.Errorf("list content revisions: %w", err)
+	}
+	defer rows.Close()
+	var revisions []Revision
+	for rows.Next() {
+		revision, err := scanRevision(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(revisions) == 0 {
+		return nil, ErrNotFound
+	}
+	return revisions, nil
+}
+
+// RevisionsWithBodies is reserved for bounded offline/export workflows. The
+// normal revision index intentionally omits Markdown so an admin list cannot
+// load every historical body into memory.
+func (r *Repository) RevisionsWithBodies(ctx context.Context, kind string, contentID int64) ([]Revision, error) {
+	rows, err := r.database.Reader.QueryContext(ctx, `
+		SELECT revision.id, revision.public_id, revision.content_id, revision.revision_number,
+		       revision.title, revision.slug, revision.excerpt, revision.seo_title, revision.seo_description, revision.body_markdown,
+		       revision.cover_media_public_id, revision.cover_snapshot_version,
+		       revision.category_public_id, revision.tag_public_ids_json, revision.reason,
+		       revision.is_publication_checkpoint, revision.created_at
+		FROM content_revisions revision
+		JOIN contents content ON content.id = revision.content_id
+		WHERE revision.content_id = ? AND content.kind = ? AND content.trashed_at IS NULL
+		ORDER BY revision.revision_number DESC`, contentID, kind)
+	if err != nil {
+		return nil, fmt.Errorf("list content revision bodies: %w", err)
 	}
 	defer rows.Close()
 	var revisions []Revision

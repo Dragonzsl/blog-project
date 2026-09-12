@@ -59,6 +59,25 @@ type PublicArticleNavigation struct {
 	Related  []Article
 }
 
+type PublicContentCursor struct {
+	PublishedAt time.Time
+	PublicID    []byte
+}
+
+type PublicContentQuery struct {
+	Kind         string
+	Limit        int
+	Cursor       *PublicContentCursor
+	CategorySlug string
+	TagSlug      string
+	UpdatedSince *time.Time
+}
+
+type PublicContentPage struct {
+	Contents []Article
+	HasMore  bool
+}
+
 // AdminContentFilter contains the bounded, user-controlled filters supported
 // by the content workspace. The repository normalizes Status and Sort before
 // using them in SQL so callers can never inject an ORDER BY fragment.

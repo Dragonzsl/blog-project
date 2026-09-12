@@ -170,6 +170,50 @@ func TestSlugIsGeneratedFromTitleWhenRequested(t *testing.T) {
 	}
 }
 
+func TestArchiveRevisionImportRollsBackAsOneUnit(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+
+	_, err := service.ImportDraftRevisions(ctx, "article", []DraftInput{
+		{Title: "可回滚归档", Slug: "atomic-archive", BodyMarkdown: "初始正文"},
+		{Title: "可回滚归档", Slug: "atomic-archive", BodyMarkdown: "后续正文", CoverMediaPublicID: make([]byte, 16)},
+	})
+	if err == nil {
+		t.Fatal("ImportDraftRevisions() unexpectedly succeeded")
+	}
+	items, err := service.Articles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("partially imported contents = %+v", items)
+	}
+}
+
+func TestScheduledContentsHasMoreOnlyWhenAnExtraRowExists(t *testing.T) {
+	ctx := context.Background()
+	service, _ := newPublishingTestService(t)
+	now := time.Date(2026, time.August, 23, 15, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	for _, slug := range []string{"calendar-one", "calendar-two"} {
+		content, err := service.CreateDraft(ctx, DraftInput{Title: slug, Slug: slug, BodyMarkdown: "正文"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Schedule(ctx, "article", content.ID, content.LockVersion, now.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, hasMore, err := service.ScheduledContents(ctx, "article", now, now.Add(2*time.Hour), 1)
+	if err != nil || len(items) != 1 || !hasMore {
+		t.Fatalf("limited calendar page = %d/%v err=%v", len(items), hasMore, err)
+	}
+	items, hasMore, err = service.ScheduledContents(ctx, "article", now, now.Add(2*time.Hour), 2)
+	if err != nil || len(items) != 2 || hasMore {
+		t.Fatalf("exact calendar page = %d/%v err=%v", len(items), hasMore, err)
+	}
+}
+
 func TestPageUsesRootPermalinkAndSystemPathsStayReserved(t *testing.T) {
 	ctx := context.Background()
 	service, _ := newPublishingTestService(t)

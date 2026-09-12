@@ -79,6 +79,50 @@ func (s *Service) CreatePageDraft(ctx context.Context, input DraftInput) (Articl
 	return s.createDraft(ctx, "page", input)
 }
 
+// ImportDraftRevisions creates one draft and all of its historical revisions
+// atomically. Offline archive imports use this boundary instead of chaining
+// public editor operations, so a failed later revision rolls back the whole
+// newly imported content item.
+func (s *Service) ImportDraftRevisions(ctx context.Context, kind string, inputs []DraftInput) (Article, error) {
+	if !validKind(kind) || len(inputs) == 0 {
+		return Article{}, ErrNotFound
+	}
+	now := s.now()
+	contentPublicID, err := platformid.NewPublicID(now)
+	if err != nil {
+		return Article{}, err
+	}
+	revisions := make([]revisionInput, len(inputs))
+	updates := make([]draftRevisionUpdate, 0, len(inputs)-1)
+	for index, input := range inputs {
+		input, err = validateInput(kind, input)
+		if err != nil {
+			return Article{}, err
+		}
+		revisionPublicID, idErr := platformid.NewPublicID(now)
+		if idErr != nil {
+			return Article{}, idErr
+		}
+		revisions[index] = revisionInput{
+			PublicID:           revisionPublicID,
+			Title:              input.Title,
+			Slug:               input.Slug,
+			SlugKey:            input.slugKey,
+			Excerpt:            input.Excerpt,
+			SEOTitle:           input.SEOTitle,
+			SEODescription:     input.SEODescription,
+			BodyMarkdown:       input.BodyMarkdown,
+			CoverMediaID:       input.CoverMediaID,
+			CoverMediaPublicID: input.CoverMediaPublicID,
+			Reason:             "import",
+		}
+		if index > 0 {
+			updates = append(updates, draftRevisionUpdate{revision: revisions[index], categoryID: input.CategoryID, tagIDs: append([]int64(nil), input.TagIDs...)})
+		}
+	}
+	return s.repository.CreateDraftWithRevisions(ctx, kind, contentPublicID, revisions[0], inputs[0].CategoryID, inputs[0].TagIDs, updates, now, s.options.RevisionLimit)
+}
+
 func (s *Service) createDraft(ctx context.Context, kind string, input DraftInput) (Article, error) {
 	input, err := validateInput(kind, input)
 	if err != nil {
@@ -334,6 +378,31 @@ func (s *Service) Revisions(ctx context.Context, kind string, contentID int64) (
 	return s.repository.Revisions(ctx, kind, contentID)
 }
 
+func (s *Service) RevisionsWithBodies(ctx context.Context, kind string, contentID int64) ([]Revision, error) {
+	if !validKind(kind) || contentID < 1 {
+		return nil, ErrNotFound
+	}
+	return s.repository.RevisionsWithBodies(ctx, kind, contentID)
+}
+
+// Redirects exposes the organization service through the application service
+// boundary for content archive export/import. Callers still receive the
+// organization model, while the archive adapter never reaches private tables.
+func (s *Service) Redirects(ctx context.Context, limit int) ([]organization.Redirect, error) {
+	return s.repository.organization.Redirects(ctx, limit)
+}
+
+func (s *Service) CreateRedirect(ctx context.Context, input organization.RedirectInput) error {
+	return s.repository.organization.CreateRedirect(ctx, input)
+}
+
+// TaxonomyBySnapshot keeps archive/import adapters on the publishing service
+// boundary while resolving stable public taxonomy identities in the owning
+// organization module.
+func (s *Service) TaxonomyBySnapshot(ctx context.Context, categoryPublicID []byte, tagPublicIDsJSON string) (organization.Taxonomy, error) {
+	return s.repository.organization.TaxonomyBySnapshot(ctx, categoryPublicID, tagPublicIDsJSON)
+}
+
 func (s *Service) Revision(ctx context.Context, kind string, contentID, revisionID int64) (Revision, error) {
 	if !validKind(kind) || contentID < 1 || revisionID < 1 {
 		return Revision{}, ErrNotFound
@@ -559,6 +628,29 @@ func (s *Service) PublishedPages(ctx context.Context, limit int) ([]Article, err
 		limit = 100
 	}
 	return s.repository.PublishedPages(ctx, limit)
+}
+
+func (s *Service) PublishedContentCursor(ctx context.Context, query PublicContentQuery) (PublicContentPage, error) {
+	if !validKind(query.Kind) {
+		return PublicContentPage{}, ErrNotFound
+	}
+	if query.Limit < 1 {
+		query.Limit = 20
+	}
+	if query.Limit > 100 {
+		query.Limit = 100
+	}
+	if len(query.CategorySlug) > 120 || len(query.TagSlug) > 120 {
+		return PublicContentPage{}, ValidationError{Message: "公共内容筛选条件过长"}
+	}
+	return s.repository.PublishedContentCursor(ctx, query)
+}
+
+func (s *Service) PublishedContentPage(ctx context.Context, kind string, page, perPage int) (PublicContentPage, error) {
+	if !validKind(kind) {
+		return PublicContentPage{}, ErrNotFound
+	}
+	return s.repository.PublishedContentPage(ctx, kind, page, perPage)
 }
 
 func (s *Service) Categories(ctx context.Context) ([]organization.Category, error) {

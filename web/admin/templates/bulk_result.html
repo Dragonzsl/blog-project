@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>批量操作 · {{.SiteName}}</title><link rel="stylesheet" href="/admin/assets/admin.css?v=8"></head>
+<body class="admin-page">{{template "admin_header" .}}<main class="content-shell">
+  <div class="page-heading"><div><p class="eyebrow">Bounded bulk action</p><h1>批量操作结果。</h1><p class="heading-support">每个项目都重新检查了当前状态和锁版本；部分成功不会被自动回滚。</p></div><a class="text-link" href="{{.Descriptor.ListURL}}">返回{{.Descriptor.Plural}} →</a></div>
+  <section class="dashboard-stats"><div class="metric-card"><span class="metric-label">成功</span><strong>{{.Result.Succeeded}}</strong></div><div class="metric-card"><span class="metric-label">跳过</span><strong>{{.Result.Skipped}}</strong></div><div class="metric-card"><span class="metric-label">冲突</span><strong>{{.Result.Conflicts}}</strong></div><div class="metric-card metric-card-muted"><span class="metric-label">失败</span><strong>{{.Result.Failed}}</strong></div></section>
+  <section class="article-table"><div class="library-summary"><span>操作键：{{.Result.OperationKey}}</span><span>单次最多 50 项</span></div>{{range .Result.Items}}<article class="article-row"><div class="library-primary"><span class="status-label">{{.Status}}</span><h2>{{.Title}}</h2><p class="content-slug">#{{.ID}} · {{.PublicID}}</p>{{if .Error}}<p class="content-excerpt">{{.Error}}</p>{{end}}</div></article>{{end}}</section>
+</main>{{template "admin_footer" .}}</body></html>
