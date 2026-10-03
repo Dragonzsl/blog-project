@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/zhushilin/blog-project/internal/platform/database"
@@ -19,6 +20,7 @@ import (
 const themeSecretPlaceholder = "••••••"
 
 type ThemeCatalog struct {
+	operationMu   sync.Mutex
 	db            *database.DB
 	manager       *ThemeManager
 	mediaResolver ThemeMediaResolver
@@ -94,7 +96,15 @@ func (c *ThemeCatalog) Install(ctx context.Context, source io.Reader, options Th
 }
 
 func (c *ThemeCatalog) List(ctx context.Context) ([]ThemeRecord, error) {
-	rows, err := c.db.Reader.QueryContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes ORDER BY theme_id,version DESC`)
+	return c.list(ctx, false)
+}
+
+func (c *ThemeCatalog) ListRemoved(ctx context.Context) ([]ThemeRecord, error) {
+	return c.list(ctx, true)
+}
+
+func (c *ThemeCatalog) list(ctx context.Context, removed bool) ([]ThemeRecord, error) {
+	rows, err := c.db.Reader.QueryContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes WHERE (removed_at IS NOT NULL)=? ORDER BY theme_id,version DESC`, removed)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +171,7 @@ func (r *themeBytesReader) Read(p []byte) (int, error) {
 }
 
 func (c *ThemeCatalog) record(ctx context.Context, themeID, version string) (ThemeRecord, error) {
-	row := c.db.Reader.QueryRowContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes WHERE theme_id=? AND version=?`, themeID, version)
+	row := c.db.Reader.QueryRowContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes WHERE theme_id=? AND version=? AND removed_at IS NULL`, themeID, version)
 	record, err := scanThemeRecord(row)
 	if err == sql.ErrNoRows {
 		return ThemeRecord{}, fmt.Errorf("theme %s@%s is not installed", themeID, version)
@@ -217,6 +227,8 @@ func (c *ThemeCatalog) maskSettings(schema map[string]SettingDefinition, values 
 }
 
 func (c *ThemeCatalog) SaveSettings(ctx context.Context, themeID, version string, incoming map[string]any) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
 	record, err := c.record(ctx, themeID, version)
 	if err != nil {
 		return err
@@ -358,6 +370,8 @@ func equalFoldBytes(left, right string) bool {
 }
 
 func (c *ThemeCatalog) Activate(ctx context.Context, themeID, version string) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
 	record, err := c.record(ctx, themeID, version)
 	if err != nil {
 		return err
@@ -456,8 +470,10 @@ func (c *ThemeCatalog) restoreActiveRecord(ctx context.Context, previous sql.Nul
 }
 
 func (c *ThemeCatalog) Rollback(ctx context.Context) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
 	var previous sql.NullInt64
-	err := c.db.Reader.QueryRowContext(ctx, `SELECT history.previous_theme_id
+	err := c.db.Reader.QueryRowContext(ctx, `SELECT CASE WHEN EXISTS(SELECT 1 FROM themes previous WHERE previous.id=history.previous_theme_id AND previous.removed_at IS NULL) THEN history.previous_theme_id ELSE NULL END
 		FROM theme_activation_history history
 		JOIN themes active_theme ON active_theme.active=1 AND active_theme.id=history.active_theme_id
 		WHERE history.operation='activate' AND history.status='succeeded'
@@ -513,6 +529,8 @@ func (c *ThemeCatalog) Rollback(ctx context.Context) error {
 // Reconcile makes the database active row authoritative after startup. A
 // stale/corrupt marker therefore cannot select a different theme silently.
 func (c *ThemeCatalog) Reconcile(ctx context.Context) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
 	var record ThemeRecord
 	var active, installed int64
 	err := c.db.Reader.QueryRowContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes WHERE active=1`).Scan(&record.ID, &record.Manifest.ID, &record.Manifest.Name, &record.Manifest.Version, &record.Manifest.ThemeAPI, &record.Manifest.Core, &record.Path, &record.Checksum, &record.DirectoryChecksum, &record.ValidationStatus, &record.ValidationReport, &active, &installed)
@@ -570,3 +588,66 @@ func (c *ThemeCatalog) Theme(ctx context.Context, themeID, version string) (*The
 func ThemePackageChecksum(data []byte) [32]byte { return sha256.Sum256(data) }
 
 func (c *ThemeCatalog) Root() string { return filepath.Dir(c.manager.marker) }
+
+// Remove retains the package and settings, but never removes the active theme.
+func (c *ThemeCatalog) Remove(ctx context.Context, themeID, version string) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	return c.changeRemoval(ctx, themeID, version, true)
+}
+
+// Restore revalidates retained files before making a theme available again.
+// Restoring does not activate it.
+func (c *ThemeCatalog) Restore(ctx context.Context, themeID, version string) error {
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	record, err := scanThemeRecord(c.db.Reader.QueryRowContext(ctx, `SELECT id,theme_id,name,version,api_version,core_range,path,hex(checksum),hex(directory_checksum),validation_status,validation_report,active,installed_at FROM themes WHERE theme_id=? AND version=?`, themeID, version))
+	if err != nil {
+		return fmt.Errorf("主题不存在。")
+	}
+	manifest, err := readThemeManifest(record.Path)
+	if err != nil {
+		return err
+	}
+	record.Manifest = manifest
+	if _, err := c.loadValidatedTheme(ctx, record); err != nil {
+		return err
+	}
+	return c.changeRemoval(ctx, themeID, version, false)
+}
+
+func (c *ThemeCatalog) changeRemoval(ctx context.Context, themeID, version string, removed bool) error {
+	tx, err := c.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var id int64
+	var active, wasRemoved bool
+	if err := tx.QueryRowContext(ctx, "SELECT id,active,removed_at IS NOT NULL FROM themes WHERE theme_id=? AND version=?", themeID, version).Scan(&id, &active, &wasRemoved); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("主题不存在，内嵌默认主题不能删除。")
+		}
+		return err
+	}
+	if removed && active {
+		return fmt.Errorf("当前正在使用的主题不能删除，请先切换到其他主题。")
+	}
+	if removed == wasRemoved {
+		return nil
+	}
+	now := time.Now().UTC().UnixMilli()
+	var removalTime any
+	action := "theme.restored"
+	if removed {
+		removalTime = now
+		action = "theme.removed"
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE themes SET removed_at=?,updated_at=? WHERE id=?", removalTime, now, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_entries(action,object_kind,result,context_json,created_at) VALUES(?, 'theme','succeeded',?,?)`, action, fmt.Sprintf(`{"theme_id":%q,"version":%q}`, themeID, version), now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}

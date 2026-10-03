@@ -49,6 +49,8 @@ func NewThemeHTTPHandler(catalog *ThemeCatalog, manager *ThemeManager, security 
 func (h *ThemeHTTPHandler) RegisterAdmin(router chi.Router) {
 	router.Get("/themes", h.index)
 	router.Post("/themes/upload", h.upload)
+	router.Post("/themes/{themeID}/{version}/delete", h.remove)
+	router.Post("/themes/{themeID}/{version}/restore", h.restore)
 	router.Post("/themes/{themeID}/{version}/activate", h.activate)
 	router.Get("/themes/{themeID}/{version}/settings", h.settings)
 	router.Post("/themes/{themeID}/{version}/settings", h.saveSettings)
@@ -64,13 +66,18 @@ func (h *ThemeHTTPHandler) index(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	views := themeViews(records)
+	removed, err := h.catalog.ListRemoved(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
 	siteName, err := h.siteNamer.SiteName(r.Context())
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
 	notice, message := themeFeedback(r)
-	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Fallback": h.manager.IsFallback(), "ActiveID": h.manager.Current().ThemeID(), "ActiveVersion": h.manager.Current().ThemeVersion(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes", "Notice": notice, "Error": message})
+	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "RemovedThemes": themeViews(removed), "Fallback": h.manager.IsFallback(), "ActiveID": h.manager.Current().ThemeID(), "ActiveVersion": h.manager.Current().ThemeVersion(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes", "Notice": notice, "Error": message})
 }
 
 func (h *ThemeHTTPHandler) upload(w http.ResponseWriter, r *http.Request) {
@@ -286,8 +293,13 @@ func (h *ThemeHTTPHandler) renderSettingsError(w http.ResponseWriter, r *http.Re
 func (h *ThemeHTTPHandler) renderError(w http.ResponseWriter, r *http.Request, message string, status int) {
 	records, _ := h.catalog.List(r.Context())
 	views := themeViews(records)
+	removed, err := h.catalog.ListRemoved(r.Context())
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
 	siteName, _ := h.siteNamer.SiteName(r.Context())
-	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes"}, status)
+	h.render(w, r, map[string]any{"SiteName": siteName, "CSRF": h.security.CSRFToken(r), "Themes": views, "RemovedThemes": themeViews(removed), "Error": message, "Fallback": h.manager.IsFallback(), "MaxBytes": h.options.MaxBytes / (1 << 20), "AdminSection": "themes"}, status)
 }
 
 func themeViews(records []ThemeRecord) []map[string]any {
@@ -310,6 +322,10 @@ func (h *ThemeHTTPHandler) redirect(w http.ResponseWriter, r *http.Request, noti
 
 func themeFeedback(r *http.Request) (string, string) {
 	switch r.URL.Query().Get("notice") {
+	case "removed":
+		return "主题已删除，主题包和设置已保留，可重新添加。", ""
+	case "restored":
+		return "主题已重新添加，尚未启用。", ""
 	case "uploaded":
 		return "主题已上传并通过验证。", ""
 	case "activated":
@@ -325,4 +341,30 @@ func (h *ThemeHTTPHandler) internalError(w http.ResponseWriter, r *http.Request,
 	}
 	h.logger.ErrorContext(r.Context(), "theme request failed", "error", err)
 	http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+}
+
+func (h *ThemeHTTPHandler) remove(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyAction(w, r) {
+		return
+	}
+	if r.PostForm.Get("confirm_action") != "1" {
+		h.renderError(w, r, "请确认删除主题。", http.StatusUnprocessableEntity)
+		return
+	}
+	if err := h.catalog.Remove(r.Context(), chi.URLParam(r, "themeID"), chi.URLParam(r, "version")); err != nil {
+		h.renderError(w, r, err.Error(), http.StatusUnprocessableEntity)
+		return
+	}
+	h.redirect(w, r, "removed")
+}
+
+func (h *ThemeHTTPHandler) restore(w http.ResponseWriter, r *http.Request) {
+	if !h.verifyAction(w, r) {
+		return
+	}
+	if err := h.catalog.Restore(r.Context(), chi.URLParam(r, "themeID"), chi.URLParam(r, "version")); err != nil {
+		h.renderError(w, r, "无法重新添加主题，请检查主题包是否完整且兼容。", http.StatusUnprocessableEntity)
+		return
+	}
+	h.redirect(w, r, "restored")
 }

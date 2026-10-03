@@ -26,6 +26,7 @@ const HostAPIVersion = 1
 var (
 	ErrPluginNotFound   = errors.New("plugin not found")
 	ErrPluginDisabled   = errors.New("plugin is disabled")
+	ErrPluginRemoved    = errors.New("plugin is removed")
 	ErrCapabilityDenied = errors.New("plugin capability denied")
 	ErrProviderConflict = errors.New("comment providers are mutually exclusive")
 	ErrInvalidSettings  = errors.New("plugin settings are invalid")
@@ -64,6 +65,7 @@ type MenuItem struct {
 type PluginState struct {
 	Manifest       Manifest
 	Enabled        bool
+	Removed        bool
 	LastInitResult string
 	UpdatedAt      time.Time
 	Scope          string
@@ -605,6 +607,14 @@ func (r *Registry) Initialize(ctx context.Context, enabled []string) error {
 	r.mu.RUnlock()
 	var failures []error
 	for _, id := range ids {
+		var removed bool
+		if err := r.db.Reader.QueryRowContext(ctx, "SELECT removed_at IS NOT NULL FROM plugin_states WHERE plugin_id=?", id).Scan(&removed); err != nil {
+			failures = append(failures, err)
+			continue
+		}
+		if removed {
+			continue
+		}
 		persisted, err := r.persistedEnabled(ctx, id)
 		if err != nil {
 			failures = append(failures, err)
@@ -696,6 +706,13 @@ func (r *Registry) Enable(ctx context.Context, id string) error {
 	if !ok {
 		return ErrPluginNotFound
 	}
+	var removed bool
+	if err := r.db.Reader.QueryRowContext(ctx, "SELECT removed_at IS NOT NULL FROM plugin_states WHERE plugin_id=?", id).Scan(&removed); err != nil {
+		return err
+	}
+	if removed {
+		return ErrPluginRemoved
+	}
 	manifest := plugin.Manifest()
 	if manifest.Kind == "comment_provider" {
 		var other string
@@ -754,6 +771,8 @@ func (r *Registry) Enable(ctx context.Context, id string) error {
 }
 
 func (r *Registry) Disable(ctx context.Context, id string) error {
+	r.enableMu.Lock()
+	defer r.enableMu.Unlock()
 	r.mu.Lock()
 	_, exists := r.plugins[id]
 	if exists {
@@ -765,6 +784,61 @@ func (r *Registry) Disable(ctx context.Context, id string) error {
 	}
 	if _, err := r.db.Writer.ExecContext(ctx, "UPDATE plugin_states SET enabled=0,last_init_result='disabled',updated_at=? WHERE plugin_id=?", time.Now().UTC().UnixMilli(), id); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Remove preserves settings, business data, and queued work. Restore makes the
+// compiled plugin available again without enabling it.
+func (r *Registry) Remove(ctx context.Context, id string) error {
+	return r.changeRemoved(ctx, id, true)
+}
+
+func (r *Registry) Restore(ctx context.Context, id string) error {
+	return r.changeRemoved(ctx, id, false)
+}
+
+func (r *Registry) changeRemoved(ctx context.Context, id string, removed bool) error {
+	r.enableMu.Lock()
+	defer r.enableMu.Unlock()
+	r.mu.RLock()
+	_, exists := r.plugins[id]
+	r.mu.RUnlock()
+	if !exists {
+		return ErrPluginNotFound
+	}
+	tx, err := r.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().UnixMilli()
+	query := "UPDATE plugin_states SET removed_at=NULL,enabled=0,last_init_result='disabled',updated_at=? WHERE plugin_id=? AND removed_at IS NOT NULL"
+	args := []any{now, id}
+	if removed {
+		query = "UPDATE plugin_states SET removed_at=?,enabled=0,last_init_result='removed',updated_at=? WHERE plugin_id=? AND removed_at IS NULL"
+		args = []any{now, now, id}
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed > 0 {
+		if _, err := tx.ExecContext(ctx, "UPDATE system_state SET render_epoch=render_epoch+1 WHERE id=1"); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if changed > 0 || removed {
+		r.mu.Lock()
+		r.enabled[id] = false
+		r.mu.Unlock()
 	}
 	return nil
 }
@@ -791,7 +865,7 @@ func (r *Registry) Registered() []Manifest {
 }
 
 func (r *Registry) States(ctx context.Context) ([]PluginState, error) {
-	rows, err := r.db.Reader.QueryContext(ctx, `SELECT plugin_id,name,version,api_version,kind,enabled,config_schema_version,last_init_result,updated_at FROM plugin_states ORDER BY plugin_id`)
+	rows, err := r.db.Reader.QueryContext(ctx, `SELECT plugin_id,name,version,api_version,kind,enabled,config_schema_version,last_init_result,updated_at,removed_at IS NOT NULL FROM plugin_states ORDER BY plugin_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -800,10 +874,11 @@ func (r *Registry) States(ctx context.Context) ([]PluginState, error) {
 	for rows.Next() {
 		var id, name, version, kind, initResult string
 		var api, enabled, schemaVersion, updated int64
-		if err := rows.Scan(&id, &name, &version, &api, &kind, &enabled, &schemaVersion, &initResult, &updated); err != nil {
+		var removed bool
+		if err := rows.Scan(&id, &name, &version, &api, &kind, &enabled, &schemaVersion, &initResult, &updated, &removed); err != nil {
 			return nil, err
 		}
-		state := PluginState{Manifest: Manifest{ID: id, Name: name, Version: version, APIVersion: int(api), Kind: kind, SettingsVersion: int(schemaVersion)}, Enabled: enabled == 1, LastInitResult: initResult, UpdatedAt: time.UnixMilli(updated).UTC()}
+		state := PluginState{Manifest: Manifest{ID: id, Name: name, Version: version, APIVersion: int(api), Kind: kind, SettingsVersion: int(schemaVersion)}, Enabled: enabled == 1, Removed: removed, LastInitResult: initResult, UpdatedAt: time.UnixMilli(updated).UTC()}
 		r.mu.RLock()
 		registered := r.plugins[id]
 		r.mu.RUnlock()

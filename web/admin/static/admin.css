@@ -763,6 +763,10 @@ html[data-admin-sidebar="collapsed"] {
   }
 }
 
+/* Match the unlayered drawer rules so the no-JavaScript navigation stays in flow. */
+html:not(.js) .admin-sidebar { position: static; display: block !important; width: auto; min-height: 0; transform: none; visibility: visible; box-shadow: none; }
+html:not(.js) .admin-sidebar-toggle, html:not(.js) .admin-sidebar-close, html:not(.js) .admin-sidebar-scrim { display: none; }
+
 /* Keep hierarchy strong while reserving more space for actual content. */
 .admin-page .page-heading h1,
 .admin-page .editor-heading h1,
@@ -848,7 +852,10 @@ html[data-admin-sidebar="collapsed"] {
   .plugin-facts dd { margin: 5px 0 0; color: var(--ink); font-size: .78rem; line-height: 1.5; overflow-wrap: anywhere; }
   .plugin-init { margin: 16px 0 0; color: var(--warm); font-size: .76rem; }
   .plugin-init.is-ready { color: var(--accent); }
-  .plugin-card-action { display: flex; align-items: start; }
+  .plugin-card-action { display: grid; align-content: start; gap: 16px; max-width: 260px; }
+  .plugin-card-action .confirm-action { min-height: 44px; align-items: center; }
+  .plugin-removed { margin-top: 32px; }
+  .plugin-card h3 { margin: 12px 0 5px; font-size: 1.4rem; }
   .analytics-range { display: flex; flex-wrap: wrap; gap: 4px; margin: -24px 0 18px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-muted); }
   .analytics-range a { min-height: 38px; padding: 10px 14px; border-radius: 8px; color: var(--muted); font-size: .78rem; font-weight: 720; text-decoration: none; }
   .analytics-range a:hover, .analytics-range a.active { color: var(--accent); background: var(--surface); }
@@ -911,7 +918,7 @@ html[data-admin-sidebar="collapsed"] {
   @media (max-width: 820px) {
     .plugin-summary span:last-child { margin-left: 0; }
     .plugin-card, .comment-review-card, .task-row { grid-template-columns: 1fr; gap: 18px; padding: 20px; }
-    .plugin-card-action { align-items: stretch; }
+    .plugin-card-action { align-items: stretch; max-width: none; }
     .plugin-card-action form, .plugin-card-action button { width: 100%; }
     .plugin-facts, .analytics-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .analytics-table .table-head, .analytics-table .article-row { grid-template-columns: 1fr 1.4fr; gap: 10px 18px; }
@@ -967,3 +974,9 @@ html[data-admin-sidebar="collapsed"] {
   html:not(.js) .admin-sidebar { position: static; display: block; width: auto; min-height: 0; transform: none; visibility: visible; box-shadow: none; }
   html:not(.js) .admin-sidebar-toggle, html:not(.js) .admin-sidebar-close, html:not(.js) .admin-sidebar-scrim { display: none; }
 }
+
+.theme-delete-form { margin-top: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.theme-delete-form label { display: flex; align-items: center; gap: 8px; min-height: 44px; overflow-wrap: anywhere; }
+.theme-delete-form input[type="checkbox"] { width: 20px; height: 20px; flex-shrink: 0; }
+.theme-delete-form p { width: 100%; color: var(--muted); font-size: .8rem; }
+.theme-removed { margin-top: 24px; }
