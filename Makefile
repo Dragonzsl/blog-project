@@ -1,4 +1,4 @@
-.PHONY: test test-race vet build run compose-up compose-down perf-gate stage3-acceptance release sbom license-audit browser
+.PHONY: test test-race vet build run deploy compose-up compose-down perf-gate stage3-acceptance release sbom license-audit browser
 
 GO_TAGS := fts5 sqlite_omit_load_extension
 
@@ -16,6 +16,9 @@ build:
 
 run:
 	go run -tags "$(GO_TAGS)" ./cmd/blog serve --config config.example.toml
+
+deploy:
+	./scripts/deploy.sh
 
 compose-up:
 	docker compose up --build

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fff7ed" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12121c" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>{{.SiteName}}</title>
+  <meta name="description" content="{{.SiteName}}的文章与思考。">
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="home-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{template "public_header" .}}
+  <main id="main-content" class="signal-home-main">
+    <section class="signal-hero" aria-labelledby="home-title">
+      <div class="signal-hero-copy">
+        <div class="signal-episode-label"><span class="signal-live" aria-hidden="true"></span><strong>TODAY'S EPISODE</strong><span>独立放送</span></div>
+        <h1 id="home-title">今天的故事，<br><em>正在放送。</em></h1>
+        <p class="signal-hero-description">文章、笔记与还没完结的想法，在这里一集一集更新。</p>
+        <a class="signal-hero-cta" href="/articles">进入放送列表 <span aria-hidden="true">▶</span></a>
+        <span class="signal-crosshair signal-crosshair-one" aria-hidden="true">＋</span><span class="signal-crosshair signal-crosshair-two" aria-hidden="true">＋</span>
+        <svg class="signal-hero-star" viewBox="0 0 50 50" aria-hidden="true" focusable="false"><path d="m25 3 5 15 15 7-15 7-5 15-5-15-15-7 15-7Z"/></svg>
+      </div>
+      <div class="signal-hero-poster" aria-hidden="true">
+        <span class="poster-top">ON AIR / 01</span>
+        <svg class="poster-figure" viewBox="0 0 260 300" focusable="false">
+          <path class="poster-orbit" d="M23 184c18-75 96-128 170-112 36 8 51 29 44 46-9 21-57 28-104 22-58-7-104-2-110 25-5 24 37 49 91 52 48 3 86-12 104-39"/>
+          <path class="poster-antenna" d="M119 108V82M119 82 96 61M119 82l23-21"/>
+          <rect class="poster-tv-body" x="63" y="101" width="114" height="87" rx="9"/>
+          <rect class="poster-tv-screen" x="78" y="113" width="84" height="55" rx="5"/>
+          <circle class="poster-tv-eye" cx="105" cy="137" r="5"/><circle class="poster-tv-eye" cx="137" cy="137" r="5"/>
+          <path class="poster-tv-mouth" d="M108 153c9 8 17 8 26 0"/><path class="poster-tv-leg" d="M87 188v14M153 188v14"/>
+          <path class="poster-signal-arc" d="M184 115c22 13 22 34 0 48M197 103c36 22 36 55 0 77"/>
+          <path class="poster-star" d="m203 197 8 20 20 8-20 8-8 20-8-20-20-8 20-8 8-20Z"/>
+        </svg>
+        <strong>ANIME<br>SIGNAL</strong>
+        <span class="poster-bottom">SEASON 01 / KEEP READING</span>
+      </div>
+      <div class="signal-hero-speed-lines" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    </section>
+    {{if .Home.Recent}}
+    <section class="episode-section" aria-labelledby="latest-heading">
+      <div class="episode-section-heading"><span id="latest-heading" class="episode-ribbon">LATEST EPISODES</span><span class="episode-heartbeat" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span></div>
+      <div class="episode-grid">
+        {{range $index, $article := .Home.Recent}}
+        <article class="episode-card episode-card-{{$index}}">
+          <a class="episode-card-link" href="{{$article.Path}}">
+            <div class="episode-thumb" aria-hidden="true"><span class="episode-number">EP.</span><svg viewBox="0 0 160 150" focusable="false"><path class="mini-tv-rays" d="m26 34-14-12M48 23 44 7M111 23l4-16M134 34l14-12"/><path class="mini-tv-antenna" d="M80 48V30M80 30 57 11M80 30l23-19"/><rect class="mini-tv-body" x="30" y="41" width="100" height="73" rx="13"/><rect class="mini-tv-screen" x="44" y="54" width="72" height="44" rx="7"/><circle class="mini-tv-eye" cx="65" cy="75" r="5"/><circle class="mini-tv-eye" cx="95" cy="75" r="5"/><path class="mini-tv-mouth" d="M69 86c7 7 15 7 22 0"/><path class="mini-tv-hand" d="M128 89c14 1 19 9 18 21M145 110l-11-5M145 110l-2-12"/></svg></div>
+            <div class="episode-card-copy"><span class="episode-card-kicker">{{$article.PublishedAt}}</span><h2>{{$article.Title}}</h2>{{if $article.Excerpt}}<p>{{$article.Excerpt}}</p>{{end}}<span class="episode-card-tag">WORLD BUILDING</span></div><span class="episode-play" aria-hidden="true">▶</span>
+          </a>
+        </article>
+        {{end}}
+      </div>
+    </section>
+    {{else}}
+    <section class="episode-section episode-empty" aria-labelledby="latest-heading-empty"><div class="episode-section-heading"><span id="latest-heading-empty" class="episode-ribbon">LATEST EPISODES</span></div><div class="empty"><p class="kicker">OPENING EPISODE</p><h2>第一集正在路上。</h2><p>新的文字会出现在这里。</p></div></section>
+    {{end}}
+    <section class="weekly-broadcast" aria-labelledby="weekly-heading">
+      <div class="weekly-broadcast-badge"><svg viewBox="0 0 80 80" aria-hidden="true" focusable="false"><path d="M40 61V34M25 61h30M31 61l9-28 9 28M40 34 27 20M40 34l13-14M57 31c9 6 9 14 0 20M67 22c17 11 17 27 0 38M23 31c-9 6-9 14 0 20M13 22C-4 33-4 49 13 60"/></svg><strong id="weekly-heading">WEEKLY<br>BROADCAST</strong><span aria-hidden="true">→</span></div>
+      <div class="weekly-days"><div class="weekly-day"><strong>MON</strong><span>预告与情报站</span><b>ON AIR</b></div><div class="weekly-day"><strong>TUE</strong><span>角色研究所</span><b>ON AIR</b></div><div class="weekly-day weekly-day-current"><strong>WED</strong><em>正片放送日</em><b>ON AIR</b></div><div class="weekly-day"><strong>THU</strong><span>制作花絮站</span><b>ON AIR</b></div><div class="weekly-day"><strong>FRI</strong><span>音乐与声优</span><b>ON AIR</b></div><div class="weekly-day"><strong>SAT</strong><span>粉丝聊天室</span><b>ON AIR</b></div><div class="weekly-day"><strong>SUN</strong><span>周刊总结</span><b>ON AIR</b></div></div>
+    </section>
+    <aside class="signal-mode-preview" aria-hidden="true"><div class="signal-mode-bar"><i></i><i></i><i></i></div><div class="signal-mode-sidebar"><span class="mode-mini-logo">▣</span><strong>ANIME<br>SIGNAL</strong><b>● 放送中</b><span>⌂ 首页</span><span>▤ 文章</span><span>▣ 归档</span></div><div class="signal-mode-content"><span class="mode-mini-label">TODAY'S EPISODE</span><strong>今天的故事，<br>正在放送。</strong><span class="mode-mini-cta">进入放送列表</span><div class="mode-mini-poster">ON AIR / 01<br><b>▣</b></div><div class="mode-mini-cards"><i></i><i></i><i></i></div></div></aside>
+    {{if .Features.Newsletter}}{{template "newsletter_slot" .}}{{end}}
+  </main>
+  {{template "public_footer" .}}
+</body>
+</html>

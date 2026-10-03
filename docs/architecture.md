@@ -66,7 +66,7 @@ plugins/                     官方编译期插件，每个插件一个目录
   contentapi/
   webhooks/
 web/admin/                   管理后台模板、CSS、TS 交互组件
-themes/default/              默认现代编辑式主题
+themes/default/              默认宋韵山水主题
 db/migrations/               顺序编号、只向前的 SQL 迁移
 docs/
 ```

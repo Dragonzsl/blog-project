@@ -33,8 +33,14 @@
 当前实现已覆盖唯一站主安全初始化、文章与页面、默认主题、Markdown 安全渲染、分类标签与导航、本地媒体、不可变版本、15 秒编辑快照、定时发布、撤回、30 天回收站、中英文搜索、SEO、RSS、Sitemap、robots、llms.txt、永久重定向，以及可校验备份、原子恢复、恢复演练、升级恢复点和运维审计。阶段二新增受限主题包预览/切换/回退、可禁用插件宿主、本地或外部评论、本地隐私统计、S3/SMTP/Newsletter 适配、Markdown 内容归档和媒体校验迁移；阶段三新增 WordPress/Ghost/Markdown 离线导入与 dry-run、只读内容 API、签名 Webhook、开发者契约文档、amd64/arm64 发行脚本、SBOM/许可证审查、ADR-0031 性能门和三浏览器回归夹具；后续改进阶段补充了站点/站主设置、版本对比与恢复预览、批量内容操作、排期日历、评论与 Newsletter 管理、游标/增量内容 API、SEO/社交元数据、Feed 摘要模式和 v2 归档能力。需要 Docker Desktop 或 Docker Engine + Compose：
 
 ```bash
-cp .env.example .env
-docker compose up --build -d
+./scripts/deploy.sh
+```
+
+脚本首次运行会从 `.env.example` 创建权限受限的 `.env`，以后重复运行会构建、升级并等待应用及公开入口就绪（需要 curl）；如果检测到已有运行中的应用，默认会先创建升级前恢复点。部署脚本只使用 `compose.yaml`，不会加载本地覆盖配置；正式域名部署前请先编辑 `.env` 中的 `BLOG_SITE_ADDRESS`，也可以运行 `make deploy`。
+
+本地健康检查仍可手动执行：
+
+```bash
 curl --insecure https://localhost/livez
 curl --insecure https://localhost/readyz
 ```

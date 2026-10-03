@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#F7F8FA" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0D0F12" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>{{if .Meta.Title}}{{.Meta.Title}}{{else}}{{.Article.Title}} · {{.SiteName}}{{end}}</title>
+  {{if .Meta.Description}}<meta name="description" content="{{.Meta.Description}}">{{else if .Article.Excerpt}}<meta name="description" content="{{.Article.Excerpt}}">{{end}}
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="article-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{if .Preview}}<div class="preview-ribbon"><span>私密预览 · 当前编辑版本</span><a href="{{.BackURL}}">返回编辑</a></div>{{end}}
+  {{template "public_header" .}}
+  <main id="main-content">
+    <div class="reading-progress" aria-hidden="true"><span data-reading-progress></span></div>
+    <article class="article{{if .Article.TOC}} article-with-toc{{else}} article-without-toc{{end}}">
+      <nav class="article-nav" aria-label="文章导航"><a class="back-link" href="{{if .BackURL}}{{.BackURL}}{{else}}/articles{{end}}"><span aria-hidden="true">←</span> 返回文章</a><span class="article-nav-label">{{if eq .Article.Kind "page"}}PAGE{{else}}ESSAY{{end}}</span></nav>
+      <header class="article-header">
+        <div class="article-header-main">
+          <p class="kicker">{{if eq .Article.Kind "page"}}Page / 页面{{else}}Essay / 文章{{end}}</p>
+          <h1>{{.Article.Title}}</h1>
+          {{if .Article.Excerpt}}<p class="deck">{{.Article.Excerpt}}</p>{{end}}
+          <div class="article-meta">
+            {{if and (ne .Article.Kind "page") .Article.PublishedAt}}<time datetime="{{.Article.PublishedISO}}">发布于 {{.Article.PublishedAt}}</time>{{end}}
+            {{if .Article.UpdatedAt}}<time datetime="{{.Article.UpdatedISO}}">更新于 {{.Article.UpdatedAt}}</time>{{end}}
+            {{if and .Article.ReadingTime (index .Settings "showReadingTime")}}<span class="article-reading-time">{{.Article.ReadingTime}} 分钟阅读</span>{{end}}
+            {{if or .Article.Category .Article.Tags}}<div class="taxonomy">{{with .Article.Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}{{range .Article.Tags}}<a href="{{.URL}}"># {{.Name}}</a>{{end}}</div>{{end}}
+          </div>
+        </div>
+        {{if .Article.TOC}}<button class="article-toc-trigger" type="button" data-sidebar-toggle aria-controls="article-toc" aria-expanded="false" aria-label="打开本文目录"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9h12M6 15h12"/></svg><span class="visually-hidden">本文目录，共 {{len .Article.TOC}} 个章节</span></button>{{end}}
+      </header>
+      <div class="article-layout">
+        <div class="article-reading-column">
+          {{with .Article.Cover}}<figure class="article-cover"><img src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="eager"><figcaption>{{if .Alt}}{{.Alt}}{{else}}文章配图{{end}}</figcaption></figure>{{end}}
+          <div class="prose">{{.Article.BodyHTML}}</div>
+          <section class="article-actions" aria-label="文章操作">
+            <button type="button" class="action-button" data-copy-link="{{.Meta.CanonicalURL}}">复制链接</button>
+            <button type="button" class="action-button" data-share-link="{{.Meta.CanonicalURL}}">分享</button>
+            <button type="button" class="action-button" data-print-article>打印</button>
+            <span class="action-status" data-action-status role="status" aria-live="polite"></span>
+          </section>
+          {{if or .Article.Previous .Article.Next}}<nav class="article-neighbors" aria-label="继续阅读">{{with .Article.Previous}}<a href="{{.Path}}"><span>上一篇</span><strong>{{.Title}}</strong></a>{{end}}{{with .Article.Next}}<a href="{{.Path}}"><span>下一篇</span><strong>{{.Title}}</strong></a>{{end}}</nav>{{end}}
+          {{if .Article.Related}}<section class="related-articles" aria-labelledby="related-heading"><p class="kicker">Keep reading</p><h2 id="related-heading">继续阅读</h2><div>{{range .Article.Related}}<a href="{{.Path}}"><span>{{if .Category}}{{.Category.Name}}{{else}}Essay{{end}}</span><strong>{{.Title}}</strong>{{if .ReadingTime}}<small class="article-reading-time">{{.ReadingTime}} 分钟阅读</small>{{end}}</a>{{end}}</div></section>{{end}}
+          {{if .Features.Comments}}{{template "comments_slot" .}}{{end}}
+        </div>
+        {{if .Article.TOC}}<aside id="article-toc" class="article-toc" data-sidebar-panel data-drawer-name="toc" data-sidebar-breakpoint="1439" aria-label="文章目录" aria-hidden="false"><div class="toc-heading"><div><span class="kicker">On this page</span><strong>本文目录</strong></div><button class="toc-close" type="button" data-sidebar-close data-toc-collapse aria-label="关闭文章目录"><span aria-hidden="true">×</span></button></div><ol>{{range .Article.TOC}}<li class="toc-level-{{.Level}}"><a href="#{{.ID}}">{{.Text}}</a></li>{{end}}</ol></aside><button class="sidebar-scrim toc-scrim" type="button" data-sidebar-scrim="toc" aria-label="关闭文章目录" hidden></button>{{end}}
+      </div>
+    </article>
+    {{if .Features.Newsletter}}{{template "newsletter_slot" .}}{{end}}
+  </main>
+  {{template "public_footer" .}}
+</body>
+</html>

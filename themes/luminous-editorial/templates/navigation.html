@@ -1,0 +1,22 @@
+{{define "primary_navigation"}}
+  {{range .}}
+  <span class="nav-group">
+    <a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>
+    {{if .Children}}<span class="subnav">{{range .Children}}<a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{end}}</span>{{end}}
+  </span>
+  {{end}}
+{{end}}
+
+{{define "footer_navigation"}}
+  {{range .}}
+  <span class="footer-group"><a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{range .Children}}<a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{end}}</span>
+  {{else}}<span>持续写作，持续发布。</span>{{end}}<a href="/rss.xml">RSS</a>
+{{end}}
+
+{{define "page_metadata"}}
+  {{if .NoIndex}}<meta name="robots" content="noindex,nofollow">{{end}}
+  {{if .CanonicalURL}}<link rel="canonical" href="{{.CanonicalURL}}">{{end}}
+  {{if .RSSURL}}<link rel="alternate" type="application/rss+xml" title="RSS" href="{{.RSSURL}}">{{end}}
+  {{if .CanonicalURL}}<meta property="og:title" content="{{.Title}}"><meta property="og:description" content="{{.Description}}"><meta property="og:type" content="{{.OpenGraphType}}"><meta property="og:url" content="{{.CanonicalURL}}">{{if .SiteName}}<meta property="og:site_name" content="{{.SiteName}}">{{end}}{{if .ImageURL}}<meta property="og:image" content="{{.ImageURL}}">{{end}}<meta name="twitter:card" content="{{if .TwitterCard}}{{.TwitterCard}}{{else}}summary{{end}}"><meta name="twitter:title" content="{{.Title}}"><meta name="twitter:description" content="{{.Description}}">{{if .ImageURL}}<meta name="twitter:image" content="{{.ImageURL}}">{{end}}{{if .PublishedAt}}<meta property="article:published_time" content="{{.PublishedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{end}}{{if .ModifiedAt}}<meta property="article:modified_time" content="{{.ModifiedAt.Format "2006-01-02T15:04:05Z07:00"}}">{{end}}{{end}}
+  {{if .JSONLD}}<script type="application/ld+json">{{.JSONLD}}</script>{{end}}
+{{end}}

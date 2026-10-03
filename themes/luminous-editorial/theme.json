@@ -1,0 +1,14 @@
+{
+  "id": "luminous-editorial",
+  "name": "澄光编辑室",
+  "version": "1.0.0",
+  "themeApi": 1,
+  "core": ">=1.0.0 <2.0.0",
+  "features": ["dark-mode", "toc", "responsive", "comments", "newsletter"],
+  "settingsVersion": 1,
+  "settingsSchema": {
+    "accent": {"type": "color", "default": "#6C5CE7"},
+    "showSpectrum": {"type": "boolean", "default": true},
+    "showReadingTime": {"type": "boolean", "default": true}
+  }
+}

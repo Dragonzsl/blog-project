@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fff7ed" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12121c" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>{{.Status.Code}} · {{.Status.Title}} · {{.SiteName}}</title>
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="status-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{template "public_header" .}}
+  <main id="main-content"><section class="status-card" aria-labelledby="status-title"><span class="status-code" aria-hidden="true">{{.Status.Code}}</span><p class="kicker">{{if eq .Status.Code 404}}NO EPISODE FOUND{{else}}TRANSMISSION LOST{{end}}</p><h1 id="status-title">{{.Status.Title}}</h1><p>{{.Status.Message}}</p><div class="empty-actions"><a class="primary-action" href="/">回到首页 <span aria-hidden="true">→</span></a><a class="text-action" href="/search">搜索文章 <span aria-hidden="true">↗</span></a><a class="text-action" href="/archive">浏览归档 <span aria-hidden="true">↗</span></a></div></section></main>
+  {{template "public_footer" .}}
+</body>
+</html>

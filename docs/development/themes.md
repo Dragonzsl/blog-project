@@ -32,11 +32,13 @@ mkdir -p dist
 (cd themes/cel-panel && zip -qr ../../dist/cel-panel-2.2.4.zip theme.json templates assets LICENSE)
 ```
 
+澄光编辑室（`luminous-editorial`）的完整设计与实现说明见[澄光编辑室主题设计](./luminous-editorial-theme-design.md)。它是独立主题包，不改变默认主题或已有主题包。
+
 ## 可用视图
 
 模板只接收版本化的公开 `SiteView`、`ContentView`、`CollectionView`、`HomePageData`、`DirectoryView`、`SearchPageData`、`StatusView`、`NavigationView`、`MediaView` 和 `PageContext`。正文已经由核心清洗为安全 HTML；不要在主题内引入 `safeHTML` 或读取环境变量、文件、数据库。旧主题缺少新增目录/状态模板时，核心会提供内嵌的默认目录和状态回退模板；如果主题提供了这两个文件，则优先使用主题自己的实现。
 
-所有页面模板都可通过 `.Settings` 读取宿主校验后的设置副本。只允许 manifest schema 中声明的键；`secret: true` 的设置不会进入模板，`media` 设置只保存稳定媒体公共 ID并在运行时解析为 `MediaData`，不暴露内部媒体行号、对象键或哈希。URL、颜色、整数、选项、字符串长度和总 JSON 大小由宿主校验。
+所有页面模板都可通过 `.Settings` 读取宿主校验后的设置副本。只允许 manifest schema 中声明的键；`secret: true` 的设置不会进入模板，`media` 设置只保存稳定媒体公共 ID并在运行时解析为 `MediaData`，不暴露内部媒体行号、对象键或哈希。URL、颜色、整数、选项、字符串长度和总 JSON 大小由宿主校验。颜色等动态样式应输出到 `<style>` 元素：核心为最终渲染内容生成精确 CSP SHA-256 授权，支持无 JavaScript 展示。内联 `style` 属性仍被禁止，不要使用 `unsafe-inline`。
 
 ## 插槽与性能
 
@@ -50,6 +52,8 @@ blog theme list
 blog theme activate --id org.example.paper --version 1.0.0
 blog theme rollback
 ```
+
+澄光主题的三浏览器交互回归使用隔离站点：设置 `LUMINOUS_BASE_URL` 为已启用该主题的站点地址，`LUMINOUS_ARTICLE_FIXTURE=/posts/<slug>` 为包含二级标题的已发布文章，然后运行 `make browser`。若修改了主题色，可通过 `LUMINOUS_ACCENT` 指定预期颜色值；测试覆盖桌面导航、目录断点、Esc 焦点恢复和无 JavaScript 的 CSP 样式。
 
 构建前运行 `go test -tags 'fts5 sqlite_omit_load_extension' ./...`、`make perf-gate` 和浏览器回归夹具。主题损坏时内嵌默认主题始终可回退。数据库 `themes.active` 是激活权威，`active.json` 只是可修复缓存；管理端设置保存需要 CSRF/Origin 保护并使 `render_epoch` 递增。主题回退保留已安装包、设置和激活历史。
 

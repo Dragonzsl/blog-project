@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fff7ed" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12121c" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>{{.Title}} · {{.SiteName}}</title>
+  {{if .Description}}<meta name="description" content="{{.Description}}">{{end}}
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="directory-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{template "public_header" .}}
+  <main id="main-content"><header class="listing-hero directory-hero"><p class="kicker">WORLD BUILDING · 世界观档案</p><h1>{{.Title}}</h1>{{if .Description}}<p>{{.Description}}</p>{{end}}</header>{{if .Directory.Categories}}<section class="directory-section" aria-labelledby="categories-heading"><div class="section-heading"><p class="kicker">TOPICS · 主题设定</p><h2 id="categories-heading">分类</h2></div><div class="directory-grid">{{range .Directory.Categories}}<a class="directory-card" href="{{.URL}}"><div><span class="directory-count">{{.ArticleCount}} 篇文章</span><h3>{{.Name}}</h3>{{if .Description}}<p>{{.Description}}</p>{{end}}</div>{{if .LatestPath}}<small>最近：{{.LatestTitle}}</small>{{end}}<span class="directory-arrow" aria-hidden="true">↗</span></a>{{end}}</div></section>{{end}}{{if .Directory.Tags}}<section class="directory-section" aria-labelledby="tags-heading"><div class="section-heading"><p class="kicker">KEYWORDS · 关键词</p><h2 id="tags-heading">标签</h2></div><div class="tag-cloud">{{range .Directory.Tags}}<a class="tag-card" href="{{.URL}}"><strong># {{.Name}}</strong><span>{{.ArticleCount}} 篇</span></a>{{end}}</div></section>{{end}}{{if .Directory.ArchiveYears}}<section class="directory-section archive-index" aria-labelledby="archive-heading"><div class="section-heading"><p class="kicker">TIMELINE · 放送年表</p><h2 id="archive-heading">按时间浏览</h2></div><div class="archive-years">{{range .Directory.ArchiveYears}}<section class="archive-year" aria-labelledby="year-{{.Year}}"><h3 id="year-{{.Year}}">{{.Year}} <span>{{.Total}} 篇</span></h3><div class="archive-months">{{range .Months}}<a href="{{.URL}}"><strong>{{.Label}}</strong><span>{{.Count}} 篇</span></a>{{end}}</div></section>{{end}}</div></section>{{end}}{{if and (not .Directory.Categories) (not .Directory.Tags) (not .Directory.ArchiveYears)}}<section class="empty"><p class="kicker">NO WORLD DATA</p><h2>还没有可浏览的内容。</h2><p>公开文章发布后，分类、标签与归档会自动出现在这里。</p><div class="empty-actions"><a class="text-action" href="/">回到首页 <span aria-hidden="true">→</span></a><a class="text-action" href="/search">搜索内容 <span aria-hidden="true">→</span></a></div></section>{{end}}</main>
+  {{template "public_footer" .}}
+</body>
+</html>

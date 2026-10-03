@@ -1324,27 +1324,37 @@ func (h *HTTPHandler) renderStatus(w http.ResponseWriter, r *http.Request, statu
 
 func setPublicSecurityHeaders(w http.ResponseWriter, bodies ...[]byte) {
 	scriptSources := make([]string, 0, 2)
+	styleSources := []string{"'self'"}
 	if len(bodies) > 0 {
 		body := string(bodies[0])
 		if strings.Contains(body, `<script src="`) {
 			scriptSources = append(scriptSources, "'self'")
 		}
 		scriptSources = appendInlineScriptHashes(scriptSources, bodies[0])
+		styleSources = appendInlineElementHashes(styleSources, bodies[0], "style")
 	}
 	if len(scriptSources) == 0 {
 		scriptSources = append(scriptSources, "'none'")
 	}
 	scriptPolicy := "script-src " + strings.Join(scriptSources, " ") + "; "
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; "+scriptPolicy+"style-src 'self'; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	stylePolicy := "style-src " + strings.Join(styleSources, " ") + "; "
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; "+scriptPolicy+stylePolicy+"img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 }
 
 func appendInlineScriptHashes(sources []string, body []byte) []string {
+	return appendInlineElementHashes(sources, body, "script")
+}
+
+// Hash only the rendered element contents, keeping style attributes and other
+// inline code blocked. Theme settings remain usable without JavaScript.
+func appendInlineElementHashes(sources []string, body []byte, element string) []string {
 	markup := string(body)
+	closingTag := "</" + element + ">"
 	for cursor := 0; cursor < len(markup); {
-		startOffset := strings.Index(markup[cursor:], "<script")
+		startOffset := strings.Index(markup[cursor:], "<"+element)
 		if startOffset < 0 {
 			break
 		}
@@ -1354,7 +1364,7 @@ func appendInlineScriptHashes(sources []string, body []byte) []string {
 			break
 		}
 		contentStart := start + endTagOffset + 1
-		closeOffset := strings.Index(markup[contentStart:], "</script>")
+		closeOffset := strings.Index(markup[contentStart:], closingTag)
 		if closeOffset < 0 {
 			break
 		}
@@ -1367,7 +1377,7 @@ func appendInlineScriptHashes(sources []string, body []byte) []string {
 				sources = append(sources, source)
 			}
 		}
-		cursor = closeStart + len("</script>")
+		cursor = closeStart + len(closingTag)
 	}
 	return sources
 }

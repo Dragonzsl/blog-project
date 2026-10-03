@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#F7F8FA" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0D0F12" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>搜索 · {{.SiteName}}</title>
+  <meta name="description" content="搜索{{.SiteName}}的公开文章与页面。">
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="search-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{template "public_header" .}}
+  <main id="main-content" class="search-main">
+    <header class="listing-hero search-hero"><p class="kicker">Discovery / 探索</p><h1>搜索</h1><p>在已发布的文章与页面中找到下一篇想读的内容。</p></header>
+    <form class="search-form" action="/search#search-results" method="get" role="search">
+      <label class="search-query"><span>关键词</span><input name="q" value="{{.Search.Query}}" minlength="2" maxlength="100" autocomplete="off" required placeholder="例如：阅读、设计、工具"></label>
+      <label><span>类型</span><select name="type" autocomplete="off"><option value="">全部</option><option value="article" {{if eq .Search.Kind "article"}}selected{{end}}>文章</option><option value="page" {{if eq .Search.Kind "page"}}selected{{end}}>页面</option></select></label>
+      <label><span>分类</span><select name="category" autocomplete="off"><option value="">全部分类</option>{{range .Search.CategoryOptions}}<option value="{{.Slug}}" {{if eq $.Search.Category .Slug}}selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+      <label><span>标签</span><select name="tag" autocomplete="off"><option value="">全部标签</option>{{range .Search.TagOptions}}<option value="{{.Slug}}" {{if eq $.Search.Tag .Slug}}selected{{end}}># {{.Name}}</option>{{end}}</select></label>
+      <label><span>排序</span><select name="sort" autocomplete="off"><option value="relevance">相关度</option><option value="newest" {{if eq .Search.Sort "newest"}}selected{{end}}>最新发布</option></select></label>
+      <button type="submit">开始搜索 <span aria-hidden="true">↗</span></button>
+    </form>
+    {{if .Search.Invalid}}<p id="search-results" class="search-message" tabindex="-1" role="alert">请输入 2–100 个字符，并检查筛选条件。</p>{{end}}
+    {{if .Search.Searched}}<span id="search-results" class="search-results-anchor" tabindex="-1"></span><section class="listing-items" aria-label="搜索结果"><p class="result-summary">找到 {{.Search.Total}} 项结果</p>{{range .Search.Results}}<article class="article-card"><div class="article-meta"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time></div><div class="article-card-content">{{with .Cover}}<img class="article-card-cover" src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="lazy">{{end}}<p class="kicker">{{if eq .Kind "page"}}Page{{else}}Essay{{end}}</p><h2><a href="{{.Path}}">{{if .HighlightedTitle}}{{.HighlightedTitle}}{{else}}{{.Title}}{{end}}</a></h2>{{if .Excerpt}}<p>{{if .HighlightedExcerpt}}{{.HighlightedExcerpt}}{{else}}{{.Excerpt}}{{end}}</p>{{end}}</div><a class="read-more" href="{{.Path}}"><span>打开内容</span><span class="read-more-arrow" aria-hidden="true">→</span></a></article>{{else}}<div class="empty"><p class="kicker">No matching signal</p><h2>没有找到匹配内容。</h2><p>可以减少关键词或移除筛选条件后重试。</p><div class="empty-actions"><a class="primary-action" href="/search">清空筛选 <span aria-hidden="true">→</span></a><a class="text-action" href="/categories">浏览分类 <span aria-hidden="true">↗</span></a><a class="text-action" href="/archive">浏览归档 <span aria-hidden="true">↗</span></a></div></div>{{end}}</section>{{template "pagination" .Search.Pagination}}{{end}}
+  </main>
+  {{template "public_footer" .}}
+</body>
+</html>

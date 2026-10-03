@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#fff7ed" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#12121c" media="(prefers-color-scheme: dark)">
+  {{template "theme_bootstrap" .}}
+  <title>{{.Title}} · {{.SiteName}}</title>
+  {{if .Description}}<meta name="description" content="{{.Description}}">{{end}}
+  {{template "page_metadata" .Meta}}
+  <link rel="stylesheet" href="{{.AssetURL}}">
+  {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+</head>
+<body class="listing-page">
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  {{template "public_header" .}}
+  <main id="main-content"><header class="listing-hero"><p class="kicker">EPISODE ARCHIVE · 放送目录</p><h1>{{.Title}}</h1>{{if .Description}}<p>{{.Description}}</p>{{end}}</header><section class="listing-items" aria-label="文章列表">{{range .Articles}}<article class="article-card"><div class="article-meta"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{if .ReadingTime}}<span class="article-reading-time">· {{.ReadingTime}} 分钟</span>{{end}}{{with .Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}</div><div class="article-card-content"><h2><a href="{{.Path}}">{{.Title}}</a></h2>{{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}</div><a class="read-more" href="{{.Path}}"><span>观看这一集</span><span class="read-more-arrow" aria-hidden="true">→</span></a></article>{{else}}<div class="empty"><p class="kicker">NO EPISODE SIGNAL</p><h2>这里还没有已发布文章。</h2><p>可以先去搜索、浏览归档，或者回到首页。</p><div class="empty-actions"><a class="primary-action" href="/">回到首页 <span aria-hidden="true">→</span></a><a class="text-action" href="/archive">浏览归档 <span aria-hidden="true">↗</span></a></div></div>{{end}}</section>{{template "pagination" .Pagination}}{{if .Features.Newsletter}}{{template "newsletter_slot" .}}{{end}}</main>
+  {{template "public_footer" .}}
+</body>
+</html>

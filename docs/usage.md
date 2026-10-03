@@ -18,12 +18,19 @@
 
 ### 2.1 Docker Compose
 
-要求：Docker Engine 或 Docker Desktop，以及 Compose v2。
+要求：Docker Engine 或 Docker Desktop、Compose v2，以及 curl。
 
 ```bash
-cp .env.example .env
-docker compose config
-docker compose up --build -d
+./scripts/deploy.sh
+```
+
+`scripts/deploy.sh` 会在 `.env` 不存在时从 `.env.example` 创建它，明确使用 `compose.yaml`（不加载 `compose.override.yaml` 或 `COMPOSE_FILE`），校验配置并构建、启动服务。只有 `app` 内部就绪、公开地址的 `/readyz` 和首页均返回 200 才返回成功。重复执行时，如果检测到运行中的 `app`，默认先执行 `blog upgrade prepare` 创建升级前恢复点；首次部署或应用未运行时会跳过。可用 `--no-backup` 跳过恢复点，或用 `--no-build` 只启动已有镜像。也可以使用 `make deploy`。
+
+公开入口检查使用 Caddy 容器实际配置的 `BLOG_SITE_ADDRESS`，不跟随重定向。仅 `https://localhost`（含端口）允许本地内部证书；正式域名必须通过 TLS 证书校验。入口不可用时脚本返回失败并输出服务状态和最近日志。已有的本地 HTTP 覆盖文件仍可用于手动开发启动，但不会参与 `make deploy`。
+
+正式部署前请先编辑 `.env`，至少确认 `BLOG_SITE_ADDRESS` 是访问者实际使用的 HTTPS 地址；本地默认值可直接运行。部署后可手动检查：
+
+```bash
 docker compose ps
 curl --insecure https://localhost/livez
 curl --insecure https://localhost/readyz
