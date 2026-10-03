@@ -1,5 +1,7 @@
 # 改进阶段二实施记录：内容与扩展契约闭合
 
+> 历史记录：版本、测试与待办仅代表记录时的状态。当前说明见[文档入口](../README.md)。
+
 实施日期：2026-09-04
 对应计划：[阶段二内容与扩展契约实施计划](../development/phase-two-content-and-extension-contract-plan.md)
 对应 ADR：[ADR-0038](../adr/0038-phase-two-content-and-extension-contracts.md)

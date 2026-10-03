@@ -37,7 +37,7 @@ GET /api/v1/site
 
 ## 缓存与认证
 
-成功的公开响应带有 ETag、Last-Modified 和短时 `public` 缓存策略，可以使用 `If-None-Match` 或 `If-Modified-Since` 获取 304。配置 `CONTENT_API_TOKEN` 后，客户端必须使用 `Authorization: Bearer <token>`；认证响应使用 `private, no-store`，令牌比较为常量时间比较。
+成功的公开响应带有 ETag、Last-Modified 和短时 `public` 缓存策略，可以使用 `If-None-Match` 或 `If-Modified-Since` 获取 304。传入 `BLOG_CONTENT_API_TOKEN` 后，客户端必须使用 `Authorization: Bearer <token>`；认证响应使用 `private, no-store`，令牌比较为常量时间比较。
 
 读取接口按可信代理解析后的客户端身份做有界限流，默认每分钟 120 次；超过限制返回 429 和 `Retry-After: 60`。限流键、窗口和条目数量均有内存上限，不能通过伪造未受信任的转发头绕过。
 

@@ -1,5 +1,7 @@
 # 改进阶段三实施记录：规模与运维能力
 
+> 历史记录：版本、测试与待办仅代表记录时的状态。当前说明见[文档入口](../README.md)。
+
 > 对应设计：[改进阶段三实施计划](../development/phase-three-scale-and-operations-plan.md)
 >
 > 记录日期：2026-09-05

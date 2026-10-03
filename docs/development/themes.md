@@ -2,7 +2,27 @@
 
 主题是受限的 Go `html/template` 资源包，不是服务端代码。分发包至少包含 `theme.json`、`templates/*.html`、`assets/theme.css` 和许可证；可选提供 `assets/theme.js`，建议同时提供 `preview.webp` 与一组固定夹具。主题设置由 manifest 的 `settingsVersion` 标识版本。
 
-内嵌默认主题采用宋韵纸墨与圆润卡片的视觉方向：暖纸色、松绿、少量朱砂、宋体与楷体回退，以及桌面横向导航。页眉采用紧凑的半透明圆角表面、柔和阴影和低饱和选中态；首页滚动时固定于视口顶部，其他页面页眉随页面滚动。窄屏导航在页眉第二行横向滚动，自定义导航及其子项保持可访问。公开页面使用本地原创水墨山水作为低对比度全页背景，不添加裁切山水插画或首页装饰图。背景图作为嵌入资源按内容指纹提供一年缓存，不依赖外部服务。首页、文章列表、归档和文章详情分别对应独立页面；搜索通过页眉图标打开 Spotlight 式对话框，`/search` 保留为无 JavaScript 时的服务端搜索提交与结果入口。主题样式按基础、宋韵和圆润覆盖层顺序组合，交互仍以服务端渲染为主，并支持浅色/深色/系统模式、键盘操作、窄屏布局、辅助功能及资源预算。
+内嵌默认主题使用本地水墨背景、顶部导航和浅色/深色模式，搜索对话框提供渐进增强，`/search` 保留完整服务端入口。资源由 `themes/default/embed.go` 嵌入。
+
+## 包结构
+
+```text
+theme.json
+templates/
+  home.html
+  article.html
+  listing.html
+  search.html
+  navigation.html
+  directory.html       可选，缺省使用内嵌回退
+  status.html          可选，缺省使用内嵌回退
+assets/
+  theme.css
+  theme.js             可选
+LICENSE
+```
+
+其他局部模板可放入 `templates/` 并通过标准 Go template 语法调用。页面内容也使用 `article.html`，没有独立 `page.html` 契约。
 
 ## 清单
 
@@ -36,13 +56,13 @@ mkdir -p dist
 
 ## 可用视图
 
-模板只接收版本化的公开 `SiteView`、`ContentView`、`CollectionView`、`HomePageData`、`DirectoryView`、`SearchPageData`、`StatusView`、`NavigationView`、`MediaView` 和 `PageContext`。正文已经由核心清洗为安全 HTML；不要在主题内引入 `safeHTML` 或读取环境变量、文件、数据库。旧主题缺少新增目录/状态模板时，核心会提供内嵌的默认目录和状态回退模板；如果主题提供了这两个文件，则优先使用主题自己的实现。
+模板接收公开字段映射，页面数据和字段名见[视图参考](../reference/view-models.md)。正文已经由核心清洗为安全 HTML；不要在主题内引入 `safeHTML` 或读取环境变量、文件、数据库。旧主题缺少新增目录/状态模板时，核心会提供内嵌的默认目录和状态回退模板；如果主题提供了这两个文件，则优先使用主题自己的实现。
 
 所有页面模板都可通过 `.Settings` 读取宿主校验后的设置副本。只允许 manifest schema 中声明的键；`secret: true` 的设置不会进入模板，`media` 设置只保存稳定媒体公共 ID并在运行时解析为 `MediaData`，不暴露内部媒体行号、对象键或哈希。URL、颜色、整数、选项、字符串长度和总 JSON 大小由宿主校验。颜色等动态样式应输出到 `<style>` 元素：核心为最终渲染内容生成精确 CSP SHA-256 授权，支持无 JavaScript 展示。内联 `style` 属性仍被禁止，不要使用 `unsafe-inline`。
 
 ## 插槽与性能
 
-标准插槽为 `head.metadata`、`body.start`、`article.before`、`article.after`、`article.comments`、`body.end`。主题自行决定位置，但声明支持某个能力后必须渲染相应插槽。默认主题 CSS 压缩后不超过 40 KiB，阅读必需 JavaScript 不超过 15 KiB；脚本资源必须同源并使用指纹 URL。不要默认请求外部字体、分析脚本或图标 CDN。
+当前没有通用的命名 HTML 插槽注册 API。评论和 Newsletter 按 `.Features` 在模板中呈现对应入口，可参考默认主题；插件的 `RouteSlot` 只用于注册宿主保留的公共路径。默认主题 CSS 压缩后不超过 40 KiB，阅读必需 JavaScript 不超过 15 KiB；脚本资源必须同源并使用指纹 URL。不要默认请求外部字体、分析脚本或图标 CDN。
 
 ## 本地验证
 

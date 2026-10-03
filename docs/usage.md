@@ -1,398 +1,232 @@
-# 项目使用与运维手册
+# 使用与运维
 
-本文档说明当前仓库代码的实际使用方式，适用于本地开发、Docker Compose 自托管和发布前验收。它不替代安全策略或 ADR；涉及数据恢复、主题包、插件和外部网络时，应同时阅读对应的设计文档。
+## 安装
 
-## 1. 产品边界
-
-这是一个单站点、单站主的个人博客系统：
-
-- 内容类型只有文章和页面，正文的权威格式是数据库中的 Markdown。
-- 公开端、管理后台、后台任务和 CLI 由同一个 Go 程序承载。
-- SQLite 使用 WAL；默认只有一个写连接和有界读连接池。
-- 默认主题和所有官方插件都在程序内或嵌入资源中提供；可选能力默认关闭。
-- 主题只能呈现公开视图，不能执行服务端代码；插件是随程序编译的可信 Go 代码。
-
-以下能力不属于当前产品范围：多租户、多站点、角色/RBAC、读者账户、付费会员、自定义内容类型、页面搭建器、公开写 API、GraphQL、Redis、独立搜索服务和消息队列。
-
-## 2. 快速启动
-
-### 2.1 Docker Compose
-
-要求：Docker Engine 或 Docker Desktop、Compose v2，以及 curl。
+需要 Docker Engine 或 Docker Desktop、Compose v2 和 curl，宿主机 80、443 端口可用。
 
 ```bash
 ./scripts/deploy.sh
 ```
 
-`scripts/deploy.sh` 会在 `.env` 不存在时从 `.env.example` 创建它，明确使用 `compose.yaml`（不加载 `compose.override.yaml` 或 `COMPOSE_FILE`），校验配置并构建、启动服务。只有 `app` 内部就绪、公开地址的 `/readyz` 和首页均返回 200 才返回成功。重复执行时，如果检测到运行中的 `app`，默认先执行 `blog upgrade prepare` 创建升级前恢复点；首次部署或应用未运行时会跳过。可用 `--no-backup` 跳过恢复点，或用 `--no-build` 只启动已有镜像。也可以使用 `make deploy`。
+首次在终端运行时会提示输入域名，例如 `blog.example.com`，也可输入 `https://blog.example.com`；留空使用 `localhost`。脚本从 `.env.example` 创建权限为 `0600` 的 `.env`，写入 HTTPS 地址，构建镜像并启动服务。成功条件是应用内部就绪、公开地址的 `/readyz` 和首页均返回 HTTP 200。默认等待 180 秒，可用 `--wait` 调整。
 
-公开入口检查使用 Caddy 容器实际配置的 `BLOG_SITE_ADDRESS`，不跟随重定向。仅 `https://localhost`（含端口）允许本地内部证书；正式域名必须通过 TLS 证书校验。入口不可用时脚本返回失败并输出服务状态和最近日志。已有的本地 HTTP 覆盖文件仍可用于手动开发启动，但不会参与 `make deploy`。
-
-正式部署前请先编辑 `.env`，至少确认 `BLOG_SITE_ADDRESS` 是访问者实际使用的 HTTPS 地址；本地默认值可直接运行。部署后可手动检查：
+已有 `.env` 时沿用配置，不会重复询问或覆盖其他配置。首次用脚本创建后，中途构建失败也可重新执行。显式改域名只更新 `BLOG_SITE_ADDRESS`，保留密钥和其他设置：
 
 ```bash
-docker compose ps
+./scripts/deploy.sh --configure
+./scripts/deploy.sh --domain blog.example.com
+```
+
+`--domain` 也适用于 CI/脚本；`--non-interactive` 不询问输入，首次未指定域名时使用 `localhost`。域名不支持路径、端口、通配符或 IP 地址，中文域名应使用 Punycode。非终端环境默认不询问，不会卡在输入步骤。
+
+脚本检查 Docker daemon 和 Compose v2 是否可用。Docker 需先安装并启动；脚本不安装系统软件，也不修改 DNS 或防火墙。
+
+脚本只加载 `compose.yaml`，不读取 `compose.override.yaml` 或 `COMPOSE_FILE`。再次执行时，若应用正在运行，先创建升级前恢复点。选项见 `./scripts/deploy.sh --help`；`--no-build` 使用现有镜像，`--no-backup` 跳过恢复点。
+
+成功后脚本输出站点地址、初始化地址和登录地址。选择 `localhost` 时入口为 `https://localhost`，使用 Caddy 内部证书。检查本地服务：
+
+```bash
+docker compose -f compose.yaml ps
 curl --insecure https://localhost/livez
 curl --insecure https://localhost/readyz
 ```
 
-默认拓扑如下：
+正式域名部署前，将 A/AAAA 记录指向服务器并开放 TCP 80、443；注意删除指向其他服务器的旧 AAAA 记录。脚本把输入域名配置为 `BLOG_SITE_ADDRESS=https://域名`，Caddy 自动申请和续期证书，同时将 HTTP 重定向到 HTTPS，见 [Caddy 自动 HTTPS](https://caddyserver.com/docs/automatic-https)。正式域名的健康检查不要使用 `--insecure`。脚本不跟随重定向，只对 `https://localhost` 跳过证书校验。
 
-| 入口 | 地址 | 说明 |
-|---|---|---|
-| Caddy HTTP | `http://localhost` | 公开入口，生产环境通常会重定向或由站点地址决定协议 |
-| Caddy HTTPS | `https://localhost` | 默认公开入口；本地使用 Caddy 内部证书，命令行需要 `--insecure` |
-| Go 应用 | Compose 内部 `app:8080` | 不直接发布到宿主机；健康检查访问 `http://127.0.0.1:8080/readyz` |
-| 健康检查 | `/livez`、`/readyz` | 存活只检查进程；就绪检查数据库和迁移状态 |
+默认应用限制为 0.85 CPU / 256 MiB，Go 堆软上限 192 MiB；Caddy 为 0.15 CPU / 64 MiB。`data-init` 初始化数据目录后退出。
 
-`compose.yaml` 默认给应用设置 `0.85 CPU`、`256 MiB` 和 `GOMEMLIMIT=192MiB`，给 Caddy 设置 `0.15 CPU`、`64 MiB`。这些是资源边界，不应通过无界增加连接池、缓存或 goroutine 来绕开。
+## 首次初始化
 
-### 2.2 第一次初始化
+访问 `/admin/setup`，设置站点名、用户名和至少 12 个字符的密码，绑定 TOTP 验证器并离线保存一次性恢复码。之后使用密码和 TOTP 登录 `/admin/login`。
 
-启动后访问：
+每次部署只有一个站主。恢复码只在生成时显示，丢失认证信息后可通过服务器 CLI 恢复，见下文。
 
-```text
-https://localhost/admin/setup
-```
+## 本地运行
 
-按页面完成：
-
-1. 设置站点名称、站主用户名和至少 12 个字符的密码。
-2. 绑定兼容 TOTP 的验证器。
-3. 离线保存页面显示的一次性恢复码。
-4. 使用新的密码和 TOTP 登录 `/admin/login`。
-
-恢复码只在生成时显示。若丢失认证信息，使用服务器管理员权限执行 `blog auth recover`，不要把新密码写在 shell 命令参数中。
-
-### 2.3 本地 Go 启动
-
-开发机已安装 Go 1.26 和 C 编译器时：
+需要 Go 1.26 和 C 编译器：
 
 ```bash
-cp .env.example .env
 make build
 ./bin/blog serve --config config.example.toml
 ```
 
-默认监听 `:8080`。如果直接使用 HTTP 本地开发，应把公开基址设为 HTTP，避免浏览器因 Secure Cookie 无法保存会话：
+访问 `http://localhost:8080`。本地二进制不会自动加载 `.env`；使用 TOML 或显式环境变量配置：
 
 ```bash
 BLOG_BASE_URL=http://localhost:8080 ./bin/blog serve --config config.example.toml
 ```
 
-也可以在配置文件中修改 `[server].listen_address` 和 `[discovery].base_url`。
+## 配置
 
-## 3. 配置说明
+加载顺序为内置默认值 → TOML → 环境变量 → 路径解析与校验。`--config` 指定 TOML，未指定时读取 `BLOG_CONFIG_FILE`。相对数据目录以配置文件所在目录为基准，数据库、媒体和密钥位于数据目录内。
 
-配置加载顺序为：内置默认值 → TOML 文件 → 环境变量覆盖 → 路径解析与校验。通过 `--config` 指定 TOML；未指定时读取 `BLOG_CONFIG_FILE`，否则使用内置默认值。
+完整字段见 [`config.example.toml`](../config.example.toml)，环境变量示例见 [`.env.example`](../.env.example)。
 
-相对路径以配置文件所在目录为基准，数据目录内默认包含：
-
-```text
-<data_dir>/
-├── db/blog.sqlite       SQLite 主库及 WAL/SHM 文件
-├── media/               本地媒体对象
-├── cache/pages/         可删除、可重建的公开页面缓存
-├── backups/             本地备份归档
-├── secrets/auth.key     认证加密秘密，权限 0600
-├── themes/              已安装主题包
-└── plugins/             插件相关数据或运行目录
-```
-
-### 3.1 常用配置项
-
-| 配置 | 默认值 | 用途 |
-|---|---:|---|
-| `server.listen_address` | `:8080` | Go HTTP 监听地址 |
-| `server.shutdown_timeout` | `10s` | 优雅停止等待时间 |
-| `server.trusted_proxy_cidrs` | 空 | 允许读取转发客户端 IP 的代理网段 |
-| `storage.data_dir` | `./data` | 数据目录 |
-| `storage.adapter` | `local` | `local` 或 `s3` 媒体存储 |
-| `database.path` | `db/blog.sqlite` | 相对于数据目录的数据库路径 |
-| `database.read_connections` | `2` | 受限读连接池，允许范围 1–8 |
-| `media.max_upload_bytes` | `12 MiB` | 单个上传大小 |
-| `media.max_image_pixels` | `16,000,000` | 图片解码像素上限 |
-| `media.variant_widths` | `640,1280` | 派生图片宽度 |
-| `publishing.scheduler_interval` | `15s` | 定时发布与后台生命周期 tick |
-| `publishing.editing_snapshot_interval` | `15s` | 编辑快照间隔 |
-| `publishing.revision_limit` | `50` | 普通版本保留上限，发布检查点另行保护 |
-| `publishing.trash_retention_days` | `30` | 回收站保留时间 |
-| `discovery.base_url` | `http://localhost:8080` | canonical、Feed、Sitemap、JSON-LD 的基址 |
-| `operations.backup_interval` | `24h` | 定时备份间隔 |
-| `operations.backup_daily_retention` | `7` | 日备份保留数量 |
-| `operations.backup_weekly_retention` | `4` | 周备份保留数量 |
-| `security.session_lifetime` | `12h` | 登录会话有效期 |
-| `extensions.theme_package_max_bytes` | `32 MiB` | 主题 ZIP 上限 |
-| `extensions.theme_max_files` | `256` | 主题文件数上限 |
-| `extensions.theme_max_unpacked_bytes` | `64 MiB` | 主题解压总量上限 |
-
-### 3.2 环境变量覆盖
-
-Compose 示例优先使用 `.env` 注入部署值：
-
-```dotenv
-BLOG_SITE_ADDRESS=https://blog.example.com
-BLOG_AUTH_SECRET=<至少 32 字节的随机值>
-BLOG_TRUSTED_PROXY_CIDRS=172.30.0.0/24
-BLOG_MEMORY_LIMIT=192MiB
-BLOG_LOG_LEVEL=info
-BLOG_LOG_FORMAT=json
-```
-
-Compose 会把 `BLOG_SITE_ADDRESS` 转换为应用使用的 `BLOG_BASE_URL`。直接运行二进制时使用 `BLOG_BASE_URL`。
-
-秘密优先使用环境变量、Docker secret 或权限为 0600 的文件。不要把以下值提交到 Git、日志或审计：密码、TOTP、恢复码、会话、S3 密钥、SMTP 密码、Webhook 秘密、Newsletter token 和备份解密密钥。
-
-## 4. 公开端使用
-
-默认主题提供以下公开路径：
-
-| 路径 | 功能 |
-|---|---|
-| `/` | 首页 |
-| `/articles` | 文章列表和分页 |
-| `/posts/{slug}` | 文章详情 |
-| `/{slug}` | 页面详情 |
-| `/archive`、`/archive/{year}/{month}` | 年月归档 |
-| `/categories`、`/categories/{slug}` | 分类索引与详情 |
-| `/tags`、`/tags/{slug}` | 标签索引与详情 |
-| `/search` | 全文搜索、类型/分类/标签筛选 |
-| `/rss.xml` | RSS |
-| `/sitemap.xml` | Sitemap |
-| `/robots.txt` | Robots 规则 |
-| `/llms.txt` | 公开内容摘要入口 |
-| `/media/{public_id}/{variant}/{filename}` | 媒体原图或派生图 |
-
-公开页面只读取已发布修订，不读取草稿或编辑快照。文章更改公开内容后会增加 `render_epoch`，旧页面快照自然失效。
-
-文章详情支持阅读进度、目录、上一篇/下一篇、相关文章、复制链接、系统分享、打印和可选评论/Newsletter 插槽。关闭 JavaScript 时，核心导航、搜索和阅读路径仍保持服务端渲染。
-
-## 5. 管理后台使用
-
-所有 `/admin/*` 受站主会话、CSRF 和 Origin 检查保护。危险操作还需要服务端确认字段，即使绕过浏览器脚本也不能直接执行。
-
-### 5.1 内容
-
-- `/admin/articles`：文章内容库，可按状态、关键词、分类、标签和时间筛选。
-- `/admin/pages`：页面内容库。
-- `/admin/articles/new`、`/admin/pages/new`：新建内容。
-- 编辑页：保存标题、摘要、Markdown、slug、分类、标签、封面、SEO 字段。
-- 编辑快照：定时保存临时编辑状态；快照不是正式版本，不会公开。
-- 预览：使用当前编辑状态渲染，但不进入公共缓存。
-- 发布：创建不可变发布版本并登记 `ContentPublished.v1` 事件。
-- 定时发布：写入 `scheduled_at`，由数据库任务在应用重启后继续处理。
-- 撤回：保留内容身份和历史版本，停止公开读取。
-- 回收站：支持恢复和批量恢复；超过保留期后由有界清理任务处理。
-- 版本：查看、比较和恢复历史版本。恢复会创建新的 `restore` 版本，不修改旧版本。
-
-批量发布、撤回、回收站和恢复都使用锁版本检查；遇到并发编辑冲突时应刷新页面并重新确认目标版本。
-
-### 5.2 组织、媒体和主题
-
-- `/admin/organization`：分类、标签和导航。
-- `/admin/redirects`：查看或添加永久链接重定向；系统会阻止循环并保留旧公开路径。
-- `/admin/media`：上传媒体、填写替代文字、复制 Markdown、查看引用数量和删除保护。
-- `/admin/themes`：安装、预览、设置、激活和回退主题。
-- `/admin/plugins`：查看官方插件状态、能力和初始化结果，并启停插件。
-
-媒体删除前会扫描正文和结构化封面引用。主题激活失败时保持当前主题或内嵌默认主题，不让不完整包接管站点。
-
-### 5.3 站点设置和运维
-
-- `/admin/settings`：站点名称、公开基址、主要语言、时区、SEO 默认值、Feed 摘要策略、社交链接和默认社交图片。
-- `/admin/settings` 的密码、TOTP、恢复码和会话撤销操作均要求当前认证信息或显式挑战。
-- `/admin/operations/tasks`：查看 pending/running/failed 任务、租约和脱敏错误，并对失败任务执行人工重试。
-- `/admin/analytics`：启用隐私统计后查看 7/30/90 天聚合数据；公开端不加载统计脚本。
-- `/admin/plugins/comments.local/comments`：本地评论审核和批量审核。
-- `/admin/plugins/newsletter.local/subscribers` 或对应外部插件路径：Newsletter 订阅状态和确认邮件重发。
-
-## 6. 内容发布建议流程
-
-推荐的稳定工作流：
-
-1. 先创建草稿，确定标题、摘要和 slug。
-2. 选择一个分类，可添加多个标签；如果需要封面，先上传媒体并填写替代文字。
-3. 使用预览检查 Markdown、目录、图片、链接和 SEO 元数据。
-4. 正式保存后再发布或安排发布时间。
-5. 发布后检查文章永久链接、RSS、Sitemap 和搜索结果。
-6. 修改已发布文章时，保存会形成新版本；撤回、恢复和 slug 变化都会保留旧路径重定向。
-
-Markdown 正文是唯一正文来源。主题只消费清洗后的 HTML 和公开视图，不应在主题模板中拼接不受信任 HTML。
-
-## 7. 可选能力
-
-所有可选能力默认关闭，核心站点不依赖外部服务。
-
-| 能力 | 配置 | 公开/后台效果 |
+| 配置 | 默认值 | 作用 |
 |---|---|---|
-| 本地评论 | `comments.enabled=true`、`provider=local` | 文章评论、审核、批量审核、审核通过事件 |
-| 外部评论 | `comments.enabled=true`、`provider=external` | 使用受控外部评论入口，不启用本地评论存储 |
-| 隐私统计 | `analytics.enabled=true` | 内存聚合后写入日/月统计表，后台查看，默认不追踪 |
-| 本地 Newsletter | `newsletter.enabled=true`、`provider=local` | 加密邮箱、确认 token、退订 token 和后台任务 |
-| 外部 Newsletter | `provider=external`、配置 endpoint/token | 通过有界 HTTP 适配器异步同步 |
-| 只读 Content API | `content_api.enabled=true` | `/api/v1/site`、`/api/v1/posts`、`/api/v1/pages`，见 [API 文档](./api/content-api-v1.md) |
-| 签名 Webhook | `webhooks.enabled=true` | 发布/评论审核事件异步 HMAC 投递和重试 |
-| S3 媒体 | `storage.adapter=s3` | 上传、读取、删除和本地/S3 迁移 |
-| SMTP | `mail.enabled=true` | 评论/Newsletter 等通知通过 SMTP 任务发送 |
+| `server.listen_address` | `:8080` | 应用监听地址 |
+| `storage.data_dir` | `./data` | 数据目录；Compose 为 `/data/site` |
+| `database.read_connections` | `2` | 读连接数，范围 1–8；写连接固定为 1 |
+| `discovery.base_url` / `BLOG_BASE_URL` | `http://localhost:8080` | 应用公开基址 |
+| `BLOG_SITE_ADDRESS` | `https://localhost` | Compose 的 Caddy 地址，并映射为应用 `BLOG_BASE_URL` |
+| `server.trusted_proxy_cidrs` | 空 | 可信代理；Compose 默认为 `172.30.0.0/24` |
+| `media.max_upload_bytes` | `12 MiB` | 上传上限 |
+| `media.max_image_pixels` | `16,000,000` | 图片像素上限 |
+| `publishing.editing_snapshot_interval` | `15s` | 编辑快照间隔 |
+| `publishing.revision_limit` | `50` | 普通修订保留数，发布检查点另行保护 |
+| `publishing.trash_retention_days` | `30` | 回收站保留天数 |
+| `operations.backup_interval` | `24h` | 自动备份间隔 |
+| `security.session_lifetime` | `12h` | 会话有效期 |
 
-外部 endpoint、token 和密钥只应在受保护配置中提供。启用插件后，先在管理后台确认其路由、任务和失败状态，再投入生产流量。
+`BLOG_SITE_ADDRESS` 影响证书和公开 URL。后台 `/admin/settings` 保存过公开基址后，数据库中的值用于站点输出；更换域名时应同步更新后台设置与部署环境。
 
-## 8. CLI 参考
+Compose 传入 `BLOG_BASE_URL` 时，Cookie Secure 默认跟随其协议。直接使用 TOML 时检查 `security.cookie_secure`；HTTP 本地开发为 false，HTTPS 部署应为 true。需要显式覆盖时传入 `BLOG_COOKIE_SECURE`。
 
-以下命令都支持 `--config FILE`；容器部署时通常用 `docker compose exec -T app /blog ...`。
+应用只信任直接对端命中可信 CIDR 的转发头。新增代理时配置实际出口网段，不要使用 `0.0.0.0/0`。
 
-后台 `/admin/plugins` 支持停用、删除和重新添加。删除会自动停用并移出已安装列表，保留配置、业务数据和待处理任务；删除前需勾选确认。重新添加后保持停用，需手动启用。已删除状态在重启及显式插件启用配置下都会保留。
+### Compose 的可选配置
 
-### 8.1 生命周期、健康和认证
+`.env` 是 Compose 的变量替换来源，不会自动把所有变量传入容器。当前 `compose.yaml` 只映射监听地址、数据目录、日志、认证密钥、公开基址、可信代理和 Go 内存上限。仅在 `.env` 填写 `BLOG_MAIL_PASSWORD`、`BLOG_S3_SECRET_KEY` 或插件开关不会生效。
+
+可用单独的本地覆盖文件显式传入所需变量。例如启用带 token 的内容 API，新建 `compose.features.yaml`：
+
+```yaml
+services:
+  app:
+    environment:
+      BLOG_CONTENT_API_ENABLED: "true"
+      BLOG_CONTENT_API_TOKEN: ${BLOG_CONTENT_API_TOKEN:?请在受保护的环境中设置 token}
+```
+
+在 `.env` 中设置随机 token 后，使用明确的文件列表：
 
 ```bash
-blog serve --config config.toml
+# 已运行的站点先创建升级前恢复点
+docker compose -f compose.yaml -f compose.features.yaml exec -T app /blog upgrade prepare
+docker compose -f compose.yaml -f compose.features.yaml up --build -d
+```
+
+首次启动跳过恢复点命令。此部署之后的停止、升级和 CLI 命令也应使用相同文件列表；不要改用只加载基础文件的 `deploy.sh`，否则附加配置会丢失。保存凭据的环境文件和本地覆盖文件不得提交。
+
+也可挂载受限 TOML 文件，并显式传入 `BLOG_CONFIG_FILE`，或通过文件提供密钥；Docker secret 不会自动映射到应用配置。
+
+## 站点与后台
+
+公开路径包括 `/`、`/articles`、`/posts/{slug}`、`/{页面slug}`、`/archive`、`/categories`、`/tags` 和 `/search`。机器可读入口为 `/rss.xml`、`/sitemap.xml`、`/robots.txt`、`/llms.txt`。
+
+公开读取只使用已发布修订。修改已发布内容的 slug 会保留旧路径重定向；保存草稿和编辑快照不会直接替换公开正文。
+
+| 后台入口 | 用途 |
+|---|---|
+| `/admin/articles`、`/admin/pages` | 编辑、筛选、发布、排期、版本和批量操作 |
+| `/admin/organization`、`/admin/redirects` | 分类、标签、导航与重定向 |
+| `/admin/media` | 上传、替代文字、引用和删除保护 |
+| `/admin/themes` | 安装、设置、预览、激活、回退和移除主题 |
+| `/admin/plugins` | 查看、启停、移除和重新添加插件 |
+| `/admin/settings` | 站点、SEO、Feed 与站主安全设置 |
+| `/admin/operations/tasks` | 任务状态、脱敏错误与失败重试 |
+
+主题移除保留包、设置和历史，不释放磁盘空间；当前主题和内嵌默认主题不能移除。插件移除保留配置、数据与任务，重启不会自动恢复。重新添加后不会自动启用。
+
+## 可选能力
+
+| 能力 | TOML 配置 | 说明 |
+|---|---|---|
+| 评论 | `comments.enabled=true`，`provider=local` 或 `external` | 本地审核或外部入口，两者互斥 |
+| 隐私统计 | `analytics.enabled=true` | 本地聚合，后台 `/admin/analytics` |
+| Newsletter | `newsletter.enabled=true`，`provider=local` 或 `external` | 确认订阅、退订与任务；外部服务需 endpoint/token |
+| 内容 API | `content_api.enabled=true` | 只读已发布数据，见 [API 参考](api/content-api-v1.md) |
+| Webhook | `webhooks.enabled=true` | 提交后签名投递，需要 endpoint/secret |
+| S3 媒体 | `storage.adapter=s3` | S3 兼容对象存储 |
+| SMTP | `mail.enabled=true` | 异步通知，需邮件服务器配置 |
+
+`BLOG_CONTENT_API_TOKEN`、`BLOG_NEWSLETTER_TOKEN`、`BLOG_WEBHOOK_SECRET` 从环境变量读取，不能写成 TOML 字段。Newsletter 还需在 TOML 设置 `enabled=true`；当前没有对应的环境开关。插件页面不能代替启动配置中的外部凭据。网络适配器的现有限制见[实现说明](architecture-implementation.md)。
+
+## CLI
+
+使用二进制 `blog <命令>`；Compose 通常为 `docker compose -f compose.yaml exec -T app /blog <命令>`。涉及独占数据锁的命令应停止服务后用 `run --rm -T app` 执行。各子命令选项用 `--help` 查看。
+
+```bash
+blog version
+blog status --config config.toml
 blog migrate --config config.toml
 blog healthcheck --url http://127.0.0.1:8080/readyz
-blog status --config config.toml
-blog version
-
-# 从 stdin 恢复站主认证；不会把密码放进命令行参数
-printf '%s\n' 'new-password' | blog auth recover --username owner --password-file -
+blog audit list --config config.toml --limit 50
 ```
 
-`status` 重点查看 `migration_version`、`pending_jobs`、`running_jobs`、`failed_jobs`、`valid_backups`、最近备份和最近恢复演练时间。
+`migrate` 打开数据库、应用向前迁移并输出版本，不是回滚工具。
 
-### 8.2 备份、恢复和升级
+### 备份与恢复
+
+默认每 24 小时备份，保留 7 个每日点、4 个每周点；手动和升级前恢复点不受自动保留策略删除。备份使用 SQLite 一致性快照，包含数据库、媒体、主题、插件数据和认证秘密，不含缓存或其他备份。
 
 ```bash
-blog backup create --config config.toml
-blog backup list --config config.toml --limit 20
-blog backup verify --config config.toml --archive /data/site/backups/site.tar.gz
-blog backup drill --config config.toml --archive /data/site/backups/site.tar.gz
-blog upgrade prepare --config config.toml
-blog restore --config config.toml --archive /data/site/backups/site.tar.gz --target-data-dir /data/isolated
+docker compose -f compose.yaml exec -T app /blog backup create
+docker compose -f compose.yaml exec -T app /blog backup list
+docker compose -f compose.yaml exec -T app /blog backup verify --archive /data/site/backups/site.tar.gz
+docker compose -f compose.yaml exec -T app /blog backup drill --archive /data/site/backups/site.tar.gz
+docker compose -f compose.yaml exec -T app /blog upgrade prepare
 ```
 
-`backup create` 使用一致性快照和逐文件 checksum；本地备份包含数据库、媒体、认证秘密、主题和插件数据，不包含缓存和其他备份。`backup drill` 只恢复到临时目录并标记演练时间，不替换正在运行的站点。
+将 `site.tar.gz` 替换为实际归档文件名。`backup drill` 恢复到隔离目录，不替换当前实例。备份默认未加密，文件权限为 `0600`；可配置独立加密密钥文件和 S3 备份目标。异地副本必须单独验证和演练。
 
-正式替换前必须停止应用并确认归档已验证：
+恢复前验证归档并停止应用：
 
 ```bash
-docker compose stop app
-docker compose run --rm -T app restore \
-  --archive /data/site/backups/site.tar.gz \
-  --target-data-dir /data/site \
-  --replace
-docker compose up -d
-docker compose exec -T app /blog status
+docker compose -f compose.yaml stop app
+docker compose -f compose.yaml run --rm -T app restore   --archive /data/site/backups/site.tar.gz --replace
+docker compose -f compose.yaml up -d
+docker compose -f compose.yaml exec -T app /blog status
 ```
 
-`--replace` 会把旧数据放入 `site.before-restore-*` 回滚目录。健康检查、首页和关键公开输出确认无误前，不要删除该目录。
+`--replace` 保留旧数据于命令输出的 `site.before-restore-*` 目录。若归档原来在旧数据目录中，恢复后也在该回滚目录内。检查健康、首页与内容，并另行保存归档后再处理旧目录。
 
-### 8.3 主题、归档和存储迁移
+不要直接复制活跃 SQLite 主文件并忽略 WAL/SHM。`docker compose -f compose.yaml down` 保留卷，`down -v` 会删除卷。
+
+### 认证恢复
+
+使用权限为 `0600`、内容为新密码的文件，避免密码进入 shell 历史。命令会轮换密码、TOTP 和恢复码，撤销旧会话。
 
 ```bash
-blog theme install --config config.toml --archive dist/theme.zip
+docker compose -f compose.yaml stop app
+docker compose -f compose.yaml run --rm -T   -v "$PWD/recovery-password.txt:/run/recovery-password:ro"   app auth recover --username owner --password-file /run/recovery-password
+docker compose -f compose.yaml up -d
+```
+
+将用户名替换为实际站主。上述命令由宿主机读取文件，通过标准输入传入容器。输出含新的 TOTP 密钥和恢复码，请离线保存，及时删除密码文件，不要提交或粘贴到公开日志。
+
+### 主题、归档与导入
+
+以下为本地二进制示例，使用同一配置和数据目录前应停止正在运行的服务：
+
+```bash
+blog theme install --config config.toml --archive paper.zip
 blog theme list --config config.toml
 blog theme activate --config config.toml --id org.example.paper --version 1.0.0
 blog theme rollback --config config.toml
 
-blog archive export --config config.toml --output dist/content.zip
-blog archive verify --config config.toml --archive dist/content.zip
-blog archive import --config config.toml --archive dist/content.zip --dry-run
-blog archive import --config config.toml --archive dist/content.zip
+blog archive export --config config.toml --output content.zip
+blog archive verify --config config.toml --archive content.zip
+blog archive import --config config.toml --archive content.zip --dry-run
+blog archive import --config config.toml --archive content.zip
 
-blog storage migrate --config config.toml --to s3
-blog storage migrate --config config.toml --to local
-```
-
-主题和归档操作会取得数据锁。归档导入必须先 dry-run；归档格式包含稳定公共 ID、修订正文、媒体引用、重定向和公开站点设置，但不导出密码、token 或 provider secret。
-
-### 8.4 离线导入
-
-```bash
 blog import wordpress --config config.toml --input export.xml --dry-run --report report.json
 blog import ghost --config config.toml --input ghost.json --dry-run
-blog import markdown --config config.toml --input ./content --dry-run --report report.json
-blog import markdown --config config.toml --input ./content
-blog audit list --config config.toml --limit 50
+blog import markdown --config config.toml --input ./content --dry-run
+blog storage migrate --config config.toml --to s3
 ```
 
-导入器限制输入文件、ZIP 条目、路径和解压总量；首次使用必须查看 dry-run 报告中的 planned、conflicts、warnings 和 duplicate，再执行正式导入。正式导入默认创建草稿，不直接覆盖已发布内容。
+导入前查看 dry-run 的冲突、警告和重复项。WordPress/Ghost/Markdown 导入默认创建草稿。内容归档支持媒体、引用、修订、重定向和公开设置，不包含认证秘密；它不能代替完整备份。存储迁移前先创建独立备份。
 
-## 9. 备份和数据安全规则
+## 故障排查
 
-- 不要复制运行中的 `blog.sqlite` 而忽略 `-wal`/`-shm`；使用 `backup create` 的一致性流程。
-- 恢复、主题切换、归档导入和存储迁移前保留独立备份，并确保没有另一个进程持有数据锁。
-- 本地未加密备份包含认证秘密，必须限制为 0600 并存放在受保护介质；需要异地保存时启用加密密钥文件或受控远程存储。
-- 不要把 `data/`、数据库、备份、auth key、S3/SMTP/Webhook secret、导入报告和运行产物提交到 Git。
-- 任何公开内容变更都应通过应用服务完成，不直接修改 SQLite 表；否则可能漏掉版本、重定向、`render_epoch`、搜索 dirty 标记或事件 outbox。
+| 问题 | 检查 |
+|---|---|
+| 页面打不开 | `docker compose -f compose.yaml ps -a` 与 `logs --tail=200 app caddy`；区分应用、端口、DNS 和证书问题 |
+| 数据锁冲突 | 停止使用同一数据目录的其他实例，再执行恢复、导入或主题 CLI |
+| 登录后返回登录页 | 检查公开协议、Cookie Secure、代理与站点基址是否一致 |
+| 搜索暂时缺内容 | 等待后台同步，查看任务和日志；不要删除正文数据 |
+| 插件没有路由 | 检查实际容器配置、插件初始化状态和移除状态，不能仅检查 `.env` |
+| 备份或外发失败 | 查看 `blog status` 和任务页，确认存储/网络/凭据；修正后重试 |
 
-## 10. 故障排查
-
-### 应用启动但页面打不开
-
-```bash
-docker compose ps -a
-docker compose logs --tail=200 app
-docker compose exec -T app /blog healthcheck --url http://127.0.0.1:8080/readyz
-docker compose exec -T app /blog status
-```
-
-先区分 app 和 Caddy：app 健康但 Caddy 为 `Created`/`Exited`，通常是 Caddyfile 路径共享、端口占用或证书目录权限问题；app 不健康则先看迁移、数据目录权限和认证秘密。
-
-### 显示数据库被占用或数据锁
-
-确认没有同时运行本地二进制、Compose app、backup/restore/import 或 theme/storage 命令。恢复和离线导入必须停止正式服务，避免两个进程同时写数据目录。
-
-### 登录后立刻回到登录页
-
-检查公开基址协议与 Cookie Secure：
-
-- HTTPS 站点应使用 `BLOG_SITE_ADDRESS=https://...`。
-- HTTP 本地开发应使用 `BLOG_BASE_URL=http://...` 或显式 `BLOG_COOKIE_SECURE=false`。
-- 反向代理部署时只把实际代理出口网段写入 `BLOG_TRUSTED_PROXY_CIDRS`。
-
-### 搜索结果暂时不完整
-
-搜索是可重建的异步投影。发布成功不依赖搜索同步；等待生命周期任务处理，查看 `/admin/operations/tasks` 和应用日志。若索引损坏，按运维记录执行有界重建，不直接删除正文数据。
-
-### 可选插件没有路由
-
-插件默认关闭。确认 TOML 或环境变量已启用、插件初始化没有失败，并在 `/admin/plugins` 查看状态。停用插件不会删除配置、数据或任务；重新启用后可继续处理保留任务。
-
-## 11. 开发和发布验证
-
-所有 Go 命令都必须使用固定构建标签：`fts5 sqlite_omit_load_extension`。
-
-```bash
-make test
-make test-race
-make vet
-go mod verify
-make build
-git diff --check
-make perf-gate
-make stage3-acceptance
-```
-
-浏览器回归：
-
-```bash
-make browser
-BROWSER_STRICT=1 make browser
-```
-
-严格模式要求 Playwright、Chromium、Firefox 和 WebKit 已安装；没有浏览器时不能把 Go HTTP 测试当作浏览器验收。
-
-发布检查：
-
-```bash
-make sbom
-make license-audit
-make release
-```
-
-`make release` 默认生成本地多架构 OCI 归档、SBOM/许可证报告和 `SHA256SUMS`；只有明确需要推送镜像时才设置 `PUSH=1`。
-
-当前验证边界应以 [阶段四实施记录](./progress/phase-four-product-and-public-capabilities.md) 和 [阶段三性能报告](./progress/phase-three-performance-implementation.md) 为准：代码级测试已覆盖主要能力，但 Caddy/TLS、严格浏览器、目标容器资源压测、真实封面媒体容量和部分隔离恢复证据需要在相应环境补验。
-
-### 主题删除与重新添加
-
-后台主题页允许删除未启用的已安装主题。删除以 `themes.removed_at` 标记，从已安装列表移除，保留主题包、设置和切换历史；不能删除当前主题或内嵌默认回退主题。删除需要登录、CSRF 校验与显式确认，重复操作不会重复写审计记录。已删除主题不能启用、预览或修改设置；重新添加会重新校验包、目录校验和与设置，且不会自动启用。若回退历史指向已删除主题，则使用内嵌默认主题。主题删除不会释放磁盘空间。
+开发测试与发行命令见[贡献指南](../CONTRIBUTING.md)。历史验收结果见[历史索引](history.md)，不代替当前环境的测试。

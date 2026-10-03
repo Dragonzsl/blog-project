@@ -1,5 +1,7 @@
 # 改进阶段四实施记录：产品体验与公共能力
 
+> 历史记录：版本、测试与待办仅代表记录时的状态。当前说明见[文档入口](../README.md)。
+
 > 状态：阶段四核心实现及本轮缺口收口完成；Docker 内部综合验收通过，宿主机公开入口仍受 Docker Desktop 路径共享限制。
 > 日期：2026-09-12
 > 设计基线：[阶段四实施计划](../development/phase-four-product-and-public-capabilities-plan.md)
