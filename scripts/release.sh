@@ -4,6 +4,8 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=${DIST_DIR:-"$ROOT/dist"}
 VERSION=${VERSION:-dev}
+COMMIT=${COMMIT:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf unknown)}
+BUILD_TIME=${BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
 IMAGE=${IMAGE:-personal-blog:$VERSION}
 PLATFORMS=${PLATFORMS:-linux/amd64,linux/arm64}
 mkdir -p "$DIST"
@@ -17,10 +19,13 @@ fi
 
 if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1; then
 	OUTPUT="type=oci,dest=$DIST/personal-blog-$VERSION.oci.tar"
+	set -- docker buildx build --platform "$PLATFORMS" --tag "$IMAGE" \
+		--build-arg "VERSION=$VERSION" --build-arg "COMMIT=$COMMIT" \
+		--build-arg "BUILD_TIME=$BUILD_TIME" --provenance=false --sbom=false
 	if [ "${PUSH:-0}" = "1" ]; then
-		docker buildx build --platform "$PLATFORMS" --tag "$IMAGE" --provenance=false --sbom=false --push "$ROOT"
+		"$@" --push "$ROOT"
 	else
-		docker buildx build --platform "$PLATFORMS" --tag "$IMAGE" --provenance=false --sbom=false --output "$OUTPUT" "$ROOT"
+		"$@" --output "$OUTPUT" "$ROOT"
 	fi
 else
 	echo "docker buildx is unavailable; skipped multi-architecture image build" >&2

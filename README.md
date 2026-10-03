@@ -2,6 +2,8 @@
 
 单站点、单站主的自托管博客。使用 Go、SQLite 和 Markdown，公开页面与管理后台均由服务端渲染。生产环境无需 Node.js、Redis 或独立数据库服务。
 
+当前版本为 [v0.1.0-alpha.1](https://github.com/Dragonzsl/blog-project/releases/tag/v0.1.0-alpha.1)，首次公开预览版。适合试用与反馈；升级兼容性尚未承诺，使用真实内容前请准备并验证备份。版本记录见 [CHANGELOG](CHANGELOG.md)。
+
 ## 功能
 
 - 文章与页面：草稿、预览、定时发布、版本比较与恢复、批量操作、回收站。
@@ -18,9 +20,9 @@
 需要 Docker Engine 或 Docker Desktop、Docker Compose v2 和 curl。默认占用宿主机的 80、443 端口。
 
 ```bash
-git clone https://github.com/Dragonzsl/blog-project.git
+git clone --branch v0.1.0-alpha.1 --depth 1 https://github.com/Dragonzsl/blog-project.git
 cd blog-project
-./scripts/deploy.sh
+BLOG_VERSION=0.1.0-alpha.1 ./scripts/deploy.sh
 ```
 
 首次运行会提示输入域名，留空使用 `localhost`。脚本生成权限为 `0600` 的 `.env`，构建镜像、启动服务并检查 HTTPS 入口；成功后输出站点和初始化地址。打开输出的 `/admin/setup`，创建站主、绑定 TOTP 验证器并保存恢复码。
