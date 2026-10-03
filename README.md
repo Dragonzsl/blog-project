@@ -15,6 +15,25 @@
 
 一次部署只有一个站点和一个站主，不提供协作者、读者账户、付费会员或任意服务端插件上传。
 
+## 轻量与性能
+
+- **运行依赖少**：一个 Go 应用配合 SQLite，搜索使用内置 FTS5，后台任务在同一进程运行。默认部署只需应用和 Caddy，无需额外数据库、缓存或队列服务。
+- **资源有上限**：默认 Compose 将应用限制为 0.85 CPU / 256 MiB，Go 内存软上限为 192 MiB；Caddy 另限 0.15 CPU / 64 MiB。连接池、页面缓存和任务批次均有界。
+- **阅读负担小**：页面由服务端输出，JavaScript 用于渐进增强；默认主题不加载第三方字体、脚本或 CDN 资源。公开页面缓存复用渲染结果，内容变化时自动失效。
+- **按需读取内容**：列表查询不加载正文，性能测试覆盖 10,000 条内容的分页查询，避免内容增长后每次请求扫描整站正文。
+
+`make perf-gate` 检查默认主题 CSS 大小、Markdown 渲染、缓存读取、搜索和列表查询。Alpha 发布前已通过这些进程内测试；容器配额是资源限制，实际占用和访问容量取决于内容、插件与流量，测试结果不等同于公网压测。预算与测试范围见 [ADR-0031](docs/adr/0031-performance-budgets-are-release-gates.md) 和[性能测试](internal/perf)。
+
+测试结果与复现入口：
+
+- [性能优化后压测与验收](docs/progress/phase-three-performance-implementation.md)：10,000 篇文章的并发矩阵、目标 100 RPS 实测、冷渲染瓶颈与环境限制。
+- [优化前压测基线](docs/progress/phase-three-concurrency-load-report.md)：历史错误边界和瓶颈定位，供前后对照。
+- [万条内容规模测试](docs/progress/phase-three-scale-and-operations.md)：列表查询耗时、堆内存增量与门槛结果。
+- [Content API 测试结果](docs/progress/phase-four-product-and-public-capabilities.md)：游标分页与增量查询；报告中的 `rps=444.9` 实际为内容条数/秒。
+- [HTTP 压测代码](internal/app/phase3_http_load_test.go)：独立构建标签 `phase3load`，不随普通测试或 `make perf-gate` 运行。
+
+上述报告是历史实测记录，测试环境和代码阶段见各报告；不代表当前版本在默认容器配额下的持续压测结果。
+
 ## 快速开始
 
 需要 Docker Engine 或 Docker Desktop、Docker Compose v2 和 curl。默认占用宿主机的 80、443 端口。
