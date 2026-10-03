@@ -4,14 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f7f5ef" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#111713" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f1e8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#202722" media="(prefers-color-scheme: dark)">
   {{template "theme_bootstrap" .}}
   <title>{{.SiteName}}</title>
   <meta name="description" content="{{.SiteName}}的文章与思考。">
   {{template "page_metadata" .Meta}}
   <link rel="stylesheet" href="{{.AssetURL}}">
   {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+  {{if .SearchScriptURL}}<script src="{{.SearchScriptURL}}" defer></script>{{end}}
 </head>
 <body class="home-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -19,39 +20,53 @@
   <main id="main-content">
     <section class="hero">
       <div class="hero-copy">
-        <p class="kicker">Independent writing</p>
-        <h1>慢下来，<br>把值得留下的写清楚。</h1>
-        <p>这里收录文章、笔记与持续生长的想法。</p>
+        <p class="kicker">{{.SiteName}} <span aria-hidden="true">·</span> 个人博客</p>
+        <h1>记录日常，<br><span>分享所想。</span></h1>
+        <p>分享生活记录、读书笔记与个人思考。</p>
+        <div class="hero-actions">
+          <a class="primary-action" href="/articles">查看文章 <span aria-hidden="true">↗</span></a>
+          <a class="text-action" href="/archive">文章归档</a>
+        </div>
       </div>
     </section>
     {{with .Home.Featured}}
     <section class="featured-section" aria-labelledby="featured-heading">
-      <div class="section-heading"><p class="kicker">Editor's pick</p><h2 id="featured-heading">精选文章</h2></div>
-      <a class="featured-card" href="{{.Path}}"><div class="featured-card-meta"><span>值得先读</span>{{if .PublishedAt}}<time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{end}}</div><h3>{{.Title}}</h3>{{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}<span class="featured-card-link">打开文章 <span aria-hidden="true">↗</span></span></a>
+      <div class="section-heading"><div><p class="kicker">精选文章</p><h2 id="featured-heading">推荐文章</h2></div>{{if .ReadingTime}}<span class="tag">约 {{.ReadingTime}} 分钟阅读</span>{{end}}</div>
+      <a class="featured-card" href="{{.Path}}" aria-label="阅读全文：{{.Title}}">
+        {{with .Cover}}<img class="featured-card-cover" src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="lazy">{{end}}
+        <div class="featured-card-copy">
+          <div class="featured-card-meta">{{with .Category}}<span class="tag">{{.Name}}</span>{{end}}{{if .PublishedAt}}<time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{end}}</div>
+          <h3>{{.Title}}</h3>{{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}
+          <span class="featured-card-link">阅读全文 <span aria-hidden="true">→</span></span>
+        </div>
+      </a>
     </section>
     {{end}}
     {{if .Home.Recent}}
     <section class="article-list" aria-labelledby="latest-heading">
-      <div class="section-heading"><p class="kicker">Latest</p><h2 id="latest-heading">最近文章</h2><a class="section-link" href="/articles">查看全部 <span aria-hidden="true">→</span></a></div>
-      <div class="article-list-items">
-        {{range .Home.Recent}}
-        <article class="article-card">
-          <div class="article-meta"><time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{if .ReadingTime}}<span class="article-reading-time">· {{.ReadingTime}} 分钟</span>{{end}}{{with .Category}}<a href="{{.URL}}">{{.Name}}</a>{{end}}</div>
-          <div class="article-card-content">
-            {{with .Cover}}<img class="article-card-cover" src="{{.URL}}" alt="{{.Alt}}" width="{{.Width}}" height="{{.Height}}"{{if .SrcSet}} srcset="{{.SrcSet}}"{{end}} loading="lazy">{{end}}
-            <h3><a href="{{.Path}}">{{.Title}}</a></h3>
-            {{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}
-          </div>
-          <a class="read-more" href="{{.Path}}"><span>阅读全文</span><span class="read-more-arrow" aria-hidden="true">→</span></a>
-        </article>
+      <div class="section-heading"><div><p class="kicker">最新发布</p><h2 id="latest-heading">最新文章</h2></div><a class="section-link" href="/articles">全部文章 <span aria-hidden="true">↗</span></a></div>
+      <div class="recent-layout">
+        {{with index .Home.Recent 0}}
+        <a class="recent-lead" href="{{.Path}}" aria-label="阅读全文：{{.Title}}">
+          <span class="recent-watermark" aria-hidden="true">{{if ge (len .PublishedISO) 10}}{{slice .PublishedISO 8 10}}{{end}}</span>
+          <div class="recent-lead-top">{{with .Category}}<span class="tag">{{.Name}}</span>{{end}}{{if .ReadingTime}}<span>{{.ReadingTime}} 分钟阅读</span>{{end}}{{if .PublishedAt}}<time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{end}}</div>
+          <div class="recent-lead-copy"><h3>{{.Title}}</h3>{{if .Excerpt}}<p>{{.Excerpt}}</p>{{end}}</div>
+          <span class="recent-lead-bottom">阅读全文 <span aria-hidden="true">→</span></span>
+        </a>
         {{end}}
+        {{if gt (len .Home.Recent) 1}}<div class="recent-side-list" aria-label="更多最新文章">
+          {{range $index, $article := .Home.Recent}}{{if and (gt $index 0) (lt $index 4)}}
+          <a class="recent-side-item" href="{{$article.Path}}" aria-label="阅读全文：{{$article.Title}}">
+            <time class="recent-side-date" datetime="{{$article.PublishedISO}}"><span>{{if ge (len $article.PublishedISO) 10}}{{slice $article.PublishedISO 5 7}}月{{end}}</span><strong>{{if ge (len $article.PublishedISO) 10}}{{slice $article.PublishedISO 8 10}}{{end}}</strong></time>
+            <div class="recent-side-copy"><div class="meta-row">{{with $article.Category}}<span class="tag">{{.Name}}</span>{{end}}{{if $article.ReadingTime}}<span>{{$article.ReadingTime}} 分钟阅读</span>{{end}}</div><h3>{{$article.Title}}</h3>{{if $article.Excerpt}}<p>{{$article.Excerpt}}</p>{{end}}</div>
+          </a>
+          {{end}}{{end}}
+        </div>{{end}}
       </div>
     </section>
-    {{else}}
-    <section class="empty"><p class="kicker">Soon</p><h2>第一篇文章正在路上。</h2><p>稍后回来看看，新的文字会出现在这里。</p><div class="empty-actions"><a class="primary-action" href="/search">搜索内容 <span aria-hidden="true">→</span></a><a class="text-action" href="/archive">浏览归档 <span aria-hidden="true">↗</span></a></div></section>
+    {{else if not .Home.Featured}}
+    <section class="empty"><p class="kicker">最新文章</p><h2>这里还没有已发布文章。</h2><p>文章发布后会显示在这里。</p><div class="empty-actions"><a class="text-action" href="/archive">浏览归档 <span aria-hidden="true">↗</span></a></div></section>
     {{end}}
-    {{if .Home.Categories}}<section class="home-discovery" aria-labelledby="home-categories-heading"><div class="section-heading"><p class="kicker">Explore</p><h2 id="home-categories-heading">从主题开始</h2><a class="section-link" href="/categories">全部分类 <span aria-hidden="true">→</span></a></div><div class="home-category-grid">{{range .Home.Categories}}<a class="home-category-card" href="{{.URL}}"><span>{{.ArticleCount}} 篇文章</span><strong>{{.Name}}</strong>{{if .Description}}<p>{{.Description}}</p>{{end}}</a>{{end}}</div></section>{{end}}
-    {{if or .Home.Archive .Home.About}}<section class="home-footer-grid" aria-label="更多内容">{{if .Home.Archive}}<div class="home-archive"><div class="section-heading"><p class="kicker">Timeline</p><h2>按时间浏览</h2><a class="section-link" href="/archive">打开归档 <span aria-hidden="true">→</span></a></div><div class="archive-preview">{{range .Home.Archive}}<a href="{{.URL}}"><strong>{{.Label}}</strong><span>{{.Count}} 篇</span></a>{{end}}</div></div>{{end}}{{with .Home.About}}<div class="home-about"><p class="kicker">A note from here</p><h2>关于这个地方</h2><p>{{if .Excerpt}}{{.Excerpt}}{{else}}了解站点的写作方向与作者。{{end}}</p><a class="text-action" href="{{.Path}}">认识作者 <span aria-hidden="true">→</span></a></div>{{end}}</section>{{end}}
     {{if .Features.Newsletter}}{{template "newsletter_slot" .}}{{end}}
   </main>
   {{template "public_footer" .}}

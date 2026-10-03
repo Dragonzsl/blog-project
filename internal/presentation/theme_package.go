@@ -704,6 +704,13 @@ func NewThemeFromDirectory(root string, manifest ThemeManifest) (*Theme, error) 
 			return nil, fmt.Errorf("add default public template %q: %w", name, err)
 		}
 	}
+	// The fallback shell uses pagination for Spotlight results. Theme API v1
+	// packages are not required to provide this helper.
+	if templates.Lookup("pagination") == nil {
+		if templates, err = templates.ParseFS(defaulttheme.Files, "templates/pagination.html"); err != nil {
+			return nil, fmt.Errorf("add default pagination template: %w", err)
+		}
+	}
 	css, err := os.ReadFile(filepath.Join(root, "assets", "theme.css"))
 	if err != nil {
 		return nil, fmt.Errorf("read theme stylesheet: %w", err)

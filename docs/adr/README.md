@@ -48,8 +48,9 @@ ADR 保留做出决定时的原始上下文。被取代的记录不删除，以�
 - [0010 运行时 Go 模板主题](./0010-runtime-go-template-themes.md)
 - [0021 可选本地评论插件](./0021-optional-local-comments-plugin.md)
 - [0026 可选本地统计插件](./0026-optional-privacy-first-local-analytics.md)
-- [0029 现代编辑式默认主题](./0029-modern-editorial-default-theme.md)
+- [0029 现代编辑式默认主题](./0029-modern-editorial-default-theme.md) — 已被 0039 取代
 - [0032 可选只读 API 与 Webhook](./0032-optional-read-only-content-api-and-webhooks.md)
+- [0039 宋韵山水默认主题](./0039-song-scroll-default-theme.md)
 
 ## 安全
 

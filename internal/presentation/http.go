@@ -212,8 +212,12 @@ func (h *HTTPHandler) RegisterPublic(router chi.Router) {
 	router.Head("/llms.txt", h.llms)
 	router.Get("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
 	router.Head("/assets/theme/{themeID}/{fingerprint}/theme.css", h.asset)
+	router.Get("/assets/theme/{themeID}/{fingerprint}/song-ink-landscape-background.webp", h.landscapeAsset)
+	router.Head("/assets/theme/{themeID}/{fingerprint}/song-ink-landscape-background.webp", h.landscapeAsset)
 	router.Get("/assets/theme/{themeID}/{fingerprint}/theme.js", h.scriptAsset)
 	router.Head("/assets/theme/{themeID}/{fingerprint}/theme.js", h.scriptAsset)
+	router.Get("/assets/theme/{themeID}/{fingerprint}/theme-search.js", h.searchScriptAsset)
+	router.Head("/assets/theme/{themeID}/{fingerprint}/theme-search.js", h.searchScriptAsset)
 	router.Get("/{slug}", h.page)
 	router.Head("/{slug}", h.page)
 }
@@ -1077,6 +1081,49 @@ func (h *HTTPHandler) scriptAsset(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *HTTPHandler) searchScriptAsset(w http.ResponseWriter, r *http.Request) {
+	theme := h.currentTheme()
+	if theme == nil || theme.SearchScriptHash() == "" || chi.URLParam(r, "themeID") != theme.ThemeID() || chi.URLParam(r, "fingerprint") != theme.SearchScriptHash() {
+		http.NotFound(w, r)
+		return
+	}
+	etag := `"` + theme.SearchScriptHash() + `"`
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(theme.SearchJS())
+	}
+}
+
+func (h *HTTPHandler) landscapeAsset(w http.ResponseWriter, r *http.Request) {
+	theme := h.theme
+	if h.themeManager != nil {
+		theme = h.themeManager.Fallback()
+	}
+	if theme == nil || theme.ThemeID() != DefaultThemeID || theme.LandscapeHash() == "" || chi.URLParam(r, "themeID") != DefaultThemeID || chi.URLParam(r, "fingerprint") != theme.LandscapeHash() {
+		http.NotFound(w, r)
+		return
+	}
+	etag := `"` + theme.LandscapeHash() + `"`
+	w.Header().Set("Content-Type", "image/webp")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if matchesETag(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	if r.Method != http.MethodHead {
+		_, _ = w.Write(theme.Landscape())
+	}
+}
+
 func (h *HTTPHandler) serveCached(w http.ResponseWriter, r *http.Request, semanticKey string, render func(context.Context) ([]byte, string, error)) {
 	h.serveCachedDocument(w, r, semanticKey, "text/html; charset=utf-8", render)
 }
@@ -1166,7 +1213,10 @@ func (h *HTTPHandler) writeCacheEntry(w http.ResponseWriter, r *http.Request, en
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if entry.LastModified != "" && notModifiedSince(r, entry.LastModified) {
+	// If-None-Match takes precedence over If-Modified-Since. When a theme
+	// changes but the article timestamp does not, returning 304 based on the
+	// timestamp would keep the browser's old HTML (and old theme asset URL).
+	if r.Header.Get("If-None-Match") == "" && entry.LastModified != "" && notModifiedSince(r, entry.LastModified) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -1190,7 +1240,7 @@ func (h *HTTPHandler) writeGenerated(w http.ResponseWriter, r *http.Request, con
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if lastModified != "" && notModifiedSince(r, lastModified) {
+	if r.Header.Get("If-None-Match") == "" && lastModified != "" && notModifiedSince(r, lastModified) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}

@@ -114,7 +114,7 @@ func TestPhaseOnePublicCollectionsAndArticleComposition(t *testing.T) {
 		t.Fatalf("category canonical URL is wrong: %s", categoryPage.Body.String())
 	}
 	assertPublic("/tags/blog?page=2", "# 博客", "第 2 / 2 页", "主流博客重构 01")
-	assertPublic("/search?q=重构&page=2", "找到 21 项结果", "第 2 / 2 页", "主流博客<mark>重构</mark>")
+	assertPublic("/search?q=重构&page=2", "找到 21 条结果", "第 2 / 2 页", "主流博客<mark>重构</mark>")
 
 	articlePath := "/posts/" + articles[10].PublishedSlug
 	articlePage := assertPublic(articlePath, "article-toc", "章节 11", "上一篇", "下一篇", "继续阅读")

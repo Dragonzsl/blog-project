@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestDefaultThemeSidebarAndArticleDirectoryContracts(t *testing.T) {
+func TestDefaultThemeHeaderAndArticleDirectoryContracts(t *testing.T) {
 	theme, err := NewDefaultTheme(NewMarkdown())
 	if err != nil {
 		t.Fatal(err)
@@ -33,12 +33,9 @@ func TestDefaultThemeSidebarAndArticleDirectoryContracts(t *testing.T) {
 	}
 	page := string(withTOC)
 	for _, expected := range []string{
-		`id="public-sidebar"`,
-		`data-drawer-name="site"`,
-		`aria-label="网站导航"`,
-		`aria-hidden="false"`,
-		`data-sidebar-toggle`,
-		`aria-current="page"`,
+		`class="main-nav"`,
+		`aria-label="主导航"`,
+		`data-search-open`,
 		"工程笔记",
 		"侧边栏设计",
 		`data-drawer-name="toc"`,

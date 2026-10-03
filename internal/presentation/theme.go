@@ -230,19 +230,24 @@ type SearchPageData struct {
 }
 
 type Theme struct {
-	templates    *template.Template
-	markdown     *Markdown
-	css          []byte
-	js           []byte
-	assetHash    string
-	scriptHash   string
-	templateHash string
-	assetURL     string
-	scriptURL    string
-	id           string
-	version      string
-	assetRoot    string
-	settings     map[string]any
+	templates       *template.Template
+	markdown        *Markdown
+	css             []byte
+	js              []byte
+	searchJS        []byte
+	landscape       []byte
+	landscapeHash   string
+	assetHash       string
+	scriptHash      string
+	searchHash      string
+	templateHash    string
+	assetURL        string
+	scriptURL       string
+	searchScriptURL string
+	id              string
+	version         string
+	assetRoot       string
+	settings        map[string]any
 }
 
 func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
@@ -258,16 +263,42 @@ func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read default theme stage six stylesheet: %w", err)
 	}
+	songScrollCSS, err := defaulttheme.Files.ReadFile("assets/theme-song-scroll.css")
+	if err != nil {
+		return nil, fmt.Errorf("read default theme Song scroll stylesheet: %w", err)
+	}
+	roundedCSS, err := defaulttheme.Files.ReadFile("assets/theme-rounded.css")
+	if err != nil {
+		return nil, fmt.Errorf("read default theme rounded stylesheet: %w", err)
+	}
+	landscape, err := defaulttheme.Files.ReadFile("assets/song-ink-landscape-background.webp")
+	if err != nil {
+		return nil, fmt.Errorf("read default theme landscape: %w", err)
+	}
+	landscapeDigest := sha256.Sum256(landscape)
+	landscapeHash := hex.EncodeToString(landscapeDigest[:8])
+	landscapeURL := "/assets/theme/default/" + landscapeHash + "/song-ink-landscape-background.webp"
+	songScrollCSS = bytes.ReplaceAll(songScrollCSS, []byte("__SONG_LANDSCAPE_URL__"), []byte(landscapeURL))
 	css = append(css, '\n')
 	css = append(css, stageSixCSS...)
+	css = append(css, '\n')
+	css = append(css, songScrollCSS...)
+	css = append(css, '\n')
+	css = append(css, roundedCSS...)
 	js, err := defaulttheme.Files.ReadFile("assets/theme.js")
 	if err != nil {
 		return nil, fmt.Errorf("read default theme script: %w", err)
+	}
+	searchJS, err := defaulttheme.Files.ReadFile("assets/theme-search.js")
+	if err != nil {
+		return nil, fmt.Errorf("read default theme search script: %w", err)
 	}
 	hash := sha256.Sum256(css)
 	assetHash := hex.EncodeToString(hash[:8])
 	scriptDigest := sha256.Sum256(js)
 	scriptHash := hex.EncodeToString(scriptDigest[:8])
+	searchDigest := sha256.Sum256(searchJS)
+	searchHash := hex.EncodeToString(searchDigest[:8])
 	templateHasher := sha256.New()
 	entries, err := defaulttheme.Files.ReadDir("templates")
 	if err != nil {
@@ -287,17 +318,22 @@ func NewDefaultTheme(markdown *Markdown) (*Theme, error) {
 	}
 	templateDigest := templateHasher.Sum(nil)
 	return &Theme{
-		templates:    templates,
-		markdown:     markdown,
-		css:          css,
-		js:           js,
-		assetHash:    assetHash,
-		scriptHash:   scriptHash,
-		templateHash: hex.EncodeToString(templateDigest[:8]),
-		assetURL:     "/assets/theme/default/" + assetHash + "/theme.css",
-		scriptURL:    "/assets/theme/default/" + scriptHash + "/theme.js",
-		id:           DefaultThemeID,
-		version:      defaulttheme.Version,
+		templates:       templates,
+		markdown:        markdown,
+		css:             css,
+		js:              js,
+		searchJS:        searchJS,
+		landscape:       landscape,
+		landscapeHash:   landscapeHash,
+		assetHash:       assetHash,
+		scriptHash:      scriptHash,
+		searchHash:      searchHash,
+		templateHash:    hex.EncodeToString(templateDigest[:8]),
+		assetURL:        "/assets/theme/default/" + assetHash + "/theme.css",
+		scriptURL:       "/assets/theme/default/" + scriptHash + "/theme.js",
+		searchScriptURL: "/assets/theme/default/" + searchHash + "/theme-search.js",
+		id:              DefaultThemeID,
+		version:         defaulttheme.Version,
 	}, nil
 }
 
@@ -306,21 +342,30 @@ func (t *Theme) Version() string {
 	if version == "" {
 		version = defaulttheme.Version
 	}
+	searchVersion := ""
+	if t.searchHash != "" {
+		searchVersion = "+" + t.searchHash
+	}
 	if t.templateHash == "" {
 		if t.scriptHash == "" {
 			return version + "+" + t.assetHash
 		}
-		return version + "+" + t.assetHash + "+" + t.scriptHash
+		return version + "+" + t.assetHash + "+" + t.scriptHash + searchVersion
 	}
-	return version + "+" + t.assetHash + "+" + t.scriptHash + "+" + t.templateHash
+	return version + "+" + t.assetHash + "+" + t.scriptHash + searchVersion + "+" + t.templateHash
 }
 
-func (t *Theme) AssetURL() string   { return t.assetURL }
-func (t *Theme) AssetHash() string  { return t.assetHash }
-func (t *Theme) CSS() []byte        { return t.css }
-func (t *Theme) ScriptURL() string  { return t.scriptURL }
-func (t *Theme) ScriptHash() string { return t.scriptHash }
-func (t *Theme) JS() []byte         { return t.js }
+func (t *Theme) AssetURL() string         { return t.assetURL }
+func (t *Theme) AssetHash() string        { return t.assetHash }
+func (t *Theme) CSS() []byte              { return t.css }
+func (t *Theme) Landscape() []byte        { return t.landscape }
+func (t *Theme) LandscapeHash() string    { return t.landscapeHash }
+func (t *Theme) ScriptURL() string        { return t.scriptURL }
+func (t *Theme) ScriptHash() string       { return t.scriptHash }
+func (t *Theme) JS() []byte               { return t.js }
+func (t *Theme) SearchScriptURL() string  { return t.searchScriptURL }
+func (t *Theme) SearchScriptHash() string { return t.searchHash }
+func (t *Theme) SearchJS() []byte         { return t.searchJS }
 
 func (t *Theme) Settings() map[string]any { return cloneSettings(t.settings) }
 
@@ -369,17 +414,19 @@ func (t *Theme) RenderArticlePage(siteName string, article ArticleData, preview 
 		view.UpdatedISO = article.UpdatedAt.UTC().Format(time.RFC3339)
 	}
 	data := map[string]any{
-		"SiteName":   siteName,
-		"AssetURL":   t.assetURL,
-		"ScriptURL":  t.scriptURL,
-		"Preview":    preview,
-		"BackURL":    backURL,
-		"Article":    view,
-		"Navigation": navigation,
-		"Context":    pageContext(navigation),
-		"Features":   navigation.Features,
-		"Settings":   t.settings,
-		"Meta":       metadata,
+		"SiteName":        siteName,
+		"AssetURL":        t.assetURL,
+		"ScriptURL":       t.scriptURL,
+		"SearchScriptURL": t.searchScriptURL,
+		"Preview":         preview,
+		"BackURL":         backURL,
+		"Article":         view,
+		"Navigation":      navigation,
+		"Context":         pageContext(navigation),
+		"Features":        navigation.Features,
+		"Settings":        t.settings,
+		"Search":          SearchPageData{},
+		"Meta":            metadata,
 	}
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "article.html", data); err != nil {
@@ -413,16 +460,18 @@ func (t *Theme) RenderHomePageWithView(siteName string, view HomePageData, navig
 	}
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "home.html", map[string]any{
-		"SiteName":   siteName,
-		"AssetURL":   t.assetURL,
-		"ScriptURL":  t.scriptURL,
-		"Articles":   legacyArticles,
-		"Home":       view,
-		"Navigation": navigation,
-		"Context":    pageContext(navigation),
-		"Features":   navigation.Features,
-		"Settings":   t.settings,
-		"Meta":       metadata,
+		"SiteName":        siteName,
+		"AssetURL":        t.assetURL,
+		"ScriptURL":       t.scriptURL,
+		"SearchScriptURL": t.searchScriptURL,
+		"Articles":        legacyArticles,
+		"Home":            view,
+		"Navigation":      navigation,
+		"Context":         pageContext(navigation),
+		"Features":        navigation.Features,
+		"Settings":        t.settings,
+		"Search":          SearchPageData{},
+		"Meta":            metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default home theme: %w", err)
 	}
@@ -441,10 +490,10 @@ func (t *Theme) RenderCollectionPage(siteName string, collection CollectionView,
 	navigation = withSidebar(navigation)
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "listing.html", map[string]any{
-		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Title": collection.Title,
+		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "SearchScriptURL": t.searchScriptURL, "Title": collection.Title,
 		"Description": collection.Description, "Articles": collection.Items, "Collection": collection,
 		"Pagination": collection.Pagination, "Navigation": navigation, "Context": pageContext(navigation),
-		"Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
+		"Features": navigation.Features, "Settings": t.settings, "Search": SearchPageData{}, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default listing theme: %w", err)
 	}
@@ -455,9 +504,9 @@ func (t *Theme) RenderDirectoryPage(siteName string, directory DirectoryView, na
 	navigation = withSidebar(navigation)
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "directory.html", map[string]any{
-		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Title": directory.Title,
+		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "SearchScriptURL": t.searchScriptURL, "Title": directory.Title,
 		"Description": directory.Description, "Directory": directory, "Navigation": navigation,
-		"Context": pageContext(navigation), "Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
+		"Context": pageContext(navigation), "Features": navigation.Features, "Settings": t.settings, "Search": SearchPageData{}, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render directory theme: %w", err)
 	}
@@ -468,9 +517,9 @@ func (t *Theme) RenderStatusPage(siteName string, status StatusView, navigation 
 	navigation = withSidebar(navigation)
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "status.html", map[string]any{
-		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Status": status,
+		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "SearchScriptURL": t.searchScriptURL, "Status": status,
 		"Navigation": navigation, "Context": pageContext(navigation),
-		"Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
+		"Features": navigation.Features, "Settings": t.settings, "Search": SearchPageData{}, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render status theme: %w", err)
 	}
@@ -481,7 +530,7 @@ func (t *Theme) RenderSearch(siteName string, search SearchPageData, navigation 
 	navigation = withSidebar(navigation)
 	var output bytes.Buffer
 	if err := t.templates.ExecuteTemplate(&output, "search.html", map[string]any{
-		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "Search": search,
+		"SiteName": siteName, "AssetURL": t.assetURL, "ScriptURL": t.scriptURL, "SearchScriptURL": t.searchScriptURL, "Search": search,
 		"Navigation": navigation, "Context": pageContext(navigation), "Features": navigation.Features, "Settings": t.settings, "Meta": metadata,
 	}); err != nil {
 		return nil, fmt.Errorf("render default search theme: %w", err)

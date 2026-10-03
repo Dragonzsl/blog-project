@@ -10,6 +10,9 @@
 !.env.example
 config.local.toml
 secrets/
+!internal/platform/secrets/
+internal/platform/secrets/*
+!internal/platform/secrets/*.go
 
 # Runtime data
 data/

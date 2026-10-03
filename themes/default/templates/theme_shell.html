@@ -6,30 +6,57 @@
 
 {{define "public_sidebar_item"}}<a class="sidebar-link{{if .Active}} is-active{{end}}" href="{{.URL}}"{{if .External}} target="_blank" rel="noopener noreferrer"{{end}}{{if .Active}} aria-current="page"{{end}}><span class="sidebar-link-icon" aria-hidden="true">{{template "public_sidebar_icon" .Icon}}</span><span class="sidebar-link-label">{{.Label}}</span>{{if .Children}}<span class="sidebar-link-chevron" aria-hidden="true">›</span>{{end}}{{if .External}}<span class="sidebar-link-external" aria-hidden="true">↗</span>{{end}}</a>{{if .Children}}<div class="sidebar-children"{{if not .Expanded}} data-collapsed="true"{{end}}>{{range .Children}}{{template "public_sidebar_item" .}}{{end}}</div>{{end}}{{end}}
 
-{{define "public_sidebar"}}<aside id="public-sidebar" class="public-sidebar" data-sidebar-panel data-drawer-name="site" data-sidebar-breakpoint="1439" aria-label="网站导航" aria-hidden="false"><div class="sidebar-heading"><a class="sidebar-brand" href="/"><span class="brand-mark" aria-hidden="true"><svg class="brand-glyph" viewBox="0 0 24 24" focusable="false"><path d="m12 3.5 2.7 5.8 5.8 2.7-2.7-5.8L3.5 12l5.8 2.7 5.8 2.7-2.7-5.8L12 3.5Z"/></svg></span><strong>{{.SiteName}}</strong></a><button class="sidebar-collapse" type="button" data-sidebar-collapse aria-expanded="true" aria-label="收起网站导航"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m14 5-7 7 7 7M7 12h13"/></svg><span class="visually-hidden">收起网站导航</span></button><button class="sidebar-close" type="button" data-sidebar-close aria-label="关闭网站导航"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div><nav class="sidebar-nav" aria-label="网站导航">{{range .Navigation.Sidebar.Sections}}<section class="sidebar-section"><p class="sidebar-section-label">{{.Label}}</p><div class="sidebar-section-links">{{range .Items}}{{template "public_sidebar_item" .}}{{end}}</div></section>{{end}}</nav><div class="sidebar-footer"><div class="sidebar-tools">{{template "theme_toggle" .}}<a class="sidebar-rss" href="/rss.xml"><span class="sidebar-link-icon" aria-hidden="true">{{template "public_sidebar_icon" "rss"}}</span><span>订阅 RSS</span></a></div><p>用心写作，安静发布。</p></div></aside><button class="sidebar-scrim" type="button" data-sidebar-scrim="site" aria-label="关闭网站导航" hidden></button>{{end}}
+{{define "public_sidebar"}}<aside id="public-sidebar" class="public-sidebar" data-sidebar-panel data-drawer-name="site" data-sidebar-breakpoint="1439" aria-label="网站导航" aria-hidden="false"><div class="sidebar-heading"><a class="sidebar-brand" href="/"><span class="brand-mark" aria-hidden="true"><span class="brand-mark-text">山</span></span><strong>{{.SiteName}}</strong></a><button class="sidebar-collapse" type="button" data-sidebar-collapse aria-expanded="true" aria-label="收起网站导航"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m14 5-7 7 7 7M7 12h13"/></svg><span class="visually-hidden">收起网站导航</span></button><button class="sidebar-close" type="button" data-sidebar-close aria-label="关闭网站导航"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg></button></div><nav class="sidebar-nav" aria-label="网站导航">{{range .Navigation.Sidebar.Sections}}<section class="sidebar-section"><p class="sidebar-section-label">{{.Label}}</p><div class="sidebar-section-links">{{range .Items}}{{template "public_sidebar_item" .}}{{end}}</div></section>{{end}}</nav><div class="sidebar-footer"><div class="sidebar-tools">{{template "theme_toggle" .}}<a class="sidebar-rss" href="/rss.xml"><span class="sidebar-link-icon" aria-hidden="true">{{template "public_sidebar_icon" "rss"}}</span><span>订阅 RSS</span></a></div><p>用心写作，安静发布。</p></div></aside><button class="sidebar-scrim" type="button" data-sidebar-scrim="site" aria-label="关闭网站导航" hidden></button>{{end}}
 
 {{define "public_footer"}}<footer class="site-footer"><span>{{.SiteName}}</span><nav aria-label="页脚导航">{{template "footer_navigation" .Navigation.Footer}}</nav></footer>{{end}}
 
 {{define "newsletter_slot"}}<section class="plugin-slot newsletter-slot" id="newsletter" aria-labelledby="newsletter-heading">
-  <div class="plugin-slot-copy"><p class="kicker">Newsletter</p><h2 id="newsletter-heading">把新文章寄给你。</h2><p>不定期发送新文章和最近的思考，可以随时取消订阅。</p></div>
+  <div class="plugin-slot-copy"><p class="kicker">邮件订阅</p><h2 id="newsletter-heading">订阅最新文章</h2><p>通过邮件接收新文章通知，可随时取消订阅。</p></div>
   <form class="newsletter-form" action="/newsletter/subscribe" method="post" data-newsletter-form><label for="newsletter-email">邮箱地址</label><div class="newsletter-form-row"><input id="newsletter-email" name="email" type="email" autocomplete="email" placeholder="you@example.com" required><button type="submit">订阅</button></div><p class="slot-status" data-newsletter-status role="status" aria-live="polite"></p></form>
 </section>{{end}}
 
 {{define "comments_slot"}}<section class="plugin-slot comments-slot" id="comments" aria-labelledby="comments-heading" data-comments-slot data-comments-mode="{{.Features.CommentsMode}}" data-comments-endpoint="/posts/{{.Article.Slug}}/comments">
-  <div class="plugin-slot-heading"><div><p class="kicker">Conversation</p><h2 id="comments-heading">评论。</h2></div><span class="slot-count" data-comments-count aria-label="评论数量"></span></div>
+  <div class="plugin-slot-heading"><div><p class="kicker">文章互动</p><h2 id="comments-heading">评论</h2></div><span class="slot-count" data-comments-count aria-label="评论数量"></span></div>
   <p class="slot-status" data-comments-status role="status" aria-live="polite">正在加载评论…</p><div class="comments-list" data-comments-list></div>
   {{if eq .Features.CommentsMode "local"}}<form class="comments-form" method="post" action="/posts/{{.Article.Slug}}/comments" data-comments-form><div class="comments-form-grid"><label>称呼<input name="display_name" autocomplete="name" maxlength="80" required></label><label>邮箱（不会公开）<input name="email" type="email" autocomplete="email" maxlength="320" required></label><label>网站（可选）<input name="website" type="url" autocomplete="url" maxlength="500" placeholder="https://"></label></div><label>留言<textarea name="body" rows="5" maxlength="5000" required></textarea></label><label class="comment-trap" aria-hidden="true">请留空<input name="website_confirm" tabindex="-1" autocomplete="off"></label><div class="comments-form-actions"><button type="submit">提交评论</button><span>评论会先进入审核队列。</span></div><p class="slot-status" data-comment-form-status role="status" aria-live="polite"></p></form>{{else}}<p class="external-comments-note">评论由外部服务托管。<a href="/posts/{{.Article.Slug}}/comments" data-external-comments-link>打开评论</a></p>{{end}}
 </section>{{end}}
 {{define "public_header"}}
 <header class="site-header">
-  <button class="sidebar-toggle" type="button" data-sidebar-toggle data-sidebar-trigger="site" aria-controls="public-sidebar" aria-expanded="false" aria-label="打开网站导航">
-    <svg class="sidebar-toggle-icon sidebar-toggle-icon-menu" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
-    <svg class="sidebar-toggle-icon sidebar-toggle-icon-close" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m5 5 14 14M19 5 5 19"/></svg>
-    <span class="visually-hidden" data-sidebar-toggle-label>打开网站导航</span>
-  </button>
-  <a class="brand" href="/"><span class="brand-mark" aria-hidden="true"><svg class="brand-glyph" viewBox="0 0 24 24" focusable="false"><path d="m12 3.5 2.7 5.8 5.8 2.7-2.7-5.8L3.5 12l5.8 2.7 5.8 2.7-2.7-5.8L12 3.5Z"/></svg></span><strong>{{.SiteName}}</strong></a>
-  <div class="site-header-tools">{{template "theme_toggle" .}}</div>
+  <a class="brand" href="/" aria-label="{{.SiteName}}首页"><span class="brand-mark" aria-hidden="true"><span class="brand-mark-text">山</span></span><strong>{{.SiteName}}</strong></a>
+  <nav class="main-nav" aria-label="主导航">
+    {{if .Navigation.Sidebar.Sections}}{{with (index .Navigation.Sidebar.Sections 0)}}{{range .Items}}<a href="{{.URL}}"{{if .Active}} aria-current="page"{{end}}>{{.Label}}</a>{{end}}{{end}}{{end}}
+    {{template "primary_navigation" .Navigation.Primary}}
+  </nav>
+  <div class="site-header-tools">
+    <a class="header-search" href="/search" data-search-open aria-label="搜索文章" aria-haspopup="dialog" aria-controls="spotlight-search" aria-expanded="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.7" cy="10.7" r="6.6"/><path d="m16 16 4.2 4.2"/></svg>
+    </a>
+    {{template "theme_toggle" .}}
+  </div>
 </header>
-{{template "public_sidebar" .}}
+<dialog class="spotlight" id="spotlight-search" aria-labelledby="spotlight-title" aria-describedby="spotlight-help"{{if eq .Context.CurrentPath "/search"}} open{{end}}>
+  <div class="spotlight-panel">
+    <h2 class="visually-hidden" id="spotlight-title">搜索文章</h2>
+    <form class="spotlight-search" action="/search" method="get" role="search" data-spotlight-form>
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.7" cy="10.7" r="6.6"/><path d="m16 16 4.2 4.2"/></svg>
+      <label class="visually-hidden" for="spotlight-query">搜索文章标题、内容或标签</label>
+      <input class="spotlight-input" id="spotlight-query" type="search" name="q" value="{{.Search.Query}}" minlength="2" maxlength="100" autocomplete="off" required placeholder="搜索文章标题、内容或标签">
+      <kbd aria-hidden="true">Esc</kbd>
+    </form>
+    <div class="spotlight-content">
+      <div class="spotlight-heading"><strong>搜索结果</strong><span data-search-status role="status" aria-live="polite">{{if .Search.Invalid}}请输入 2–100 个字符。{{else if .Search.Searched}}找到 {{.Search.Total}} 条结果{{else}}输入关键词，搜索已发布的文章{{end}}</span></div>
+      <div class="spotlight-results" data-search-results>
+        {{if .Search.Searched}}
+          {{range .Search.Results}}<a class="spotlight-result" href="{{.Path}}" aria-label="阅读全文：{{.Title}}">
+            <span class="spotlight-result-copy"><strong>{{if .HighlightedTitle}}{{.HighlightedTitle}}{{else}}{{.Title}}{{end}}</strong>{{if .Excerpt}}<p>{{if .HighlightedExcerpt}}{{.HighlightedExcerpt}}{{else}}{{.Excerpt}}{{end}}</p>{{end}}</span>
+            <span class="spotlight-result-meta">{{if .Category}}<span class="tag">{{.Category.Name}}</span>{{end}}{{if .PublishedAt}}<time datetime="{{.PublishedISO}}">{{.PublishedAt}}</time>{{end}}</span>
+          </a>{{else}}<p class="spotlight-empty">没有找到相关文章，请尝试其他关键词。</p>{{end}}
+          {{template "pagination" .Search.Pagination}}
+        {{else if .Search.Invalid}}<p class="spotlight-empty">请输入 2–100 个字符后再搜索。</p>{{end}}
+      </div>
+    </div>
+    <div class="spotlight-footer" id="spotlight-help"><span><kbd>Enter</kbd> 搜索文章</span><span><kbd>⌘ K</kbd> / <kbd>Ctrl K</kbd> 打开搜索</span><a href="/" data-search-close>关闭</a></div>
+  </div>
+</dialog>
 <button class="back-to-top" type="button" data-back-to-top aria-label="回到顶部" hidden><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="7" data-back-to-top-progress/><path d="m8.5 12.5 3.5-3.5 3.5 3.5M12 9v7"/></svg><span class="visually-hidden">回到顶部</span></button>
 {{end}}

@@ -23,7 +23,7 @@ func TestStageSixAdaptiveReadingContracts(t *testing.T) {
 	page := string(withTOC)
 	for _, expected := range []string{
 		`data-sidebar-breakpoint="1439"`,
-		`data-sidebar-collapse`,
+		`data-search-open`,
 		`data-toc-collapse`,
 		`data-back-to-top`,
 		`data-theme-mode="system"`,

@@ -4,14 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f7f5ef" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#111713" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f4f1e8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#202722" media="(prefers-color-scheme: dark)">
   {{template "theme_bootstrap" .}}
   <title>{{if .Meta.Title}}{{.Meta.Title}}{{else}}{{.Article.Title}} · {{.SiteName}}{{end}}</title>
   {{if .Meta.Description}}<meta name="description" content="{{.Meta.Description}}">{{else if .Article.Excerpt}}<meta name="description" content="{{.Article.Excerpt}}">{{end}}
   {{template "page_metadata" .Meta}}
   <link rel="stylesheet" href="{{.AssetURL}}">
   {{if .ScriptURL}}<script src="{{.ScriptURL}}" defer></script>{{end}}
+  {{if .SearchScriptURL}}<script src="{{.SearchScriptURL}}" defer></script>{{end}}
 </head>
 <body class="article-page">
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -20,10 +21,10 @@
   <main id="main-content">
     <div class="reading-progress" aria-hidden="true"><span data-reading-progress></span></div>
     <article class="article{{if .Article.TOC}} article-with-toc{{else}} article-without-toc{{end}}">
-      <nav class="article-nav" aria-label="文章导航"><a class="back-link" href="/"><span aria-hidden="true">←</span> 返回文章</a></nav>
+      <nav class="article-nav" aria-label="文章导航"><a class="back-link" href="/articles"><span aria-hidden="true">←</span> 返回文章</a></nav>
       <header class="article-header">
         <div class="article-header-main">
-          <p class="kicker">{{if eq .Article.Kind "page"}}Page{{else}}Essay{{end}}</p>
+          <p class="kicker">{{if eq .Article.Kind "page"}}页面{{else}}文章{{end}}</p>
           <h1>{{.Article.Title}}</h1>
           {{if .Article.Excerpt}}<p class="deck">{{.Article.Excerpt}}</p>{{end}}
           <div class="article-meta">
@@ -53,9 +54,9 @@
       {{end}}
       {{if .Article.Related}}
       <section class="related-articles" aria-labelledby="related-heading">
-        <p class="kicker">Keep reading</p>
+        <p class="kicker">相关文章</p>
         <h2 id="related-heading">继续阅读</h2>
-        <div>{{range .Article.Related}}<a href="{{.Path}}"><span>{{if .Category}}{{.Category.Name}}{{else}}Essay{{end}}</span><strong>{{.Title}}</strong>{{if .ReadingTime}}<small class="article-reading-time">{{.ReadingTime}} 分钟阅读</small>{{end}}</a>{{end}}</div>
+        <div>{{range .Article.Related}}<a href="{{.Path}}"><span>{{if .Category}}{{.Category.Name}}{{else}}文章{{end}}</span><strong>{{.Title}}</strong>{{if .ReadingTime}}<small class="article-reading-time">{{.ReadingTime}} 分钟阅读</small>{{end}}</a>{{end}}</div>
       </section>
       {{end}}
       {{if .Features.Comments}}{{template "comments_slot" .}}{{end}}

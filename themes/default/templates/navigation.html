@@ -10,7 +10,7 @@
 {{define "footer_navigation"}}
   {{range .}}
   <span class="footer-group"><a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{range .Children}}<a href="{{.URL}}" {{if .External}}target="_blank" rel="noopener noreferrer"{{end}}>{{.Label}}</a>{{end}}</span>
-  {{else}}<span>用心写作，安静发布。</span>{{end}}<a href="/rss.xml">RSS</a>
+  {{else}}<span>个人博客 · 文章与记录</span>{{end}}<a href="/rss.xml">RSS</a>
 {{end}}
 
 {{define "page_metadata"}}

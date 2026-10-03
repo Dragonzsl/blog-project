@@ -115,7 +115,7 @@ func TestPhaseTwoPublicDiscoveryAndReadingExperience(t *testing.T) {
 		return response.Body.String()
 	}
 
-	assertPage("/", "精选文章", "最近文章", "从主题开始", "按时间浏览", "关于这个地方")
+	assertPage("/", "推荐文章", "最新文章", "文章归档", "spotlight-search")
 	assertPage("/categories", "分类", "设计系统", "2 篇文章")
 	assertPage("/tags", "标签", "# 出版", "2 篇")
 	archive := assertPage("/archive", "归档", "按时间浏览", "篇")
@@ -124,10 +124,11 @@ func TestPhaseTwoPublicDiscoveryAndReadingExperience(t *testing.T) {
 	}
 	monthPath := fmt.Sprintf("/archive/%04d/%02d", first.PublishedAt.UTC().Year(), int(first.PublishedAt.UTC().Month()))
 	assertPage(monthPath, "高级博客的阅读路径", "这一时间段共发布")
-	search := assertPage("/search?q=高级博客&category=design&tag=publishing", "找到 1 项结果", "<mark>高级博客</mark>", "设计系统", "# 出版")
-	if !strings.Contains(search, `name="category"`) || !strings.Contains(search, `value="design" selected`) {
-		t.Fatalf("search filters did not retain selection: %s", search)
+	search := assertPage("/search?q=高级博客&category=design&tag=publishing", "找到 1 条结果", "<mark>高级博客</mark>")
+	if !strings.Contains(search, `data-search-results`) || !strings.Contains(search, `name="q"`) {
+		t.Fatal("search response must retain the accessible keyword form and results")
 	}
+
 	article := assertPage("/posts/"+first.PublishedSlug, "reading-progress", "data-reading-progress", "data-copy-link", "data-share-link", "data-print-article", "本文目录", "data-drawer-name=\"toc\"", "article-layout", "blog-theme", "data-theme-toggle")
 	if !strings.Contains(article, theme.ScriptURL()) {
 		t.Fatalf("article script URL missing: %s", article)
